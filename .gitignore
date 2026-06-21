@@ -1,0 +1,83 @@
+# =============================================================================
+# Crucible — Generated/Build artifacts
+# =============================================================================
+
+# CMake
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# C/C++ object/dependency/binary files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.idb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# Rust / WASM
+cli/target/
+wasm/target/
+wasm/pkg/
+Cargo.lock.bak
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Model artifacts (large)
+models/*.onnx
+models/*.pt
+models/*.pth
+!models/.gitkeep
+!models/download_models.py
+
+# Benchmark outputs
+benchmarks/results/*.json
+!benchmarks/results/.gitkeep
+
+# Environment
+.env
+.env.local
