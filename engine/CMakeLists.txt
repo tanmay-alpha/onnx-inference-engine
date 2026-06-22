@@ -81,6 +81,8 @@ endif()
 # the design is being implemented.
 set(CRUCIBLE_CORE_SOURCES
     src/tensor.cpp
+    src/onnx_parser.cpp
+    src/ops/linear.cpp
 )
 
 add_library(crucible_core STATIC ${CRUCIBLE_CORE_SOURCES})
