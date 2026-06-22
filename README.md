@@ -132,7 +132,16 @@ The presets live in [CMakePresets.json](./CMakePresets.json) and inherit sane de
 > ✅ `at()` with bounds checking, row-major layout.
 > ✅ 16 GoogleTest cases in [engine/tests/test_tensor.cpp](./engine/tests/test_tensor.cpp) — acceptance criterion met.
 
-Up next: Issue #3 (Tensor operations — `reshape`, `flatten`, `print`).
+## Issue #3 status
+
+> **Tensor operations — reshape, flatten, print** — ✅ merged.
+> ✅ `reshape(new_shape) const` — row-major data preserved, throws on size mismatch / negative dim.
+> ✅ `flatten() const` — 1-D view of all elements, returns shape `{N}`.
+> ✅ `print(max_elements = 10) const` — writes to stdout; `print_to(ostream, …)` for testability. Truncates with `…` past the limit.
+> ✅ 22 GoogleTest cases in [engine/tests/test_tensor_ops.cpp](./engine/tests/test_tensor_ops.cpp) — well over the 4 required by the plan.
+> ✅ Bug fix: zero is now a valid dimension (matches NumPy). Negative dims still rejected.
+
+Up next: Issue #4 (ONNX protobuf parser).
 
 ---
 

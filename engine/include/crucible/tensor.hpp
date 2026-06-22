@@ -22,9 +22,14 @@
 //     checks are the difference between a confusing segfault and a clear
 //     error message when models are malformed. They cost ~2 ns per call —
 //     a rounding error compared to the operator work.
+//   - reshape / flatten: return NEW tensors (no aliasing). Source untouched.
+//     Copying a 224*224*3 float buffer is 600 KB — cheap, and removes a
+//     whole class of lifetime bugs that would only surface in Issue #9
+//     (graph executor) and #10 (end-to-end inference).
 // =============================================================================
 
 #include <cstdint>
+#include <iosfwd>
 #include <vector>
 
 namespace crucible {
@@ -38,8 +43,7 @@ public:
     Tensor() = default;
 
     /// Allocate `prod(shape)` floats initialised to `fill`.
-    /// Throws std::invalid_argument if any dimension is negative or zero
-    /// (zero-rank tensors are still representable — see Tensor()).
+    /// Throws std::invalid_argument if any dimension is non-positive.
     explicit Tensor(std::vector<int64_t> shape, float fill = 0.0f);
 
     /// Wrap a caller-owned buffer. The data is copied (no aliasing).
@@ -63,6 +67,28 @@ public:
     /// Throws std::out_of_range if rank mismatches or any index is out of range.
     float&       at(const std::vector<int64_t>& indices);
     const float& at(const std::vector<int64_t>& indices) const;
+
+    // ---- Shape operations (Issue #3) ----------------------------------------
+
+    /// Return a new tensor with the same data viewed under a different shape.
+    /// Total element count must match. Throws std::invalid_argument otherwise
+    /// (or if any new dimension is non-positive).
+    /// Source tensor is unchanged.
+    Tensor reshape(std::vector<int64_t> new_shape) const;
+
+    /// Return a 1-D tensor containing all elements in row-major order.
+    /// Equivalent to reshape({size()}); for an empty tensor, returns another
+    /// empty tensor.
+    Tensor flatten() const;
+
+    /// Print a human-readable representation to std::cout. Truncates after
+    /// `max_elements` values to keep large tensors readable. Use
+    /// `print_to(ostream, …)` for testable output.
+    void print(int max_elements = 10) const;
+
+    /// Print to the supplied ostream. Same format as `print()`; this is the
+    /// underlying implementation. Exposed publicly for unit tests.
+    void print_to(std::ostream& os, int max_elements = 10) const;
 
 private:
     std::vector<int64_t> shape_;

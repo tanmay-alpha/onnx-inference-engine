@@ -1,6 +1,11 @@
 #include "crucible/tensor.hpp"
 
+#include <algorithm>
+#include <iostream>
+#include <iterator>
 #include <numeric>
+#include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -12,16 +17,19 @@ namespace {
 // Internal helpers
 // -----------------------------------------------------------------------------
 
-// Return the product of all dimensions in a shape. Returns 1 for empty shape
-// (so that Tensor() — rank 0 — has size 0, not 1, by special-casing at the
-// call site rather than here). For non-empty shapes, throws if any dim <= 0.
+// Return the product of all dimensions in a shape. Returns 0 for an empty
+// shape (so that Tensor() — rank 0 — has size 0, by convention). For
+// non-empty shapes, throws if any dim <= 0.
 int64_t shape_product_or_throw(const std::vector<int64_t>& shape) {
     if (shape.empty()) return 0;            // rank-0 tensor
+    // A dimension of 0 is legal (matches NumPy `np.zeros((3, 0, 5))` — empty
+    // along that axis). The product of any shape containing a 0 is 0, which
+    // is the desired behaviour for size(). We only reject NEGATIVE dims.
     int64_t product = 1;
     for (int64_t d : shape) {
-        if (d <= 0) {
+        if (d < 0) {
             throw std::invalid_argument(
-                "Tensor: shape dimensions must be positive, got " +
+                "Tensor: shape dimensions must be non-negative, got " +
                 std::to_string(d));
         }
         product *= d;
@@ -114,6 +122,71 @@ int64_t Tensor::compute_offset(const std::vector<int64_t>& indices) const {
         offset += idx * stride;
     }
     return offset;
+}
+
+// -----------------------------------------------------------------------------
+// Shape operations (Issue #3)
+// -----------------------------------------------------------------------------
+
+Tensor Tensor::reshape(std::vector<int64_t> new_shape) const {
+    // Validate the new shape first — this catches negative / zero dimensions
+    // before we compare sizes. shape_product_or_throw throws std::invalid_argument.
+    const int64_t new_total = shape_product_or_throw(new_shape);
+
+    // If the new total differs from the current one, reject. Special case:
+    // both rank-0 (new_total = old_total = 0) is allowed.
+    if (new_total != size()) {
+        throw std::invalid_argument(
+            "Tensor::reshape: cannot reshape size " + std::to_string(size()) +
+            " into shape with product " + std::to_string(new_total));
+    }
+
+    // Build the result. The data buffer is copied (no aliasing); the plan
+    // promises Tensor is its own copy on every operation.
+    Tensor out(std::move(new_shape));
+    out.data_ = data_;   // copy
+    return out;
+}
+
+Tensor Tensor::flatten() const {
+    // For a non-empty tensor, new shape is {size()}.
+    // For an empty tensor, new shape is also {0} (size() == 0).
+    //   That keeps the result type-consistent: rank-1, length 0.
+    return reshape({size()});
+}
+
+void Tensor::print(int max_elements) const {
+    print_to(std::cout, max_elements);
+}
+
+void Tensor::print_to(std::ostream& os, int max_elements) const {
+    if (max_elements < 0) {
+        // Negative limit is a programming error — report it but don't crash.
+        // Negative effectively means "print nothing"; we keep that as a no-op
+        // (caller can pass 0 explicitly if that's what they want).
+        max_elements = 0;
+    }
+
+    // Header line: shape and total element count.
+    os << "Tensor shape=[";
+    for (size_t i = 0; i < shape_.size(); ++i) {
+        if (i > 0) os << ", ";
+        os << shape_[i];
+    }
+    os << "]  size=" << size() << "\n";
+
+    // Data line: print up to max_elements values, then "..." if truncated.
+    os << "  data = [";
+    const int64_t n = std::min<int64_t>(size(), max_elements);
+    for (int64_t i = 0; i < n; ++i) {
+        if (i > 0) os << ", ";
+        os << data_[static_cast<size_t>(i)];
+    }
+    if (size() > max_elements) {
+        if (n > 0) os << ", ";
+        os << "...";
+    }
+    os << "]\n";
 }
 
 } // namespace crucible
