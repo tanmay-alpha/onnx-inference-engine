@@ -232,3 +232,46 @@ TEST(ActivationsTest, GeluSourceUnchanged) {
         EXPECT_FLOAT_EQ(input.data()[i], snapshot.data()[i]);
     }
 }
+
+// -----------------------------------------------------------------------
+// Empty / zero-sized inputs — regression tests for code-review Issues #1
+// and #2. softmax_forward used to compute 0/0 on a 0-sized softmax axis
+// (e.g. shape {0} or {2,0}); the new code returns a zero tensor of the
+// same shape and never divides by zero.
+// -----------------------------------------------------------------------
+
+TEST(ActivationsTest, SoftmaxEmptyRank1) {
+    // Issue #1 regression: shape {0} used to compute 0/0.
+    Tensor input({0}, std::vector<float>{});
+    Tensor output = softmax_forward(input, kNoAttrs);
+    EXPECT_EQ(output.size(), 0);
+    EXPECT_EQ(output.shape(), (std::vector<int64_t>{0}));
+}
+
+TEST(ActivationsTest, SoftmaxEmptyRank2AxisDimZero) {
+    // Issue #1 regression: shape {2, 0} (rank-2, axis=1 has dim 0).
+    Tensor input({2, 0}, std::vector<float>{});
+    Tensor output = softmax_forward(input, kNoAttrs);
+    EXPECT_EQ(output.size(), 0);
+    EXPECT_EQ(output.shape(), (std::vector<int64_t>{2, 0}));
+}
+
+TEST(ActivationsTest, SoftmaxEmptyRank3) {
+    // Issue #1 regression: shape {3, 0, 5} — empty on the middle axis.
+    Tensor input({3, 0, 5}, std::vector<float>{});
+    Tensor output = softmax_forward(input, kNoAttrs);
+    EXPECT_EQ(output.size(), 0);
+    EXPECT_EQ(output.shape(), (std::vector<int64_t>{3, 0, 5}));
+}
+
+TEST(ActivationsTest, ReluSigmoidGeluEmptyInputs) {
+    // All four activation ops should be safe on empty inputs.
+    Tensor empty1d({0}, std::vector<float>{});
+    Tensor empty2d({2, 0}, std::vector<float>{});
+    EXPECT_EQ(relu_forward(empty1d,    kNoAttrs).size(), 0);
+    EXPECT_EQ(relu_forward(empty2d,    kNoAttrs).size(), 0);
+    EXPECT_EQ(sigmoid_forward(empty1d, kNoAttrs).size(), 0);
+    EXPECT_EQ(sigmoid_forward(empty2d, kNoAttrs).size(), 0);
+    EXPECT_EQ(gelu_forward(empty1d,    kNoAttrs).size(), 0);
+    EXPECT_EQ(gelu_forward(empty2d,    kNoAttrs).size(), 0);
+}
