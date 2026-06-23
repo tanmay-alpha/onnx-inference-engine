@@ -85,6 +85,8 @@ set(CRUCIBLE_CORE_SOURCES
     src/ops/linear.cpp
     src/ops/activations.cpp
     src/ops/conv2d.cpp
+    src/ops/pooling.cpp
+    src/ops/norm.cpp
 )
 
 add_library(crucible_core STATIC ${CRUCIBLE_CORE_SOURCES})
