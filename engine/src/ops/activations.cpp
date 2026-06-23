@@ -56,6 +56,14 @@ view1d(Tensor& t) {
 inline Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic,
                                        Eigen::Dynamic, Eigen::RowMajor>>
 view2d(const Tensor& t) {
+    // Refuse non-rank-2 tensors up front: t.shape()[1] is out-of-bounds
+    // for rank 0 / 1, and any caller that ignores the rank requirement
+    // would get a silent OOB read on std::vector. Throw loudly instead.
+    if (t.rank() != 2) {
+        throw std::invalid_argument(
+            "view2d: tensor must be rank-2 (got rank " +
+            std::to_string(t.rank()) + ")");
+    }
     return Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic,
                                           Eigen::Dynamic, Eigen::RowMajor>>(
         t.data(), t.shape()[0], t.shape()[1]);
@@ -64,6 +72,11 @@ view2d(const Tensor& t) {
 inline Eigen::Map<Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic,
                                  Eigen::RowMajor>>
 view2d(Tensor& t) {
+    if (t.rank() != 2) {
+        throw std::invalid_argument(
+            "view2d: tensor must be rank-2 (got rank " +
+            std::to_string(t.rank()) + ")");
+    }
     return Eigen::Map<Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic,
                                     Eigen::RowMajor>>(
         t.data(), t.shape()[0], t.shape()[1]);
@@ -128,6 +141,13 @@ Tensor sigmoid_forward(const Tensor& input,
 
 Tensor softmax_forward(const Tensor& input,
                        const std::unordered_map<std::string, float>& attrs) {
+    // Empty input is a no-op, matching relu_forward / sigmoid_forward /
+    // gelu_forward. The guard MUST come before the axis_dim division
+    // below, otherwise an input with a 0-sized softmax axis (e.g. shape
+    // {0} or {2,0}) would compute 0/0 — undefined behaviour.
+    Tensor out(input.shape(), 0.0f);
+    if (input.size() == 0) return out;
+
     int64_t axis = resolve_axis(input, static_cast<int64_t>(
                                        get_attr(attrs, "axis", -1.0f)));
     if (axis != input.rank() - 1) {
@@ -147,12 +167,14 @@ Tensor softmax_forward(const Tensor& input,
 
     int64_t axis_dim = input.shape()[axis];
     int64_t outer = input.size() / axis_dim;
-    if (outer == 0) return Tensor(input.shape(), 0.0f);
+    if (outer == 0) return out;  // size() == 0 already handled above;
+                                 // outer == 0 means axis_dim > size(), which
+                                 // is impossible since axis_dim is a dim of
+                                 // the input and the product of dims = size().
 
     // View input as (outer x axis_dim) row-major. For rank-1 inputs
     // we use a VectorXf to avoid Eigen 3.3 Map base assertions on
     // (1, N) bindings.
-    Tensor out(input.shape(), 0.0f);
     if (input.rank() == 1) {
         Eigen::VectorXf in = view1d(input);
         Eigen::VectorXf outv(axis_dim);
