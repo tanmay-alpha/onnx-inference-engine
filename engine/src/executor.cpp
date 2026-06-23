@@ -467,6 +467,18 @@ Tensor run_inference(const Model& model,
                 : ops::avgpool_forward(X, kH, kW, sH, sW, pH, pW);
             for (const auto& o : outs) tensor_map[o] = Y;
         }
+        // --- GlobalAveragePool --------------------------------------
+        // Issue #10 — added so the executor can run MobileNetV2 and
+        // ResNet18 end-to-end. The op has no attributes in practice
+        // (no kernel, no stride, no pad: the window IS the full
+        // spatial plane).
+        else if (op == "GlobalAveragePool") {
+            if (ins.empty()) throw std::runtime_error(
+                "GlobalAveragePool '" + node.name + "': need 1 input");
+            const Tensor& X = require_tensor(tensor_map, ins[0]);
+            Tensor Y = ops::global_avgpool_forward(X);
+            for (const auto& o : outs) tensor_map[o] = Y;
+        }
         // --- BatchNormalization -------------------------------------
         else if (op == "BatchNormalization") {
             // ONNX v15 BatchNormalization: X, scale, B, input_mean,

@@ -22,6 +22,7 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -238,4 +239,55 @@ TEST(Executor, DanglingInputThrows) {
     Tensor A({1}, {1.0f});
     std::unordered_map<std::string, Tensor> inputs{{"A", A}};
     EXPECT_THROW(run_inference(model, inputs), std::runtime_error);
+}
+
+// -----------------------------------------------------------------------
+// Issue #10: end-to-end MobileNetV2.
+//
+// Loads the real mobilenet-v2-7.onnx from the model zoo, feeds a zero
+// tensor of shape (1, 3, 224, 224), and asserts that:
+//   * run_inference returns a tensor of shape (1, 1000) (the
+//     ImageNet-1k classifier head)
+//   * it does so without crashing
+//
+// We don't assert the top-1 class index here — that needs a real
+// ImageNet image and is covered by the benchmarks/ scripts in
+// Issue #14. The AC for Issue #10 is "shape (1, 1000), no crash".
+//
+// The test path is `../../models/mobilenet_v2.onnx` relative to the
+// test working directory, which is `engine/build/{preset}/`. Both
+// `cmake --preset debug` and `cmake --preset release` set up the
+// ctest cwd this way.
+// -----------------------------------------------------------------------
+
+TEST(Executor, RunsMobileNetV2Shape) {
+    // Skip gracefully if the model file isn't present — local
+    // developers may run the test suite before the download script.
+    // CI downloads the model as a separate job before this test
+    // runs, so the skip-path is never taken in CI.
+    const std::string model_path = "../../models/mobilenet_v2.onnx";
+    std::ifstream probe(model_path);
+    if (!probe.good()) {
+        GTEST_SKIP() << "mobilenet_v2.onnx not found at " << model_path
+                     << "; run `python models/download_models.py` first";
+    }
+    probe.close();
+
+    Model model = load_model(model_path);
+
+    // Zero input of the canonical ImageNet shape. We use zeros
+    // because we only check the output *shape* here — actual
+    // numerical correctness (top-1 vs ONNX Runtime) is a benchmark
+    // concern, not a unit-test one.
+    Tensor input({1, 3, 224, 224}, 0.0f);
+
+    // The graph's only input is named "data" in the model zoo
+    // mobilenetv2 export; pass it through with that key.
+    std::unordered_map<std::string, Tensor> inputs{{"data", input}};
+
+    Tensor output = run_inference(model, inputs);
+
+    EXPECT_EQ(output.shape().size(), 2u);
+    EXPECT_EQ(output.shape()[0], 1);
+    EXPECT_EQ(output.shape()[1], 1000);
 }
