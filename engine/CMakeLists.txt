@@ -83,6 +83,7 @@ set(CRUCIBLE_CORE_SOURCES
     src/tensor.cpp
     src/onnx_parser.cpp
     src/ops/linear.cpp
+    src/ops/activations.cpp
 )
 
 add_library(crucible_core STATIC ${CRUCIBLE_CORE_SOURCES})
