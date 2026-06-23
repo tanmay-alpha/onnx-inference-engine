@@ -20,6 +20,7 @@
 using crucible::Tensor;
 using crucible::ops::maxpool_forward;
 using crucible::ops::avgpool_forward;
+using crucible::ops::global_avgpool_forward;
 
 namespace {
 
@@ -277,4 +278,79 @@ TEST(AvgPool, SourceUnchanged) {
     for (int64_t i = 0; i < X.size(); ++i) {
         EXPECT_FLOAT_EQ(X.data()[i], X_before.data()[i]);
     }
+}
+
+// -----------------------------------------------------------------------
+// GlobalAveragePool — Issue #10.
+//
+// Used by MobileNetV2 and ResNet18 as the classifier head (the layer
+// right before the final fully-connected layer). Each (N, C) feature
+// map reduces to a single scalar by averaging the full H*W plane.
+//
+// The expected output is (N, C, 1, 1) — keeping the spatial dims as 1
+// preserves the (N, C, H, W) layout invariant that downstream 1x1
+// convolutions and Gemm ops rely on.
+// -----------------------------------------------------------------------
+
+TEST(GlobalAveragePool, HalvesToOnes) {
+    // 1x1x2x2 of all 1s → mean is 1.0 in the single (n=0, c=0) slot.
+    Tensor X({1, 1, 2, 2}, {1, 1, 1, 1});
+    Tensor Y = global_avgpool_forward(X);
+    ASSERT_EQ(Y.shape().size(), 4u);
+    EXPECT_EQ(Y.shape()[0], 1);
+    EXPECT_EQ(Y.shape()[1], 1);
+    EXPECT_EQ(Y.shape()[2], 1);
+    EXPECT_EQ(Y.shape()[3], 1);
+    EXPECT_FLOAT_EQ(Y.data()[0], 1.0f);
+}
+
+TEST(GlobalAveragePool, KnownMean) {
+    // 1x1x2x2 with values 1..4 → mean = (1+2+3+4)/4 = 2.5.
+    Tensor X({1, 1, 2, 2}, {1, 2, 3, 4});
+    Tensor Y = global_avgpool_forward(X);
+    EXPECT_FLOAT_EQ(Y.data()[0], 2.5f);
+}
+
+TEST(GlobalAveragePool, PerChannelMeans) {
+    // 1x2x2x2: channel 0 = [1..4], channel 1 = [5..8].
+    // Expected means: 2.5 and 6.5.
+    Tensor X({1, 2, 2, 2}, {
+        1, 2, 3, 4,
+        5, 6, 7, 8
+    });
+    Tensor Y = global_avgpool_forward(X);
+    EXPECT_EQ(Y.shape()[0], 1);
+    EXPECT_EQ(Y.shape()[1], 2);
+    EXPECT_EQ(Y.shape()[2], 1);
+    EXPECT_EQ(Y.shape()[3], 1);
+    EXPECT_FLOAT_EQ(Y.data()[0], 2.5f);
+    EXPECT_FLOAT_EQ(Y.data()[1], 6.5f);
+}
+
+TEST(GlobalAveragePool, BatchIndependence) {
+    // 2x1x2x2: batch 0 = [1..4], batch 1 = [9,9,9,9] → means 2.5 and 9.0.
+    Tensor X({2, 1, 2, 2}, {
+        1, 2, 3, 4,
+        9, 9, 9, 9
+    });
+    Tensor Y = global_avgpool_forward(X);
+    EXPECT_FLOAT_EQ(Y.data()[0], 2.5f);
+    EXPECT_FLOAT_EQ(Y.data()[1], 9.0f);
+}
+
+TEST(GlobalAveragePool, SourceImmutable) {
+    // GlobalAveragePool must not mutate its input — same contract as
+    // every other operator in this codebase.
+    Tensor X({1, 1, 2, 2}, {1, 2, 3, 4});
+    const Tensor X_before = X;
+    (void)global_avgpool_forward(X);
+    for (int64_t i = 0; i < X.size(); ++i) {
+        EXPECT_FLOAT_EQ(X.data()[i], X_before.data()[i]);
+    }
+}
+
+TEST(GlobalAveragePool, RejectsNonRank4) {
+    // Rank-3 input must throw — the operator is explicitly 2D-only.
+    Tensor X({2, 2, 2}, {1, 2, 3, 4, 5, 6, 7, 8});
+    EXPECT_THROW(global_avgpool_forward(X), std::invalid_argument);
 }

@@ -155,4 +155,53 @@ Tensor avgpool_forward(const Tensor& x,
     return y;
 }
 
+// --------------------------------------------------------------------
+// GlobalAveragePool — Issue #10.
+//
+// Reduces each (N, C) feature map to a single scalar by averaging the
+// full H*W plane. Output shape is (N, C, 1, 1); the unit spatial
+// dims are kept so the classifier head that follows (1x1 conv or Gemm)
+// gets an unambiguous rank.
+//
+// The kernel here is implicit (H, W) and the stride is implicit-1 —
+// every input element is summed exactly once. count_include_pad has
+// no effect (the window IS the input, so padding is the no-op).
+//
+// This is the head used by MobileNetV2 and ResNet (right before the
+// final fully-connected layer). Without it, end-to-end inference of
+// either model would crash with "unknown op_type GlobalAveragePool".
+//
+// --------------------------------------------------------------------
+Tensor global_avgpool_forward(const Tensor& x) {
+    const auto& s = x.shape();
+    if (s.size() != 4) {
+        throw std::invalid_argument(
+            "GlobalAveragePool: expected rank-4 input (N, C, H, W), got rank " +
+            std::to_string(s.size()));
+    }
+    const int64_t N = s[0];
+    const int64_t C = s[1];
+    const int64_t H = s[2];
+    const int64_t W = s[3];
+
+    // Output keeps the spatial dims as 1 so the downstream 1x1 conv /
+    // Gemm sees a clean (N, C, 1, 1) tensor and the (N, C, H, W)
+    // layout invariant is preserved across the head.
+    Tensor y({N, C, 1, 1}, 0.0f);
+    const float denom = static_cast<float>(H) * static_cast<float>(W);
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            const float* xc = x.data() + (n * C + c) * H * W;
+            float sum = 0.0f;
+            // Manual reduction beats std::accumulate here because it
+            // avoids the function-call indirection per element on
+            // debug builds, and lets the compiler auto-vectorise the
+            // contiguous W-axis loop on release.
+            for (int64_t i = 0; i < H * W; ++i) sum += xc[i];
+            y.at({n, c, 0, 0}) = sum / denom;
+        }
+    }
+    return y;
+}
+
 }  // namespace crucible::ops
