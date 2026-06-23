@@ -34,7 +34,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CRUCIBLE_ENABLE_TESTS": "ON",
         "CRUCIBLE_ENABLE_BENCHMARKS": "ON",
-        "CRUCIBLE_ENABLE_PYTHON_BINDINGS": "ON"
+        "CRUCIBLE_ENABLE_PYTHON_BINDINGS": "ON",
+        "CRUCIBLE_MARCH_NATIVE": "ON"
       }
     }
   ],
