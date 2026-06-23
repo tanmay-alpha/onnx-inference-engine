@@ -82,6 +82,7 @@ endif()
 set(CRUCIBLE_CORE_SOURCES
     src/tensor.cpp
     src/onnx_parser.cpp
+    src/executor.cpp
     src/ops/linear.cpp
     src/ops/activations.cpp
     src/ops/conv2d.cpp
