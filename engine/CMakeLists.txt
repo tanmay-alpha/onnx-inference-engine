@@ -84,6 +84,7 @@ set(CRUCIBLE_CORE_SOURCES
     src/onnx_parser.cpp
     src/ops/linear.cpp
     src/ops/activations.cpp
+    src/ops/conv2d.cpp
 )
 
 add_library(crucible_core STATIC ${CRUCIBLE_CORE_SOURCES})
