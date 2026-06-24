@@ -88,11 +88,41 @@ set(CRUCIBLE_CORE_SOURCES
     src/ops/conv2d.cpp
     src/ops/pooling.cpp
     src/ops/norm.cpp
+    # Issue #15: C ABI for the Rust CLI / WASM bindings.
+    # Built into the static core so the symbols are always available;
+    # also exported via the SHARED library below for the FFI consumers.
+    src/c_api.cpp
 )
 
 add_library(crucible_core STATIC ${CRUCIBLE_CORE_SOURCES})
 
 add_library(crucible::core ALIAS crucible_core)
+
+# -----------------------------------------------------------------------------
+# Shared library: crucible (the artifact consumed by the Rust CLI)
+# -----------------------------------------------------------------------------
+# Issue #15: the Rust CLI links against the SHARED library at runtime
+# (libcrucible.so / libcrucible.dylib / crucible.dll). We mirror the
+# static core's sources into the shared target so the C ABI symbols
+# are visible in exactly one place. BUILD_SHARED_LIBS is OFF by
+# default to keep the static-core path the default for tests/bench;
+# enable with -DCRUCIBLE_BUILD_SHARED=ON when building for the CLI.
+option(CRUCIBLE_BUILD_SHARED "Build shared library (libcrucible) for FFI" OFF)
+if(CRUCIBLE_BUILD_SHARED)
+    add_library(crucible SHARED ${CRUCIBLE_CORE_SOURCES})
+    add_library(crucible::shared ALIAS crucible)
+    target_include_directories(crucible
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_link_libraries(crucible PUBLIC crucible_core)
+    target_compile_definitions(crucible PRIVATE CRUCIBLE_BUILDING_DLL=1)
+    set_target_properties(crucible PROPERTIES
+        VERSION   ${PROJECT_VERSION}
+        SOVERSION ${PROJECT_VERSION_MAJOR}
+    )
+endif()
 
 target_include_directories(crucible_core
     PUBLIC
