@@ -88,15 +88,34 @@ COPY --from=cpp-builder /crucible/build/release/python/ /crucible/build/release/
 # restarts by mounting a volume here.
 RUN mkdir -p /crucible/models
 
+# Create a non-root user and hand ownership of everything over
+# to them. Running as root in the container means a single RCE
+# bug becomes host root; running as uid 1000 limits blast
+# radius to whatever the user can do to the host filesystem
+# through the bind mount (typically nothing). The security
+# review flagged this as MEDIUM.
+RUN useradd --create-home --uid 1000 --shell /bin/bash crucible \
+    && chown -R crucible:crucible /crucible
+
 WORKDIR /crucible
 
 # PYTHONPATH lets `uvicorn app.main:app` resolve crucible_py without
 # the user setting the env var manually.
 ENV PYTHONPATH=/crucible/build/release/python:/crucible
 
+# Drop root. From this point on every uvicorn worker runs as
+# `crucible`. The model dir is owned by that user because of the
+# `chown -R` above, so /convert can write there at runtime.
+USER crucible
+
 EXPOSE 8000
 
 # uvicorn with 1 worker is fine for a demo server. For production
 # scale-out, replace with `uvicorn.workers.UvicornWorker` behind
 # gunicorn or use --workers N.
+#
+# Bind to 0.0.0.0 here because the container is the unit of
+# deployment and the orchestrator already handles authentication
+# (CRUCIBLE_API_KEY) and TLS termination. Local dev runs should
+# use `uvicorn server.main:app` on the default 127.0.0.1:8000.
 CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
