@@ -1,21 +1,31 @@
 """PyTorch -> ONNX converter used by the /convert endpoint.
 
-The plan says POST /convert takes a multipart upload of a .pt / .pth
-file plus an input_shape field. We support three sub-flows:
+The plan originally said POST /convert takes a multipart upload of
+a .pt / .pth file plus an input_shape field. After the Issue #13
+security review, the public /convert path accepts a pre-exported
+.onnx file (and an input_shape that the server uses to record the
+model's expected input dims). PyTorch -> ONNX conversion still
+exists for in-process use, but it is NOT exposed over HTTP because
+the only safe loader (torch.load(weights_only=True)) cannot
+reconstruct a full nn.Module — and the unsafe loader
+(weights_only=False) is RCE-equivalent.
 
-  1. The upload is a full torch.save'd nn.Module (most common).
-     We deserialize with torch.load(weights_only=False), call
-     .eval(), and export via torch.onnx.export.
+Three flows remain:
 
-  2. The upload is a state_dict only (no module code). This case
-     cannot be converted without knowing the architecture; we
-     raise a clear ValueError so the API returns 400 instead of
-     500. This is the right call — silently ignoring the file
-     would be worse than failing loudly.
+  1. Public /convert: caller uploads a .onnx file. We onnx-load,
+     onnx.check it, and save it under the model registry. This is
+     the only flow that crosses the network.
 
-  3. (Test-only) The caller passes a torch.nn.Module directly via
-     convert_torch_module(). This is the path tests use because
-     building a .pt file in-memory is fiddly and OS-dependent.
+  2. convert_torch_module(model, input_shape, output_path): in-process
+     use from tests and from any future operator-side tooling.
+     The caller supplies a real nn.Module so we can call
+     torch.onnx.export directly. No deserialization involved.
+
+  3. _safe_torch_load(pt_bytes): if a future endpoint needs to
+     accept a state_dict, this is the only sanctioned loader. It
+     uses weights_only=True exclusively. A full nn.Module pickle
+     raises ValueError (HTTP 400) — the right answer, because
+     "send a pre-exported .onnx" is the secure equivalent.
 
 Why opset_version=13?
     Crucible's executor targets ONNX opset 7 (the version
@@ -35,7 +45,6 @@ Why dynamic_axes=False?
 from __future__ import annotations
 
 import io
-import pickle
 from pathlib import Path
 from typing import List, Union
 
@@ -53,97 +62,80 @@ CRUCIBLE_OPSET = 13  # See file header for why 13 specifically.
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
-def convert_pt_bytes(
-    pt_bytes: bytes,
+def accept_onnx_upload(
+    onnx_bytes: bytes,
     input_shape: List[int],
     output_path: Union[str, Path],
 ) -> onnx.ModelProto:
-    """Convert an uploaded .pt/.pth byte buffer to ONNX, write to disk,
-    and return the parsed ModelProto.
+    """Validate and persist an uploaded .onnx file.
 
-    Raises:
-        ValueError: on malformed .pt or unsupported content.
-        RuntimeError: on torch.onnx.export failure (caught upstream
-                      and translated to a 500 with details).
+    Replaces convert_pt_bytes for the public HTTP path. The caller
+    (FastAPI /convert) supplies a multipart .onnx upload; we
+    onnx-load + onnx.check it, then write the parsed model to
+    `output_path`. The model proto is returned so /convert can run
+    the supported-ops check before responding.
+
+    Why onnx.check at the upload boundary?
+        onnx.checker surfaces malformed protobuf / dangling
+        initializers / shape inference errors that we would
+        otherwise discover at /infer time (and translate to a 500).
+        Catching them at upload gives a 400 with a useful message.
     """
-    if not pt_bytes:
+    if not onnx_bytes:
         raise ValueError("Empty upload — no bytes received")
+    if not input_shape:
+        raise ValueError("input_shape must be non-empty")
+    if any(d <= 0 for d in input_shape):
+        raise ValueError("input_shape dims must be positive")
+    # input_shape is recorded by /convert into ConvertResponse so
+    # the caller doesn't have to repeat it on /infer. We don't
+    # embed it into the .onnx (ONNX has no metadata for that),
+    # so /infer still requires an input_shape field. The
+    # duplication is the price of not parsing the ONNX again on
+    # /infer.
 
-    # SECURITY: torch.load(weights_only=False) unpickles arbitrary
-    # Python objects, which is RCE-equivalent against any attacker
-    # who can hit /convert. We try weights_only=True first; only if
-    # the upload is a full nn.Module (which the safe path cannot
-    # reconstruct) do we fall back to weights_only=False, and even
-    # then we wrap the call so a hostile pickle that triggers
-    # __reduce__ during unpickling is translated to a 400. Do NOT
-    # weaken this without a sandboxing story.
-    obj = _safe_torch_load(pt_bytes)
+    try:
+        model_proto = onnx.load_from_string(onnx_bytes)
+    except Exception as exc:
+        raise ValueError(f"Invalid ONNX (load failed): {exc}") from exc
 
-    # State-dict-only check. A state_dict is a plain dict whose
-    # values are tensors; an nn.Module has a `_modules` attr or is
-    # an instance of torch.nn.Module.
-    if isinstance(obj, nn.Module):
-        model = obj
-    elif isinstance(obj, dict):
-        raise ValueError(
-            "Upload is a state_dict, not an nn.Module. "
-            "Crucible's /convert expects a torch.save'd full model. "
-            "If you have state_dict only, please export ONNX on the "
-            "training side."
-        )
-    else:
-        # Some users torch.save() other objects (Pickle coloumns,
-        # tokenizers). We don't support those.
-        raise ValueError(
-            f"Unsupported torch.save content: {type(obj).__name__}. "
-            f"Expected an nn.Module."
-        )
+    try:
+        onnx.checker.check_model(model_proto)
+    except onnx.checker.ValidationError as exc:
+        raise ValueError(f"Invalid ONNX (check failed): {exc}") from exc
 
-    return convert_torch_module(model, input_shape, output_path)
+    Path(output_path).write_bytes(onnx_bytes)
+    return model_proto
 
 
 def _safe_torch_load(pt_bytes: bytes) -> object:
-    """Load a torch.save'd object with a defense-in-depth posture.
+    """Load a torch.save'd object with NO deserialization RCE risk.
 
-    Strategy:
-      1. Try `weights_only=True` first. This refuses to execute
-         arbitrary __reduce__ and is the only safe path against an
-         untrusted multipart upload.
-      2. If that fails because the object is a full nn.Module
-         (which weights_only=True cannot reconstruct), retry with
-         `weights_only=False`. The retry is only reached for
-         objects that are *legitimately* nn.Module pickles — the
-         safe-path failure modes for actual RCE payloads (e.g.
-         `_rebuild_tensor_v2` returning a malicious callable) are
-         subclasses of `pickle.UnpicklingError` or
-         `RuntimeError`, which we propagate as ValueError so the
-         HTTP layer returns 400 instead of 500.
+    Hard rule: we ONLY call torch.load with weights_only=True. The
+    previous version had a weights_only=False fallback for "legitimate
+    nn.Module pickles"; the security review correctly flagged that as
+    equivalent to RCE against any attacker who can hit /convert. We
+    accept the regression that full nn.Module uploads no longer work
+    through this path: clients who want to convert an nn.Module must
+    upload a pre-exported .onnx (handled by accept_onnx_upload above)
+    or call convert_torch_module directly in-process.
+
+    This helper is kept for two reasons:
+      1. A future /admin/state_dict endpoint might want to accept a
+         state_dict. weights_only=True can load those.
+      2. Tests can use it to round-trip a state_dict without going
+         through the network.
     """
     try:
         return torch.load(io.BytesIO(pt_bytes),
                           map_location="cpu", weights_only=True)
-    except (pickle.UnpicklingError, RuntimeError, ValueError, TypeError):
-        # weights_only=True refused this object. That happens for
-        # legitimate nn.Module saves (which need full pickle
-        # machinery), and ALSO for malicious pickles. We can't
-        # tell them apart without deserialising, which is the
-        # problem we're trying to avoid. Heuristic: if the object
-        # is a *state_dict* we can serve it safely; only fall
-        # through to weights_only=False for nn.Module pickles.
-        #
-        # For a sandboxed production deployment the right answer
-        # is "reject": 4xx out with a 415 "send a state_dict or
-        # pre-converted ONNX instead". For an early-stage demo
-        # server we accept the risk and document it. See README.
-        try:
-            return torch.load(io.BytesIO(pt_bytes),
-                              map_location="cpu", weights_only=False)
-        except (pickle.UnpicklingError, RuntimeError, ValueError, TypeError) as exc:
-            # Both attempts failed — translate to a single
-            # user-facing error. The HTTP layer maps this to 400.
-            raise ValueError(
-                f"torch.load failed (not a valid torch.save file): {exc}"
-            ) from exc
+    except Exception as exc:
+        # Catch all (not just UnpicklingError) so a hostile pickle
+        # always becomes a clean 400, never a 500.
+        raise ValueError(
+            "Refusing to deserialize pickle that weights_only=True "
+            f"cannot load: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def convert_torch_module(
@@ -154,7 +146,9 @@ def convert_torch_module(
     """Convert an in-memory nn.Module to ONNX, write to disk, return
     the parsed ModelProto.
 
-    Used by convert_pt_bytes (after torch.load) and by tests.
+    Used by tests and by any future operator-side tooling that has
+    a real nn.Module in memory. NOT exposed over HTTP (see file
+    header for the rationale).
     """
     if not input_shape:
         raise ValueError("input_shape must be non-empty")
