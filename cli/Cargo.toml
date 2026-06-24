@@ -1,0 +1,55 @@
+[package]
+name        = "crucible-cli"
+version     = "0.1.0"
+edition     = "2021"
+description = "Command-line front-end for the Crucible ONNX inference engine."
+license     = "MIT"
+publish     = false
+
+# Issue #15 — Rust CLI. Four commands: run, benchmark, validate, info.
+#
+# Library layout: each module is small and focused.
+#   main.rs      — clap parsing, dispatch
+#   runner.rs    — FFI bindings to crucible C ABI
+#   formatter.rs — output rendering (text + JSON)
+#
+# Dependencies:
+#   clap v4    — argument parsing (Issue #15 AC requires the CLI to be
+#               a self-documenting multi-command app).
+#   serde      — JSON input/output. Run accepts --input pointing at a
+#               tensor file; info/validate can print --json for
+#               machine-readable output.
+#   thiserror  — uniform error type bridging C ABI status codes to
+#               std::process::ExitCode.
+#   libc       — malloc/free parity with the C ABI's caller-owned
+#               buffers. The C side uses malloc() for shape arrays;
+#               we must free through libc::free() to match the
+#               allocator on every platform we ship to.
+[dependencies]
+clap      = { version = "4.5", features = ["derive"] }
+serde     = { version = "1.0",  features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+libc      = "0.2"
+
+# The CLI does NOT embed the C engine at compile time. It expects
+# libcrucible.so / libcrucible.dylib / crucible.dll to be on the
+# dynamic loader's path at runtime. To make local development
+# friction-free we tell rustc where the CMake build puts the
+# artifacts, but that directory is only consulted when present —
+# production builds rely on the system loader path.
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+# empty: linker finds libcrucible.so via LD_LIBRARY_PATH or the
+# system default search path.
+
+# Profile: optimise release even on dev builds so the bench command
+# doesn't surprise users with debug-mode latency numbers.
+[profile.release]
+lto        = "thin"
+opt-level  = 3
+strip      = true
+
+# Convenience metadata for `cargo run` during development.
+[[bin]]
+name = "crucible"
+path = "src/main.rs"
