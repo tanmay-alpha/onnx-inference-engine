@@ -35,6 +35,7 @@ use thiserror::Error;
 /// Mirrors `CrucibleStatus` in c_api.h.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Status {
     Ok                   = 0,
     InvalidArgument      = 1,
@@ -95,7 +96,9 @@ extern "C" {
         num_outputs:  i32,
     ) -> Status;
     fn crucible_last_error() -> *const c_char;
+    #[allow(dead_code)]
     fn crucible_status_str(s: Status) -> *const c_char;
+    fn crucible_free_array(ptr: *mut std::ffi::c_void);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +137,6 @@ impl CrucibleError {
                 CStr::from_ptr(p).to_string_lossy().into_owned()
             }
         };
-        let suffix = if detail.is_empty() { String::new() } else { format!(": {detail}") };
         match s {
             Status::Ok               => CrucibleError::Internal("OK returned as error".into()),
             Status::InvalidArgument  => CrucibleError::InvalidArgument(detail),
@@ -176,11 +178,16 @@ impl Model {
         let handle = unsafe { crucible_load(cpath.as_ptr()) };
         if handle.is_null() {
             // Distinguish library-not-found from engine-reported
-            // failure by trying to load the library symbol table
-            // ourselves. We can't tell them apart from inside the
-            // FFI alone (both return null), so we attempt the
-            // library load first and only fall back to "engine said
-            // no" if the library did load.
+            // failure by checking if there's a stored C error message.
+            let detail = unsafe {
+                let p = crucible_last_error();
+                if p.is_null() { String::new() } else {
+                    CStr::from_ptr(p).to_string_lossy().into_owned()
+                }
+            };
+            if !detail.is_empty() {
+                return Err(CrucibleError::Parse(detail));
+            }
             return Err(CrucibleError::LibraryUnavailable(
                 load_library_diagnostics(path_str),
             ));
@@ -274,7 +281,7 @@ impl Model {
             unsafe {
                 std::ptr::copy_nonoverlapping(od.shape, shape.as_mut_ptr(), rank);
                 shape.set_len(rank);
-                libc::free(od.shape as *mut libc::c_void);
+                crucible_free_array(od.shape as *mut std::ffi::c_void);
             }
             // Same dance for the float buffer.
             let size = od.size as usize;
@@ -284,7 +291,7 @@ impl Model {
             unsafe {
                 std::ptr::copy_nonoverlapping(out_buf[i], data.as_mut_ptr(), size);
                 data.set_len(size);
-                libc::free(out_buf[i] as *mut libc::c_void);
+                crucible_free_array(out_buf[i] as *mut std::ffi::c_void);
             }
             // Tell the borrow checker that `in_descs` is unused
             // beyond this point so the input data lifetime is over.
@@ -359,6 +366,7 @@ impl Tensor {
     }
 
     /// Write JSON tensor file. Inverse of `from_json_file`.
+    #[allow(dead_code)]
     pub fn to_json_file(&self, path: &Path) -> Result<(), CrucibleError> {
         let mut s = String::with_capacity(self.data.len() * 12);
         s.push_str(&serde_json::to_string(&self.shape).unwrap_or_else(|_| "[]".into()));

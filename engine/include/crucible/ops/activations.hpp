@@ -18,6 +18,7 @@
 
 #include "crucible/tensor.hpp"
 
+#include <string>
 #include <unordered_map>
 
 namespace crucible::ops {

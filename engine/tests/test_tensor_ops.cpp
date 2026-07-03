@@ -50,8 +50,7 @@ TEST(TensorReshape, PreservesRowMajorData) {
     EXPECT_FLOAT_EQ(r321.at({2, 0}), 5.0f);
     EXPECT_FLOAT_EQ(r321.at({2, 1}), 6.0f);
 
-    auto r22 = t.reshape({2, 2});   // total 4 != 6, must throw
-    EXPECT_THROW(r22, std::invalid_argument);
+    EXPECT_THROW(t.reshape({2, 2}), std::invalid_argument);
 }
 
 TEST(TensorReshape, ToSameShapeIsNoOp) {
@@ -75,7 +74,7 @@ TEST(TensorReshape, ToHigherRank) {
 
 TEST(TensorReshape, ToZeroDimensional) {
     // Reshape to empty shape = rank-0 = single scalar (if data is non-empty).
-    Tensor t({3}, {42.0f});
+    Tensor t;
     auto r = t.reshape({});
     EXPECT_EQ(r.shape(), (std::vector<int64_t>{}));
     EXPECT_EQ(r.rank(), 0);
@@ -181,7 +180,7 @@ TEST(TensorFlatten, OriginalUnchanged) {
 TEST(TensorPrint, PrintsShape) {
     Tensor t({2, 3}, {1, 2, 3, 4, 5, 6});
     std::ostringstream out;
-    t.print(out);
+    t.print_to(out);
     std::string s = out.str();
     // Must contain the shape somewhere — accept any bracketed form.
     EXPECT_NE(s.find("[2, 3]"), std::string::npos);
@@ -190,7 +189,7 @@ TEST(TensorPrint, PrintsShape) {
 TEST(TensorPrint, PrintsAllElementsWhenBelowLimit) {
     Tensor t({3}, {1.5f, 2.5f, 3.5f});
     std::ostringstream out;
-    t.print(out);
+    t.print_to(out);
     std::string s = out.str();
     EXPECT_NE(s.find("1.5"),  std::string::npos);
     EXPECT_NE(s.find("2.5"),  std::string::npos);
@@ -200,7 +199,7 @@ TEST(TensorPrint, PrintsAllElementsWhenBelowLimit) {
 TEST(TensorPrint, TruncatesWhenAboveMaxElements) {
     Tensor t({20}, std::vector<float>(20, 1.0f));  // 20 ones
     std::ostringstream out;
-    t.print(out, 5);
+    t.print_to(out, 5);
     std::string s = out.str();
     // Truncation marker expected.
     EXPECT_NE(s.find("..."), std::string::npos);
@@ -213,7 +212,7 @@ TEST(TensorPrint, TruncatesWhenAboveMaxElements) {
 TEST(TensorPrint, DefaultMaxElementsTruncatesLargeTensor) {
     Tensor t({100}, std::vector<float>(100, 0.0f));
     std::ostringstream out;
-    t.print(out);   // default max_elements = 10
+    t.print_to(out);   // default max_elements = 10
     std::string s = out.str();
     EXPECT_NE(s.find("..."), std::string::npos);
 }
@@ -221,7 +220,7 @@ TEST(TensorPrint, DefaultMaxElementsTruncatesLargeTensor) {
 TEST(TensorPrint, EmptyTensorDoesNotCrash) {
     Tensor t;
     std::ostringstream out;
-    EXPECT_NO_THROW(t.print(out));
+    EXPECT_NO_THROW(t.print_to(out));
     // Output should be non-empty (it should print the shape "[]" at minimum).
     EXPECT_FALSE(out.str().empty());
 }

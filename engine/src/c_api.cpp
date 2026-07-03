@@ -113,7 +113,7 @@ void store_error(CrucibleStatus s, const std::string& what) {
 // Status / error
 // ---------------------------------------------------------------------------
 
-extern "C" const char* crucible_status_str(CrucibleStatus s) {
+extern "C" CRUCIBLE_API const char* crucible_status_str(CrucibleStatus s) {
     switch (s) {
         case CRUCIBLE_OK:                   return "CRUCIBLE_OK";
         case CRUCIBLE_ERR_INVALID_ARGUMENT: return "CRUCIBLE_ERR_INVALID_ARGUMENT";
@@ -126,7 +126,7 @@ extern "C" const char* crucible_status_str(CrucibleStatus s) {
     return "CRUCIBLE_ERR_INTERNAL";
 }
 
-extern "C" const char* crucible_last_error(void) {
+extern "C" CRUCIBLE_API const char* crucible_last_error(void) {
     return g_last_error.empty() ? nullptr : g_last_error.c_str();
 }
 
@@ -134,14 +134,19 @@ extern "C" const char* crucible_last_error(void) {
 // Load / free / info
 // ---------------------------------------------------------------------------
 
-extern "C" CrucibleModel* crucible_load(const char* path) {
+extern "C" CRUCIBLE_API CrucibleModel* crucible_load(const char* path) {
     if (path == nullptr) {
         store_error(CRUCIBLE_ERR_INVALID_ARGUMENT, "path is null");
         return nullptr;
     }
     try {
-        auto m = std::make_unique<crucible::abi_detail::ModelHolder>();
-        m->model = crucible::load_model(path);
+        auto m = std::make_unique<crucible::abi_detail::ModelHolder>(
+            crucible::abi_detail::ModelHolder{
+                crucible::load_model(path),
+                {},
+                {}
+            }
+        );
 
         // Cache c_str() pointers once so model_info can fill
         // CrucibleModelInfo.input_names without copying.
@@ -162,12 +167,12 @@ extern "C" CrucibleModel* crucible_load(const char* path) {
     }
 }
 
-extern "C" void crucible_free(CrucibleModel* model) {
+extern "C" CRUCIBLE_API void crucible_free(CrucibleModel* model) {
     delete model;  // unique_ptr destructor releases the ModelHolder
 }
 
-extern "C" CrucibleStatus crucible_model_info(const CrucibleModel* model,
-                                              CrucibleModelInfo* out) {
+extern "C" CRUCIBLE_API CrucibleStatus crucible_model_info(const CrucibleModel* model,
+                                                          CrucibleModelInfo* out) {
     if (model == nullptr || out == nullptr) {
         store_error(CRUCIBLE_ERR_INVALID_ARGUMENT, "null model or out");
         return CRUCIBLE_ERR_INVALID_ARGUMENT;
@@ -208,7 +213,7 @@ void tensor_to_buffers(const crucible::Tensor& src,
 }
 }  // namespace
 
-extern "C" CrucibleStatus crucible_run(
+extern "C" CRUCIBLE_API CrucibleStatus crucible_run(
     CrucibleModel* model,
     const CrucibleTensorDesc* input_descs, int32_t num_inputs,
     float** outputs,                        /* out */
@@ -273,4 +278,8 @@ extern "C" CrucibleStatus crucible_run(
         store_error(CRUCIBLE_ERR_INTERNAL, "unknown exception during run");
         return CRUCIBLE_ERR_INTERNAL;
     }
+}
+
+extern "C" CRUCIBLE_API void crucible_free_array(void* ptr) {
+    std::free(ptr);
 }

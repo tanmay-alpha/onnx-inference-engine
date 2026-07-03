@@ -273,7 +273,7 @@ TEST(Executor, RunsMobileNetV2Shape) {
     }
     probe.close();
 
-    Model model = load_model(model_path);
+    Model model = crucible::load_model(model_path);
 
     // Zero input of the canonical ImageNet shape. We use zeros
     // because we only check the output *shape* here — actual
