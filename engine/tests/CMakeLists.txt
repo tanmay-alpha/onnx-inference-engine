@@ -42,6 +42,7 @@ endif()
 
 include(GoogleTest)
 gtest_discover_tests(crucible_tests
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..
     PROPERTIES
         LABELS "unit"
 )

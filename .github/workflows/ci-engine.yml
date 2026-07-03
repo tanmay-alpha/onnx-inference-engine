@@ -75,6 +75,8 @@ jobs:
         run: cmake --build engine/build/debug --parallel $(nproc)
 
       # ── 6. Test ───────────────────────────────────────────────────────────────
+      # Run ctest from the repo root so that relative fixture paths in tests
+      # (e.g. "engine/tests/fixtures/...") resolve correctly. The build
+      # directory is specified via --test-dir.
       - name: CTest
-        working-directory: engine/build/debug
-        run: ctest --output-on-failure --parallel $(nproc)
+        run: ctest --test-dir engine/build/debug --output-on-failure --parallel $(nproc)
