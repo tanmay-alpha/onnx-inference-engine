@@ -1,0 +1,12 @@
+[package]
+name = "crucible-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust WASM reimplementation of Crucible inference engine"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2.92"
