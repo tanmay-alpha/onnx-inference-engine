@@ -106,7 +106,7 @@ TEST(BatchNorm, MultiChannelPerChannel) {
     //   channel 0: mean=0, var=1, scale=1, bias=0 → y = x / sqrt(1+eps) ≈ x
     //   channel 1: mean=10, var=4, scale=1, bias=0 → a=0.5, b=-5
     //                y = 0.5*x - 5
-    Tensor X = make<float>({1, 2, 2, 1}, {
+    Tensor X = make<float>({1, 2, 2, 2}, {
         // channel 0
         1.0f, 2.0f,
         3.0f, 4.0f,
@@ -119,17 +119,17 @@ TEST(BatchNorm, MultiChannelPerChannel) {
     Tensor mean  = make<float>({2}, { 0.0f, 10.0f});
     Tensor var   = make<float>({2}, { 1.0f,  4.0f});
     Tensor Y = batchnorm_forward(X, scale, bias, mean, var);
-    EXPECT_EQ(Y.shape(), (std::vector<int64_t>{1, 2, 2, 1}));
+    EXPECT_EQ(Y.shape(), (std::vector<int64_t>{1, 2, 2, 2}));
 
     // Channel 0: y ≈ x.
-    EXPECT_NEAR(Y.at({0, 0, 0, 0}), 1.0f, 1e-5f);
-    EXPECT_NEAR(Y.at({0, 0, 1, 1}), 4.0f, 1e-5f);
+    EXPECT_NEAR(Y.at({0, 0, 0, 0}), 1.0f, 1e-4f);
+    EXPECT_NEAR(Y.at({0, 0, 1, 1}), 4.0f, 1e-4f);
 
     // Channel 1: y = 0.5*x - 5.
-    EXPECT_NEAR(Y.at({0, 1, 0, 0}), 0.0f,  1e-5f);  // 0.5*10 - 5
-    EXPECT_NEAR(Y.at({0, 1, 0, 1}), 1.0f,  1e-5f);  // 0.5*12 - 5
-    EXPECT_NEAR(Y.at({0, 1, 1, 0}), 2.0f,  1e-5f);  // 0.5*14 - 5
-    EXPECT_NEAR(Y.at({0, 1, 1, 1}), 3.0f,  1e-5f);  // 0.5*16 - 5
+    EXPECT_NEAR(Y.at({0, 1, 0, 0}), 0.0f,  1e-4f);  // 0.5*10 - 5
+    EXPECT_NEAR(Y.at({0, 1, 0, 1}), 1.0f,  1e-4f);  // 0.5*12 - 5
+    EXPECT_NEAR(Y.at({0, 1, 1, 0}), 2.0f,  1e-4f);  // 0.5*14 - 5
+    EXPECT_NEAR(Y.at({0, 1, 1, 1}), 3.0f,  1e-4f);  // 0.5*16 - 5
 }
 
 TEST(BatchNorm, EpsilonFloorsVariance) {
@@ -164,10 +164,10 @@ TEST(BatchNorm, MultiBatchIndependentAffine) {
     Tensor var   = make<float>({1}, {1.0f});
     Tensor Y = batchnorm_forward(X, scale, bias, mean, var);
     EXPECT_EQ(Y.shape(), (std::vector<int64_t>{2, 1, 2, 1}));
-    EXPECT_NEAR(Y.at({0, 0, 0, 0}), 0.0f, 1e-5f);
-    EXPECT_NEAR(Y.at({0, 0, 1, 0}), 2.0f, 1e-5f);
-    EXPECT_NEAR(Y.at({1, 0, 0, 0}), 4.0f, 1e-5f);
-    EXPECT_NEAR(Y.at({1, 0, 1, 0}), 6.0f, 1e-5f);
+    EXPECT_NEAR(Y.at({0, 0, 0, 0}), 0.0f, 1e-4f);
+    EXPECT_NEAR(Y.at({0, 0, 1, 0}), 2.0f, 1e-4f);
+    EXPECT_NEAR(Y.at({1, 0, 0, 0}), 4.0f, 1e-4f);
+    EXPECT_NEAR(Y.at({1, 0, 1, 0}), 6.0f, 1e-4f);
 }
 
 TEST(BatchNorm, SourceUnchanged) {

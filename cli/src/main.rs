@@ -22,7 +22,7 @@
 mod runner;
 mod formatter;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -160,10 +160,10 @@ fn dispatch(cli: Cli) -> Result<(), runner::CrucibleError> {
 // ---------------------------------------------------------------------------
 
 fn cmd_run(
-    model_path: &PathBuf,
-    input_path: &PathBuf,
+    model_path: &Path,
+    input_path: &Path,
     top: usize,
-    labels_path: Option<&PathBuf>,
+    labels_path: Option<&Path>,
     print_output: Option<usize>,
     json: bool,
 ) -> Result<(), runner::CrucibleError> {
@@ -233,8 +233,8 @@ fn cmd_run(
 // ---------------------------------------------------------------------------
 
 fn cmd_bench(
-    model_path: &PathBuf,
-    input_path: &PathBuf,
+    model_path: &Path,
+    input_path: &Path,
     runs: usize,
     warmup: usize,
     json: bool,
@@ -283,7 +283,7 @@ fn compute_stats(samples: &[f64]) -> (f64, f64, f64, f64, f64, f64) {
 // validate
 // ---------------------------------------------------------------------------
 
-fn cmd_validate(model_path: &PathBuf) -> Result<(), runner::CrucibleError> {
+fn cmd_validate(model_path: &Path) -> Result<(), runner::CrucibleError> {
     let info = runner::validate_model(model_path)?;
     print!("{}", formatter::format_validate_text(model_path, &info));
     formatter::flush();
@@ -294,7 +294,7 @@ fn cmd_validate(model_path: &PathBuf) -> Result<(), runner::CrucibleError> {
 // info
 // ---------------------------------------------------------------------------
 
-fn cmd_info(model_path: &PathBuf, json: bool) -> Result<(), runner::CrucibleError> {
+fn cmd_info(model_path: &Path, json: bool) -> Result<(), runner::CrucibleError> {
     let model = runner::Model::load(model_path)?;
     let info  = model.info()?;
     if json {
@@ -313,7 +313,7 @@ fn cmd_info(model_path: &PathBuf, json: bool) -> Result<(), runner::CrucibleErro
 
 /// Load class labels from a file, one label per line. Empty lines
 /// and `# comment` lines are skipped. Whitespace is trimmed.
-fn load_labels(path: &PathBuf) -> Result<Vec<String>, runner::CrucibleError> {
+fn load_labels(path: &Path) -> Result<Vec<String>, runner::CrucibleError> {
     let s = std::fs::read_to_string(path)?;
     let mut out = Vec::new();
     for line in s.lines() {

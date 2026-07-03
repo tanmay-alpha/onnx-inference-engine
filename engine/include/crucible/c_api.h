@@ -50,7 +50,7 @@
 #  ifdef CRUCIBLE_BUILDING_DLL
 #    define CRUCIBLE_API __declspec(dllexport)
 #  else
-#    define CRUCIBLE_API __declspec(dllimport)
+#    define CRUCIBLE_API
 #  endif
 #else
 #  ifdef __GNUC__
@@ -168,6 +168,8 @@ CRUCIBLE_API CrucibleStatus crucible_run(
     CrucibleTensorDesc* output_descs,        /* out */
     int32_t num_outputs
 );
+
+CRUCIBLE_API void crucible_free_array(void* ptr);
 
 #ifdef __cplusplus
 }  /* extern "C" */

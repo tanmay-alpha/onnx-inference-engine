@@ -137,11 +137,13 @@ TEST(MatMul, OneDimensionalNotSupported) {
 TEST(MatMul, SourceUnchanged) {
     Tensor A = make<float>({2, 2}, {1, 2, 3, 4});
     Tensor B = make<float>({2, 2}, {5, 6, 7, 8});
+    const float* A_ptr = A.data();
+    const float* B_ptr = B.data();
     Tensor A_before = A;
     Tensor B_before = B;
     (void)matmul(A, B);
-    EXPECT_EQ(A.data(), A_before.data());
-    EXPECT_EQ(B.data(), B_before.data());
+    EXPECT_EQ(A.data(), A_ptr);
+    EXPECT_EQ(B.data(), B_ptr);
     for (size_t i = 0; i < 4; ++i) {
         EXPECT_FLOAT_EQ(A.data()[i], A_before.data()[i]);
         EXPECT_FLOAT_EQ(B.data()[i], B_before.data()[i]);
@@ -211,7 +213,7 @@ TEST(Gemm, TransA) {
     // A = (2x3) = [[1,2,3],[4,5,6]] -> A^T = (3x2) = [[1,4],[2,5],[3,6]]
     // B = (3x2)
     Tensor A = make<float>({2, 3}, {1, 2, 3, 4, 5, 6});
-    Tensor B = make<float>({3, 2}, {1, 0, 0, 1, 1, 1});
+    Tensor B = make<float>({2, 2}, {1, 0, 0, 1});
     Tensor Y = gemm(A, B, Tensor(), 1.0f, 1.0f, 1, 0);
     // A^T @ B:
     // row 0: 1*1+4*0=1, 1*0+4*1=4

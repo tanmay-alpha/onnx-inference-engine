@@ -90,7 +90,7 @@ pub fn format_tensor_summary(out: &Tensor, max_elements: usize) -> String {
     let n = out.data.len().min(max_elements);
     s.push_str(&format!("data  (first {n} of {}):\n", out.data.len()));
     for (i, v) in out.data.iter().take(n).enumerate() {
-        s.push_str(&format!("  [{i:>6}] {v:> .6}\n"));
+        s.push_str(&format!("  [{i:>6}] {v:>12.6}\n"));
     }
     if out.data.len() > n {
         s.push_str(&format!("  ... {} more\n", out.data.len() - n));

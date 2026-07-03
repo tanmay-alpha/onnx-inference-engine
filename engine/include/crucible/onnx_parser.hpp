@@ -88,6 +88,24 @@ struct Model {
         graph.int_initializers;
     std::vector<std::string>& input_names  = graph.input_names;
     std::vector<std::string>& output_names = graph.output_names;
+
+    Model() = default;
+    Model(const Model& other)
+        : graph(other.graph) {}
+    Model(Model&& other) noexcept
+        : graph(std::move(other.graph)) {}
+    Model& operator=(const Model& other) {
+        if (this != &other) {
+            graph = other.graph;
+        }
+        return *this;
+    }
+    Model& operator=(Model&& other) noexcept {
+        if (this != &other) {
+            graph = std::move(other.graph);
+        }
+        return *this;
+    }
 };
 
 // Load a .onnx file from disk and parse it into a Model.

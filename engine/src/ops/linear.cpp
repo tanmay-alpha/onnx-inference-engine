@@ -129,14 +129,14 @@ Tensor gemm(const Tensor& A, const Tensor& B, const Tensor& C,
             // Per ONNX spec, rank-1 C is broadcast as either (M,) -> per
             // row or (N,) -> per column. Both are valid; pick whichever
             // matches.
-            if (C.shape()[0] == M) {
-                for (int64_t i = 0; i < M; ++i) {
-                    Yc.row(i).array() += static_cast<float>(beta) * C.data()[i];
-                }
-            } else if (C.shape()[0] == N) {
+            if (C.shape()[0] == N) {
                 RowMatrix bc = RowMatrix::Zero(M, N);
                 for (int64_t j = 0; j < N; ++j) bc.col(j).array() += C.data()[j];
                 Yc += static_cast<float>(beta) * bc;
+            } else if (C.shape()[0] == M) {
+                for (int64_t i = 0; i < M; ++i) {
+                    Yc.row(i).array() += static_cast<float>(beta) * C.data()[i];
+                }
             } else {
                 throw std::invalid_argument(
                     "gemm: bias C (rank-1) size mismatch (got " +

@@ -153,9 +153,10 @@ TEST(MaxPool, SourceUnchanged) {
         4, 5, 6,
         7, 8, 9
     });
+    const float* X_ptr = X.data();
     const Tensor X_before = X;
     (void)maxpool_forward(X, 2, 2, 1, 1, 0, 0);
-    EXPECT_EQ(X.data(), X_before.data());
+    EXPECT_EQ(X.data(), X_ptr);
     for (int64_t i = 0; i < X.size(); ++i) {
         EXPECT_FLOAT_EQ(X.data()[i], X_before.data()[i]);
     }
@@ -272,9 +273,10 @@ TEST(AvgPool, SourceUnchanged) {
         4, 5, 6,
         7, 8, 9
     });
+    const float* X_ptr = X.data();
     const Tensor X_before = X;
     (void)avgpool_forward(X, 2, 2, 1, 1, 0, 0);
-    EXPECT_EQ(X.data(), X_before.data());
+    EXPECT_EQ(X.data(), X_ptr);
     for (int64_t i = 0; i < X.size(); ++i) {
         EXPECT_FLOAT_EQ(X.data()[i], X_before.data()[i]);
     }

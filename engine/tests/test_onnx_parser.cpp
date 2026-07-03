@@ -44,7 +44,7 @@ TEST(LoadModel, LoadsMatmulAddFixture) {
 TEST(LoadModel, LoadsEmptyFixture) {
     Model m = load_model(fixture("empty"));
     EXPECT_EQ(m.graph.node.size(), 0u);
-    EXPECT_EQ(m.graph.initializer.size(), 0u);
+    EXPECT_EQ(m.weights.size(), 0u);
 }
 
 TEST(LoadModel, LoadsReshapeFixture) {
@@ -56,7 +56,7 @@ TEST(LoadModel, LoadsReshapeFixture) {
 TEST(LoadModel, LoadsChain4Fixture) {
     Model m = load_model(fixture("chain4"));
     EXPECT_EQ(m.graph.node.size(), 4u);
-    EXPECT_EQ(m.graph.initializer.size(), 4u);
+    EXPECT_EQ(m.weights.size(), 4u);
 }
 
 TEST(LoadModel, LoadsGemmFixture) {
@@ -66,13 +66,13 @@ TEST(LoadModel, LoadsGemmFixture) {
     // Gemm has attributes — alpha, beta, transB
     auto it = m.graph.node[0].attributes.find("alpha");
     ASSERT_NE(it, m.graph.node[0].attributes.end());
-    EXPECT_FLOAT_EQ(it->second, 2.0f);
+    EXPECT_FLOAT_EQ(it->second.f, 2.0f);
     it = m.graph.node[0].attributes.find("beta");
     ASSERT_NE(it, m.graph.node[0].attributes.end());
-    EXPECT_FLOAT_EQ(it->second, 0.5f);
+    EXPECT_FLOAT_EQ(it->second.f, 0.5f);
     it = m.graph.node[0].attributes.find("transB");
     ASSERT_NE(it, m.graph.node[0].attributes.end());
-    EXPECT_FLOAT_EQ(it->second, 1.0f);
+    EXPECT_EQ(it->second.i, 1);
 }
 
 // -----------------------------------------------------------------------
@@ -165,7 +165,7 @@ TEST(LoadModelIO, EmptyFixtureHasInputsAndOutputs) {
 
 TEST(LoadModelInitializer, MatmulAddHasTwoInitializers) {
     Model m = load_model(fixture("matmul_add"));
-    EXPECT_EQ(m.graph.initializer.size(), 2u);
+    EXPECT_EQ(m.weights.size(), 2u);
     EXPECT_NE(m.weights.find("W"), m.weights.end());
     EXPECT_NE(m.weights.find("b"), m.weights.end());
 }

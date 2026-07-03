@@ -203,13 +203,14 @@ TEST(Conv2D, MultiChannelConv) {
 TEST(Conv2D, Stride2Spatial) {
     // (1, 1, 6, 6) input, 3x3 kernel, stride=2, no pad → 3x3 output.
     // Spot-check by independently computing Y[0,0,0,0].
-    Tensor X = make<float>({1, 1, 6, 6}, {
-         0,  1,  2,  3,  4,  5,
-         6,  7,  8,  9, 10, 11,
-        12, 13, 14, 15, 16, 17,
-        18, 19, 20, 21, 22, 23,
-        24, 25, 26, 27, 28, 29,
-        30, 31, 32, 33, 34, 35
+    Tensor X = make<float>({1, 1, 7, 7}, {
+         0,  1,  2,  3,  4,  5,  6,
+         7,  8,  9, 10, 11, 12, 13,
+        14, 15, 16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25, 26, 27,
+        28, 29, 30, 31, 32, 33, 34,
+        35, 36, 37, 38, 39, 40, 41,
+        42, 43, 44, 45, 46, 47, 48
     });
     Tensor W = make<float>({1, 1, 3, 3}, {
         1, 0, 0,
@@ -229,10 +230,10 @@ TEST(Conv2D, Stride2Spatial) {
     EXPECT_FLOAT_EQ(Y.at({0, 0, 0, 1}), 2.0f);
     // Y[0,0,0,2] = X[0,0,0,4] = 4
     EXPECT_FLOAT_EQ(Y.at({0, 0, 0, 2}), 4.0f);
-    // Y[0,0,1,0] = X[0,0,2,0] = 12
-    EXPECT_FLOAT_EQ(Y.at({0, 0, 1, 0}), 12.0f);
-    // Y[0,0,2,2] = X[0,0,4,4] = 28
-    EXPECT_FLOAT_EQ(Y.at({0, 0, 2, 2}), 28.0f);
+    // Y[0,0,1,0] = X[0,0,2,0] = 14
+    EXPECT_FLOAT_EQ(Y.at({0, 0, 1, 0}), 14.0f);
+    // Y[0,0,2,2] = X[0,0,4,4] = 32
+    EXPECT_FLOAT_EQ(Y.at({0, 0, 2, 2}), 32.0f);
 }
 
 TEST(Conv2D, ZeroPadIntroducesZeros) {
@@ -316,15 +317,18 @@ TEST(Conv2D, SourceUnchanged) {
     Tensor bias = make<float>({1}, {1.5f});
     ConvParams p;
 
+    const float* X_ptr = X.data();
+    const float* W_ptr = W.data();
+    const float* bias_ptr = bias.data();
     const Tensor X_before = X;
     const Tensor W_before = W;
     const Tensor bias_before = bias;
 
     (void)conv2d_forward(X, W, bias, p);
 
-    EXPECT_EQ(X.data(), X_before.data());
-    EXPECT_EQ(W.data(), W_before.data());
-    EXPECT_EQ(bias.data(), bias_before.data());
+    EXPECT_EQ(X.data(), X_ptr);
+    EXPECT_EQ(W.data(), W_ptr);
+    EXPECT_EQ(bias.data(), bias_ptr);
     for (int64_t i = 0; i < X.size(); ++i) {
         EXPECT_FLOAT_EQ(X.data()[i], X_before.data()[i]);
     }
