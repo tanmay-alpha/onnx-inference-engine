@@ -38,4 +38,6 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts
+# Note: next-env.d.ts is intentionally NOT ignored — it must be committed
+# so that `tsc --noEmit` works on CI without running `next build` first.
+# See https://nextjs.org/docs/app/api-reference/config/typescript
