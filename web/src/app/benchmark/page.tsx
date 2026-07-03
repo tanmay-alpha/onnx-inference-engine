@@ -1,6 +1,6 @@
 import React from 'react';
 import Link from 'next/link';
-import { BarChart3, Zap, Cpu, Award } from 'lucide-react';
+import { BarChart3, Award } from 'lucide-react';
 import { getBenchmarkResults, getChartData } from '../../lib/api';
 import LatencyChart from '../../components/LatencyChart';
 

@@ -1,0 +1,71 @@
+# ci-web.yml — TypeScript type-check + ESLint for the Next.js 15 web dashboard (Issue #19)
+#
+# Two checks run in sequence on every push / PR to main:
+#
+#   1. `npm run type-check` — runs tsc --noEmit in strict mode.
+#      Config: web/tsconfig.json (strict: true, noEmit: true, isolatedModules: true).
+#      This catches all TypeScript type errors WITHOUT producing any build artefacts.
+#
+#   2. `npm run lint` — runs ESLint 9 with the project's flat config
+#      (web/eslint.config.mjs, using @typescript-eslint/eslint-plugin v8).
+#      Any warning is treated as an error (--max-warnings 0).
+#
+# Node.js version: 20 LTS — matches the version pinned in web/package.json
+# engines field and the Next.js 15 peer requirement.
+#
+# Dependency caching: we cache ~/.npm (the npm global cache) keyed on
+# package-lock.json to avoid re-downloading packages on every run.
+
+name: CI — Web (TypeScript + ESLint)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/ci-web.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/ci-web.yml'
+
+jobs:
+  type-check-and-lint:
+    name: tsc --noEmit + ESLint (Node 20 / ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Node.js setup ──────────────────────────────────────────────────────
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      # ── 3. Install dependencies ───────────────────────────────────────────────
+      # `npm ci` is the correct command for CI: it uses package-lock.json
+      # exactly and fails if it is not in sync with package.json.
+      - name: Install npm dependencies
+        working-directory: web
+        run: npm ci
+
+      # ── 4. TypeScript type-check ──────────────────────────────────────────────
+      # Runs `tsc --noEmit` — picks up web/tsconfig.json automatically.
+      # strict: true, isolatedModules: true, moduleResolution: bundler.
+      - name: TypeScript type-check
+        working-directory: web
+        run: npm run type-check
+
+      # ── 5. ESLint ─────────────────────────────────────────────────────────────
+      # Runs `eslint src --ext .ts,.tsx --max-warnings 0`.
+      # Config: web/eslint.config.mjs (ESLint 9 flat config,
+      # @typescript-eslint/eslint-plugin v8). Any warning is a failure.
+      - name: ESLint
+        working-directory: web
+        run: npm run lint

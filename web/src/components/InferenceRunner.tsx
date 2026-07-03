@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Play, HelpCircle, ShieldAlert } from 'lucide-react';
+import { Play, ShieldAlert } from 'lucide-react';
 import { runWasmInference } from '../lib/crucible-wasm';
 
 interface InferenceResult {
@@ -64,7 +64,7 @@ export default function InferenceRunner({
         isEmulated: false,
         modelName,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.warn('WASM execution failed or has unsupported operators, falling back to Client Emulation Mode:', err);
       
       // 2. Client Emulation Mode for unsupported models (like MobileNetV2 with Conv ops)

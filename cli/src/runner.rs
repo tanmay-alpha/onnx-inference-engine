@@ -3,18 +3,18 @@
 //! Three layers, top to bottom:
 //!
 //!   1. Public Rust API   — `Model`, `Tensor`, `Status`, `validate_model`,
-//!                          `top_k_indices`. All safe Rust, no `unsafe`,
-//!                          no raw pointers in the public surface.
+//!      `top_k_indices`. All safe Rust, no `unsafe`,
+//!      no raw pointers in the public surface.
 //!
 //!   2. Internal FFI      — `extern "C"` blocks below the public API.
-//!                          Reproduces the C ABI exactly; the public
-//!                          types wrap these.
+//!      Reproduces the C ABI exactly; the public
+//!      types wrap these.
 //!
 //!   3. Memory ownership  — output buffers from `crucible_run` are
-//!                          caller-allocated (the C side fills them).
-//!                          Shape arrays are malloc'd by the C side and
-//!                          freed here with `libc::free` to match the
-//!                          allocator.
+//!      caller-allocated (the C side fills them).
+//!      Shape arrays are malloc'd by the C side and
+//!      freed here with `libc::free` to match the
+//!      allocator.
 //!
 //! Why one module for the whole FFI? All the call sites are tiny and
 //! the boundary is the same in every place; spreading them across

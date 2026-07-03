@@ -1,0 +1,72 @@
+# ci-server.yml — pytest for the Crucible FastAPI server (Issue #19)
+#
+# Test strategy:
+#   - server/tests/test_api.py  (18 tests): FastAPI endpoints via TestClient.
+#     No C++ extension needed — the server falls back to numpy inference when
+#     crucible_py is not importable.
+#   - server/test_bindings.py (4 tests): crucible_py pybind11 smoke tests.
+#     These are auto-skipped when the compiled .so is absent (the test file
+#     uses `pytest.skip` inside a try/import block). This is the expected
+#     behaviour in CI where we have not built the C++ engine.
+#
+# Expected result on a clean runner:
+#   18 passed, 4 skipped, 3 warnings
+#
+# Python version: 3.11 — pinned to match requirements.txt. torch 2.3.0 wheels
+# require exactly Python 3.11 for the manylinux2014_x86_64 wheels.
+
+name: CI — Python Server (pytest)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - '.github/workflows/ci-server.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - '.github/workflows/ci-server.yml'
+
+jobs:
+  test:
+    name: pytest (Python 3.11, ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python environment ─────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Pip dependency cache ───────────────────────────────────────────────
+      # Cache the virtual-env keyed on requirements.txt so we only reinstall
+      # when dependencies change.
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py311-${{ hashFiles('server/requirements.txt') }}
+          restore-keys: pip-${{ runner.os }}-py311-
+
+      # ── 4. Install dependencies ───────────────────────────────────────────────
+      # torch==2.3.0 CPU-only; --index-url avoids downloading CUDA wheels.
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu \
+            torch==2.3.0
+          pip install -r server/requirements.txt
+
+      # ── 5. Run tests ──────────────────────────────────────────────────────────
+      # Run from the repo root so `from server.main import app` resolves.
+      # The 4 pybind11 binding tests skip automatically when crucible_py is
+      # absent — that is the expected behaviour and does NOT fail the job.
+      - name: Run pytest
+        run: python -m pytest server -v --tb=short

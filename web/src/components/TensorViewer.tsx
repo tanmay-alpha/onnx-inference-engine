@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Cpu, Info, CheckCircle2 } from 'lucide-react';
+import { Cpu, Info } from 'lucide-react';
 
 interface InferenceResult {
   outputData: Float32Array;

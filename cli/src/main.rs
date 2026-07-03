@@ -244,13 +244,13 @@ fn cmd_bench(
 
     // Warmup.
     for _ in 0..warmup {
-        let _ = model.run(&[input.clone()])?;
+        let _ = model.run(std::slice::from_ref(&input))?;
     }
     // Timed.
     let mut samples_ms: Vec<f64> = Vec::with_capacity(runs);
     for _ in 0..runs {
         let t0 = Instant::now();
-        let _ = model.run(&[input.clone()])?;
+        let _ = model.run(std::slice::from_ref(&input))?;
         let dt = t0.elapsed();
         samples_ms.push(dt.as_secs_f64() * 1000.0);
     }

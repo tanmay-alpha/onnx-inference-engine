@@ -1,0 +1,114 @@
+# ci-rust.yml — Rust tests + Clippy for all Rust crates (Issue #19)
+#
+# Two crates:
+#
+#   wasm/  — pure Rust reimplementation, no C++ dependency.
+#             `cargo test` runs 5 unit tests (softmax, sigmoid, relu,
+#             onnx-parse). These are the definitive correctness tests for the
+#             browser-side WASM operator kernels.
+#
+#   cli/   — FFI shim over the C++ shared library (libcrucible).
+#             Full `cargo build` / `cargo test` requires libcrucible.so which
+#             is not available on a bare CI runner without the CMake build.
+#             We therefore run `cargo check` (type-checks, no linking) and
+#             `cargo clippy` (lint analysis, also link-free) on the CLI crate.
+#             The binaries are exercised end-to-end in the engine CI above.
+#
+# Clippy policy: -D warnings on both crates — a lint violation is a build
+# failure on main.
+
+name: CI — Rust (WASM + CLI)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cli/**'
+      - 'wasm/**'
+      - '.github/workflows/ci-rust.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cli/**'
+      - 'wasm/**'
+      - '.github/workflows/ci-rust.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wasm-test:
+    name: WASM crate — cargo test + clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # dtolnay/rust-toolchain installs a pinned stable toolchain and also sets
+      # up the WASM target and clippy component in one step.
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      # Restore the Cargo registry + build output so repeated runs are fast.
+      - name: Cache Cargo registry and build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            wasm/target
+          key: cargo-wasm-${{ runner.os }}-${{ hashFiles('wasm/Cargo.toml', 'wasm/Cargo.lock') }}
+          restore-keys: cargo-wasm-${{ runner.os }}-
+
+      # Run the 5 pure-Rust unit tests (no WASM target needed for native tests).
+      - name: Test (native)
+        working-directory: wasm
+        run: cargo test --verbose
+
+      # Clippy on the native target first (catches all logic lints).
+      - name: Clippy (native)
+        working-directory: wasm
+        run: cargo clippy -- -D warnings
+
+      # Clippy on the WASM target to catch target-specific issues.
+      - name: Clippy (wasm32)
+        working-directory: wasm
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+
+  cli-check:
+    name: CLI crate — cargo check + clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo registry and build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cli/target
+          key: cargo-cli-${{ runner.os }}-${{ hashFiles('cli/Cargo.toml', 'cli/Cargo.lock') }}
+          restore-keys: cargo-cli-${{ runner.os }}-
+
+      # Type-check without linking. This catches all type errors and missing
+      # symbols in Rust code without needing libcrucible.so to be present.
+      - name: Check (type-check only, no linking)
+        working-directory: cli
+        run: cargo check --verbose
+
+      # Clippy also runs without linking the final binary, so it works here.
+      - name: Clippy
+        working-directory: cli
+        run: cargo clippy -- -D warnings

@@ -25,7 +25,7 @@ interface LatencyChartProps {
 
 export default function LatencyChart({ data }: LatencyChartProps) {
   // Custom tooltips to blend in with our premium dark design
-  const CustomTooltip = ({ active, payload, label }: any) => {
+  const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?: { name: string; value: number; color: string }[]; label?: string }) => {
     if (active && payload && payload.length) {
       return (
         <div 
@@ -42,7 +42,7 @@ export default function LatencyChart({ data }: LatencyChartProps) {
             Model Size: {label}
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            {payload.map((entry: any) => (
+            {payload.map((entry: { name: string; value: number; color: string }) => (
               <div 
                 key={entry.name} 
                 style={{ 

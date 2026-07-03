@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { LayoutGrid, Cpu, ArrowLeft } from 'lucide-react';
+import { LayoutGrid, ArrowLeft } from 'lucide-react';
 import ModelUploader from '../../components/ModelUploader';
 import InferenceRunner from '../../components/InferenceRunner';
 import TensorViewer from '../../components/TensorViewer';

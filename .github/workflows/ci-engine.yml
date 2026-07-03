@@ -1,0 +1,80 @@
+# ci-engine.yml — CMake build + ctest for the C++17 inference engine (Issue #19)
+#
+# Triggers: every push or PR targeting main. The engine CI is the most expensive
+# job because it builds protobuf from source as a submodule. We cache the CMake
+# build directory to keep incremental CI fast.
+#
+# Key decisions:
+#  - ubuntu-latest (24.04): GCC 13 ships with full C++17 support.
+#  - Submodules: checked out recursively so Eigen, protobuf, googletest are present.
+#  - Tests enabled with -DCRUCIBLE_ENABLE_TESTS=ON; benchmarks kept OFF.
+#  - Protobuf is built from the bundled submodule (protobuf_BUILD_TESTS=OFF to
+#    prevent its own 700+ tests from running inside our CI).
+
+name: CI — C++ Engine
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'engine/**'
+      - '.github/workflows/ci-engine.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'engine/**'
+      - '.github/workflows/ci-engine.yml'
+
+jobs:
+  build-and-test:
+    name: Build and CTest (ubuntu-latest / GCC)
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout with all submodules ──────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ── 2. Install system dependencies ───────────────────────────────────────
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            ninja-build \
+            g++ \
+            pkg-config
+
+      # ── 3. Cache the CMake build directory ───────────────────────────────────
+      # Cache key includes CMakeLists.txt hash so a CMake change invalidates it.
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: engine/build/debug
+          key: cmake-debug-${{ runner.os }}-${{ hashFiles('engine/CMakeLists.txt', 'engine/src/**', 'engine/include/**') }}
+          restore-keys: cmake-debug-${{ runner.os }}-
+
+      # ── 4. Configure ─────────────────────────────────────────────────────────
+      - name: Configure (Debug + tests)
+        run: |
+          cmake \
+            -S engine \
+            -B engine/build/debug \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCRUCIBLE_ENABLE_TESTS=ON \
+            -DCRUCIBLE_ENABLE_BENCHMARKS=OFF \
+            -DCRUCIBLE_ENABLE_PYTHON_BINDINGS=OFF \
+            -Dprotobuf_BUILD_TESTS=OFF \
+            -DBUILD_TESTING=OFF
+
+      # ── 5. Build ──────────────────────────────────────────────────────────────
+      - name: Build
+        run: cmake --build engine/build/debug --parallel $(nproc)
+
+      # ── 6. Test ───────────────────────────────────────────────────────────────
+      - name: CTest
+        working-directory: engine/build/debug
+        run: ctest --output-on-failure --parallel $(nproc)

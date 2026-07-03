@@ -34,8 +34,8 @@ export default function ModelUploader({ onModelLoaded, loadedModelName }: ModelU
       const arrayBuffer = await file.arrayBuffer();
       const bytes = new Uint8Array(arrayBuffer);
       onModelLoaded(file.name, bytes);
-    } catch (err: any) {
-      setError('Failed to read ONNX file: ' + err.message);
+    } catch (err: unknown) {
+      setError('Failed to read ONNX file: ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setLoading(false);
     }
