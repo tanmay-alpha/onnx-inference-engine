@@ -213,9 +213,9 @@ The benchmark results are displayed interactively in the Next.js frontend (see `
 
 | Engine | Mean (ms) | Median (ms) | P95 (ms) | P99 (ms) | Throughput (inf/s) |
 |--------|-----------|-------------|---------|---------|-------------------|
-| **Crucible** | **609.0** | **607.6** | 664.4 | 775.1 | 1.64 |
-| ONNX Runtime 1.27 | 2.07 | 1.97 | 2.73 | 2.92 | 483.7 |
-| PyTorch 2.3 (stub) | 0.77 | 0.72 | 1.13 | 1.83 | 1295.4 |
+| **Crucible** | **445.9** | **463.4** | 482.3 | 498.8 | 2.24 |
+| ONNX Runtime 1.27 | 1.69 | 1.68 | 1.83 | 1.86 | 593.1 |
+| PyTorch 2.3 (stub) | 0.54 | 0.52 | 0.71 | 0.83 | 1837.0 |
 
 ### 6.3 Analysis
 

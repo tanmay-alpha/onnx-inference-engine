@@ -172,9 +172,9 @@ bash scripts/build-wasm.sh
 
 | Engine | Backend | Mean (ms) | Median (ms) | P95 (ms) | P99 (ms) |
 |--------|---------|-----------|-------------|---------|---------|
-| **Crucible** (C++) | CPU native | **609.0** | **607.6** | 664.4 | 775.1 |
-| ONNX Runtime 1.27 | CPUExecutionProvider | 2.07 | 1.97 | 2.73 | 2.92 |
-| PyTorch 2.3 | CPU eager (stub) | 0.77 | 0.72 | 1.13 | 1.83 |
+| **Crucible** (C++) | CPU native | **445.9** | **463.4** | 482.3 | 498.8 |
+| ONNX Runtime 1.27 | CPUExecutionProvider | 1.69 | 1.68 | 1.83 | 1.86 |
+| PyTorch 2.3 | CPU eager (stub) | 0.54 | 0.52 | 0.71 | 0.83 |
 
 Crucible is slower than ONNX Runtime (expected — no operator fusion, no MLAS assembly kernel, and single-threaded execution). It is a **clean, readable from-scratch implementation**, not a production optimizer. All three engines produce numerically identical outputs (top-1 class matches to 100%).
 
@@ -252,7 +252,7 @@ Crucible/
 |----------|---------------|
 | [![Engine](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-engine.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-engine.yml) | CMake configure + `cmake --build` + `ctest` (GoogleTest) |
 | [![Rust](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-rust.yml) | `cargo test` (WASM crate) + `cargo check`/`clippy` (CLI crate) |
-| [![Server](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-server.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-server.yml) | `pytest server/` — 18 pass, 4 skip (pybind11 binding tests) |
+| [![Server](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-server.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-server.yml) | `pytest server/` — 18 passed, 0 skipped |
 | [![Web](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-web.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-web.yml) | `tsc --noEmit` (strict) + ESLint 9 (0 warnings) |
 
 ---
