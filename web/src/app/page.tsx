@@ -8,7 +8,10 @@ export default function Home() {
         <div className="logo font-mono">CRUCIBLE</div>
         <nav className="nav">
           <Link href="/" className="active">Home</Link>
+          <Link href="/fraud">Fraud Demo</Link>
           <Link href="/playground">Playground</Link>
+          <Link href="/benchmark">Benchmark</Link>
+          <Link href="/docs">Docs</Link>
         </nav>
       </header>
 
@@ -20,9 +23,13 @@ export default function Home() {
         </p>
 
         <div className="hero-actions">
-          <Link href="/playground" className="btn btn-primary btn-large">
+          <Link href="/fraud" className="btn btn-primary btn-large">
+            <ShieldCheck size={20} />
+            Try Fraud Detection
+          </Link>
+          <Link href="/playground" className="btn btn-secondary btn-large">
             <Play size={20} />
-            Open WASM Playground
+            WASM Playground
           </Link>
           <a 
             href="https://github.com/tanmay-alpha/Crucible" 

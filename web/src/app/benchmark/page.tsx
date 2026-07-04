@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { BarChart3, Award } from 'lucide-react';
 import { getBenchmarkResults, getChartData } from '../../lib/api';
 import LatencyChart from '../../components/LatencyChart';
+import FootprintChart from '../../components/FootprintChart';
 
 export default function BenchmarkPage() {
   const benchmarkData = getBenchmarkResults();
@@ -19,6 +20,7 @@ export default function BenchmarkPage() {
         <div className="logo font-mono">CRUCIBLE <span className="logo-accent">/ BENCHMARK</span></div>
         <nav className="nav">
           <Link href="/">Home</Link>
+          <Link href="/fraud">Fraud Demo</Link>
           <Link href="/playground">Playground</Link>
           <Link href="/benchmark" className="active">Benchmarks</Link>
           <Link href="/docs">Docs</Link>
@@ -143,6 +145,16 @@ export default function BenchmarkPage() {
               <strong>Benchmark Note:</strong> {benchmarkData.summary.note}
             </span>
           </div>
+        </div>
+
+        {/* Runtime Footprint Section */}
+        <div className="card" style={{ marginBottom: '40px' }}>
+          <h3 className="card-title">Runtime Footprint Comparison</h3>
+          <p className="card-description">
+            Crucible is the only inference engine that runs natively in the browser.
+            Binary size ~3MB vs 50MB+ for ONNX Runtime. Highlighted row (purple) = browser-capable.
+          </p>
+          <FootprintChart />
         </div>
       </main>
 
