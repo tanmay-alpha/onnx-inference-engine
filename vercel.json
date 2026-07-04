@@ -1,0 +1,9 @@
+{
+  "buildCommand": "cd web && bun install && bun run build",
+  "outputDirectory": "web/.output/public",
+  "installCommand": "echo skip",
+  "framework": null,
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
