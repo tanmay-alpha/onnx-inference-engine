@@ -53,9 +53,25 @@ COPY engine/bindings/                  engine/bindings/
 COPY engine/third_party/               engine/third_party/
 COPY server/                           server/
 
-# Build in Release mode. The cpp-builder image is throwaway, so
-# we don't bother stripping or splitting artifacts.
+# Ensure Git submodules are cloned if the build context had empty third_party folders (e.g. on Render)
+RUN mkdir -p engine/third_party \
+    && if [ ! -f engine/third_party/eigen/CMakeLists.txt ]; then \
+        echo "Cloning Eigen submodule..." && rm -rf engine/third_party/eigen \
+        && git clone --depth 1 --branch 3.4.0 https://gitlab.com/libeigen/eigen.git engine/third_party/eigen; \
+    fi \
+    && if [ ! -f engine/third_party/protobuf/CMakeLists.txt ]; then \
+        echo "Cloning Protobuf submodule..." && rm -rf engine/third_party/protobuf \
+        && git clone --depth 1 --branch v21.12 https://github.com/protocolbuffers/protobuf.git engine/third_party/protobuf; \
+    fi \
+    && if [ ! -f engine/third_party/pybind11/CMakeLists.txt ]; then \
+        echo "Cloning pybind11 submodule..." && rm -rf engine/third_party/pybind11 \
+        && git clone --depth 1 --branch v2.12.0 https://github.com/pybind/pybind11.git engine/third_party/pybind11; \
+    fi
+
+# Build in Release mode (disable tests and benchmarks to avoid needing googletest/benchmark submodules).
 RUN cmake --preset release -S engine -B build/release \
+        -DCRUCIBLE_ENABLE_TESTS=OFF \
+        -DCRUCIBLE_ENABLE_BENCHMARKS=OFF \
     && cmake --build build/release --target crucible_py --parallel
 
 # ============================================================================

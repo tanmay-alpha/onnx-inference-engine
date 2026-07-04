@@ -12,7 +12,7 @@
 # the Tensor class, ONNX parser, operators, and graph executor.
 # =============================================================================
 
-cmake_minimum_required(VERSION 3.27)
+cmake_minimum_required(VERSION 3.25)
 project(crucible
     VERSION 0.1.0
     DESCRIPTION "Zero-overhead ONNX inference engine"
@@ -25,6 +25,7 @@ project(crucible
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     message(STATUS "Crucible: no build type set, defaulting to Release")

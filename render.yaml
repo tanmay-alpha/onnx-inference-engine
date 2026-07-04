@@ -3,7 +3,7 @@ services:
   - type: web
     name: crucible-web
     runtime: static
-    buildCommand: cd web && bun install && bun run build
+    buildCommand: cd web && npm install && npm run build
     staticPublishPath: web/.output/public
     routes:
       - type: rewrite
