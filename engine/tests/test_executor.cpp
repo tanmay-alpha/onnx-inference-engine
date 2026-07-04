@@ -261,15 +261,18 @@ TEST(Executor, DanglingInputThrows) {
 // -----------------------------------------------------------------------
 
 TEST(Executor, RunsMobileNetV2Shape) {
-    // Skip gracefully if the model file isn't present — local
-    // developers may run the test suite before the download script.
-    // CI downloads the model as a separate job before this test
-    // runs, so the skip-path is never taken in CI.
-    const std::string model_path = "../../models/mobilenet_v2.onnx";
+    // Skip gracefully if the model file isn't present
+    std::string model_path = "models/mobilenet_v2.onnx";
+    if (!std::ifstream(model_path).good()) {
+        model_path = "../../models/mobilenet_v2.onnx";
+    }
+    if (!std::ifstream(model_path).good()) {
+        model_path = "../../../models/mobilenet_v2.onnx";
+    }
+
     std::ifstream probe(model_path);
     if (!probe.good()) {
-        GTEST_SKIP() << "mobilenet_v2.onnx not found at " << model_path
-                     << "; run `python models/download_models.py` first";
+        GTEST_SKIP() << "mobilenet_v2.onnx not found at models/mobilenet_v2.onnx; run `python models/download_models.py` first";
     }
     probe.close();
 

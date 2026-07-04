@@ -363,10 +363,26 @@ TEST(Conv2D, BiasShapeMismatchThrows) {
     EXPECT_THROW(conv2d_forward(X, W, bias, p), std::invalid_argument);
 }
 
-TEST(Conv2D, GroupsGreaterThanOneThrows) {
-    Tensor X = make<float>({1, 2, 3, 3}, std::vector<float>(18, 0.0f));
-    Tensor W = make<float>({2, 2, 2, 2}, std::vector<float>(16, 0.0f));
+TEST(Conv2D, GroupsNotDivideEvenlyThrows) {
+    Tensor X = make<float>({1, 3, 3, 3}, std::vector<float>(27, 0.0f));
+    Tensor W = make<float>({2, 1, 2, 2}, std::vector<float>(8, 0.0f));
     ConvParams p;
-    p.groups = 2;
+    p.groups = 2; // 3 input channels not divisible by 2 groups
     EXPECT_THROW(conv2d_forward(X, W, Tensor(), p), std::invalid_argument);
+}
+
+TEST(Conv2D, DepthwiseConvShape) {
+    // input (1,32,56,56), kernel (32,1,3,3), groups=32, stride=1, pad=1 → output (1,32,56,56)
+    Tensor X = make<float>({1, 32, 56, 56}, std::vector<float>(1 * 32 * 56 * 56, 0.0f));
+    Tensor W = make<float>({32, 1, 3, 3}, std::vector<float>(32 * 1 * 3 * 3, 0.0f));
+    ConvParams p;
+    p.groups = 32;
+    p.stride_h = 1;
+    p.stride_w = 1;
+    p.pad_h = 1;
+    p.pad_w = 1;
+
+    Tensor Y = conv2d_forward(X, W, Tensor(), p);
+
+    EXPECT_EQ(Y.shape(), (std::vector<int64_t>{1, 32, 56, 56}));
 }
