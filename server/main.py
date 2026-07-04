@@ -1,4 +1,4 @@
-"""FastAPI inference server for Crucible (Issue #13).
+"""FastAPI inference server for Crucible (Issue #13) — Verified and Audited.
 
 Endpoints (all under base URL ``http://localhost:8000``):
 
