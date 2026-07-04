@@ -4,6 +4,7 @@ import {
 } from "recharts";
 import { CrucibleLayout } from "../components/crucible/Layout";
 import { Check, X } from "lucide-react";
+import { getBenchmarkResults, getChartData } from "../lib/api";
 
 export const Route = createFileRoute("/benchmark")({
   head: () => ({
@@ -17,13 +18,19 @@ export const Route = createFileRoute("/benchmark")({
   component: BenchmarkPage,
 });
 
-const LATENCY = [
-  { size: "Tiny",   "Crucible Native":  1.3, "Crucible WASM":  2.1, "ONNX Runtime":  3.5, PyTorch:  5.4 },
-  { size: "Small",  "Crucible Native":  4.2, "Crucible WASM":  6.8, "ONNX Runtime": 10.2, PyTorch: 15.9 },
-  { size: "Medium", "Crucible Native":  8.9, "Crucible WASM": 14.2, "ONNX Runtime": 22.5, PyTorch: 31.8 },
-  { size: "Large",  "Crucible Native": 24.1, "Crucible WASM": 38.6, "ONNX Runtime": 61.4, PyTorch: 84.2 },
-  { size: "Huge",   "Crucible Native": 58.2, "Crucible WASM": 92.4, "ONNX Runtime":152.1, PyTorch:198.7 },
-];
+// Real benchmark data from our measured C++ release build
+const _bdata = getBenchmarkResults();
+const _crucible    = _bdata.results.find(r => r.engine === "crucible")!;
+const _ort         = _bdata.results.find(r => r.engine === "onnxruntime")!;
+const _torch       = _bdata.results.find(r => r.engine === "pytorch")!;
+
+// Chart data — latency vs model size from api.ts
+const LATENCY = getChartData().map(d => ({
+  size: d.size,
+  "Crucible Native": d.crucible,
+  "ONNX Runtime":    d.onnxruntime,
+  PyTorch:           d.pytorch,
+}));
 
 const FOOTPRINT = [
   { runtime: "Crucible WASM",    binaryMB:   3.1, coldMs:  48, browser: true  },
@@ -33,16 +40,24 @@ const FOOTPRINT = [
   { runtime: "PyTorch",          binaryMB: 756.0, coldMs:2100, browser: false },
 ];
 
+// Distribution table built from real stats
 const STATS = [
-  { runtime: "Crucible Native (C++/Eigen)",   min:  8.1, max: 10.4, median:  8.8, p95:  9.9, p99: 10.2, mean:  8.9, throughput: 112.4 },
-  { runtime: "Crucible WASM (Rust/SIMD128)",  min: 12.9, max: 17.4, median: 14.1, p95: 16.2, p99: 17.0, mean: 14.2, throughput: 70.4 },
-  { runtime: "ONNX Runtime (CPU)",            min: 20.1, max: 26.7, median: 22.4, p95: 25.9, p99: 26.5, mean: 22.5, throughput: 44.4 },
-  { runtime: "PyTorch (CPU)",                 min: 28.9, max: 38.2, median: 31.7, p95: 36.8, p99: 37.9, mean: 31.8, throughput: 31.4 },
+  { runtime: "Crucible Native (C++/Eigen)",
+    min: _crucible.stats.min_ms, max: _crucible.stats.max_ms, median: _crucible.stats.median_ms,
+    p95: _crucible.stats.p95_ms, p99: _crucible.stats.p99_ms, mean: _crucible.stats.mean_ms,
+    throughput: _crucible.stats.throughput_inf_per_sec },
+  { runtime: "ONNX Runtime (CPU / MLAS)",
+    min: _ort.stats.min_ms, max: _ort.stats.max_ms, median: _ort.stats.median_ms,
+    p95: _ort.stats.p95_ms, p99: _ort.stats.p99_ms, mean: _ort.stats.mean_ms,
+    throughput: _ort.stats.throughput_inf_per_sec },
+  { runtime: "PyTorch (CPU / ATen)",
+    min: _torch.stats.min_ms, max: _torch.stats.max_ms, median: _torch.stats.median_ms,
+    p95: _torch.stats.p95_ms, p99: _torch.stats.p99_ms, mean: _torch.stats.mean_ms,
+    throughput: _torch.stats.throughput_inf_per_sec },
 ];
 
 const COLORS = {
   "Crucible Native": "#152A66",
-  "Crucible WASM": "#1F3A8A",
   "ONNX Runtime": "#7A7A73",
   PyTorch: "#B45309",
 };
@@ -74,23 +89,23 @@ function BenchmarkPage() {
         <div className="c-grid-4">
           <div className="c-metric hl">
             <div className="c-metric-label">Crucible Native (C++/Eigen)</div>
-            <div className="c-metric-value">8.9 ms</div>
-            <div className="c-metric-sub">mean · Medium MLP</div>
+            <div className="c-metric-value">{_crucible.stats.mean_ms.toFixed(1)} ms</div>
+            <div className="c-metric-sub">mean · MobileNetV2 · {_crucible.stats.throughput_inf_per_sec.toFixed(0)} inf/s</div>
+          </div>
+          <div className="c-metric">
+            <div className="c-metric-label">ONNX Runtime (CPU / MLAS)</div>
+            <div className="c-metric-value">{_ort.stats.mean_ms.toFixed(1)} ms</div>
+            <div className="c-metric-sub">mean · MobileNetV2</div>
+          </div>
+          <div className="c-metric">
+            <div className="c-metric-label">PyTorch (CPU / ATen)</div>
+            <div className="c-metric-value">{_torch.stats.mean_ms.toFixed(1)} ms</div>
+            <div className="c-metric-sub">mean · MobileNetV2</div>
           </div>
           <div className="c-metric hl">
-            <div className="c-metric-label">Crucible WASM (Rust/SIMD128)</div>
-            <div className="c-metric-value">14.2 ms</div>
-            <div className="c-metric-sub">mean · Medium MLP · in-browser</div>
-          </div>
-          <div className="c-metric">
-            <div className="c-metric-label">ONNX Runtime (CPU)</div>
-            <div className="c-metric-value">22.5 ms</div>
-            <div className="c-metric-sub">mean · Medium MLP</div>
-          </div>
-          <div className="c-metric">
-            <div className="c-metric-label">PyTorch (CPU)</div>
-            <div className="c-metric-value">31.8 ms</div>
-            <div className="c-metric-sub">mean · Medium MLP</div>
+            <div className="c-metric-label">Crucible WASM — Binary Size</div>
+            <div className="c-metric-value">3.1 MB</div>
+            <div className="c-metric-sub">16× smaller than ONNX Runtime</div>
           </div>
         </div>
 
@@ -106,7 +121,6 @@ function BenchmarkPage() {
                 <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "rgba(31,58,138,.08)" }} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Bar dataKey="Crucible Native" fill={COLORS["Crucible Native"]} radius={[2, 2, 0, 0]} />
-                <Bar dataKey="Crucible WASM" fill={COLORS["Crucible WASM"]} radius={[2, 2, 0, 0]} />
                 <Bar dataKey="ONNX Runtime" fill={COLORS["ONNX Runtime"]} radius={[2, 2, 0, 0]} />
                 <Bar dataKey="PyTorch" fill={COLORS.PyTorch} radius={[2, 2, 0, 0]} />
               </BarChart>
