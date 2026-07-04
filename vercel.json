@@ -1,9 +1,4 @@
 {
-  "buildCommand": "cd web && npm install && npm run build",
-  "outputDirectory": "web/.vercel/output/static",
-  "installCommand": "echo skip",
-  "framework": null,
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
-  ]
+  "buildCommand": "cd web && npm install && npm run build && cp -r .vercel ../",
+  "installCommand": "echo skip"
 }
