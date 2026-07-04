@@ -1,43 +1,29 @@
 # =============================================================================
-# Crucible — Generated/Build artifacts
+# Crucible — Git Ignore System
 # =============================================================================
 
-# CMake
+# Build directories
+engine/build/
+cli/target/
+wasm/target/
+wasm/pkg/
+web/.next/
 build/
-cmake-build-*/
-CMakeCache.txt
-CMakeFiles/
-CMakeScripts/
-Testing/
-cmake_install.cmake
-install_manifest.txt
-compile_commands.json
-CTestTestfile.cmake
+dist/
+out/
+.turbo/
+
+# Package managers & dependencies
+node_modules/
 _deps/
 
-# C/C++ object/dependency/binary files
-*.o
-*.obj
-*.a
-*.lib
-*.so
-*.so.*
-*.dylib
-*.dll
-*.exe
-*.pdb
-*.ilk
-*.exp
-*.idb
-
-# Python
+# Python caching & environments
 __pycache__/
+*.pyc
 *.py[cod]
 *$py.class
 *.egg-info/
 .eggs/
-build/
-dist/
 .venv/
 venv/
 env/
@@ -45,29 +31,43 @@ env/
 .mypy_cache/
 .ruff_cache/
 
-# Node / Next.js
-node_modules/
-.next/
-out/
-.turbo/
-*.tsbuildinfo
+# Dynamic libraries & native binaries
+*.so
+*.so.*
+*.dylib
+*.dll
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.idb
 
-# Rust / WASM
-cli/target/
-wasm/target/
-wasm/pkg/
-Cargo.lock.bak
+# Configuration & environment variables
+.env
+.env.local
+.env.development
+.env.production
+.env.staging
 
-# Editor / OS
+# OS & editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
 .vscode/
 .idea/
 *.swp
 *.swo
-.DS_Store
-Thumbs.db
-desktop.ini
 
-# Model artifacts (large)
+# Backup & temporary files
+*.orig
+*.bak
+Cargo.lock.bak
+
+# Large model artifacts
 models/*.onnx
 models/*.pt
 models/*.pth
@@ -75,9 +75,5 @@ models/*.pth
 !models/download_models.py
 
 # Benchmark outputs
-benchmarks/results/*.json
+benchmarks/results/benchmark_results.json
 !benchmarks/results/.gitkeep
-
-# Environment
-.env
-.env.local
