@@ -1,6 +1,6 @@
 {
   "buildCommand": "cd web && npm install && npm run build",
-  "outputDirectory": "web/.output/public",
+  "outputDirectory": "web/.vercel/output/static",
   "installCommand": "echo skip",
   "framework": null,
   "rewrites": [
