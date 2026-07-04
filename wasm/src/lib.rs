@@ -691,6 +691,78 @@ pub fn run_inference(
 }
 
 // ============================================================================
+// Typed fraud-detection convenience wrapper
+// ============================================================================
+//
+// Normalisation constants baked in from models/fraud/model_config.json.
+// Input features (7): amount, oldbalanceOrg, newbalanceOrig, oldbalanceDest,
+//   newbalanceDest, type_CASH_OUT (0/1), type_TRANSFER (0/1)
+// Output: fraud probability in [0, 1]
+
+const FRAUD_MEAN: [f32; 7] = [
+    11948.5234375,
+    86466.6171875,
+    74708.890625,
+    59117.32421875,
+    71066.4609375,
+    0.34942499,
+    0.15512501,
+];
+
+const FRAUD_STD: [f32; 7] = [
+    68235.4140625,
+    100729.7578125,
+    80026.859375,
+    59793.71875,
+    86849.28125,
+    0.47677723,
+    0.36204198,
+];
+
+#[wasm_bindgen(js_name = runFraudModel)]
+pub fn run_fraud_model(
+    model_bytes: &[u8],
+    amount: f32,
+    old_balance_orig: f32,
+    new_balance_orig: f32,
+    old_balance_dest: f32,
+    new_balance_dest: f32,
+    is_cash_out: f32,
+    is_transfer: f32,
+) -> Result<f32, JsValue> {
+    let raw = [
+        amount,
+        old_balance_orig,
+        new_balance_orig,
+        old_balance_dest,
+        new_balance_dest,
+        is_cash_out,
+        is_transfer,
+    ];
+
+    // Z-score normalise
+    let normalised: Vec<f32> = raw
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v - FRAUD_MEAN[i]) / FRAUD_STD[i])
+        .collect();
+
+    let mut cursor = Cursor::new(model_bytes);
+    let model = parse_model(&mut cursor).map_err(|e| JsValue::from_str(&e))?;
+
+    let output = run_inference_internal(&model, &normalised, &[1, 7])
+        .map_err(|e| JsValue::from_str(&e))?;
+
+    // output is shape [1,1]; return the single probability value
+    output
+        .data
+        .first()
+        .copied()
+        .ok_or_else(|| JsValue::from_str("run_fraud_model: empty output tensor"))
+}
+
+
+// ============================================================================
 // Unit Tests
 // ============================================================================
 

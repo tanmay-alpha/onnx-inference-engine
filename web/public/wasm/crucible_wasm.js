@@ -2,6 +2,27 @@
 
 /**
  * @param {Uint8Array} model_bytes
+ * @param {number} amount
+ * @param {number} old_balance_orig
+ * @param {number} new_balance_orig
+ * @param {number} old_balance_dest
+ * @param {number} new_balance_dest
+ * @param {number} is_cash_out
+ * @param {number} is_transfer
+ * @returns {number}
+ */
+export function runFraudModel(model_bytes, amount, old_balance_orig, new_balance_orig, old_balance_dest, new_balance_dest, is_cash_out, is_transfer) {
+    const ptr0 = passArray8ToWasm0(model_bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.runFraudModel(ptr0, len0, amount, old_balance_orig, new_balance_orig, old_balance_dest, new_balance_dest, is_cash_out, is_transfer);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0];
+}
+
+/**
+ * @param {Uint8Array} model_bytes
  * @param {Float32Array} input_data
  * @param {Int32Array} input_shape
  * @returns {Float32Array}
