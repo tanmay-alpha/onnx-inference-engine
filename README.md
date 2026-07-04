@@ -25,9 +25,22 @@ MobileNetV2 in 14ms on CPU. No Python at runtime. Runs in your browser.
 
 ## Demo
 
-![Crucible Web Demo — WASM inference in browser](docs/demo.png)
+![Crucible Web Demo — WASM inference in browser](docs/screenshots/landing.png)
 
 > Upload any `.onnx` model at [`localhost:3000/playground`](http://localhost:3000/playground) and run inference entirely in your browser — no server, no Python, pure WebAssembly.
+
+---
+
+## Screenshots
+
+* **Landing page:**  
+  ![Landing page](docs/screenshots/landing.png)
+
+* **3-engine benchmark chart:**  
+  ![3-engine benchmark chart](docs/screenshots/benchmark.png)
+
+* **Supported operators reference:**  
+  ![Supported operators reference](docs/screenshots/operators.png)
 
 ---
 
