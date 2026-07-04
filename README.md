@@ -92,6 +92,18 @@ See [WRITEUP.md](./WRITEUP.md) for a 4-page technical deep-dive into the archite
 
 ---
 
+## How It Works
+
+**Parsing:** Crucible reads `.onnx` models, which are structured using Protocol Buffers (`onnx.proto3`). The custom C++ protobuf parser decodes the serialised file block-by-block. It extracts static model weights (stored in `GraphProto.initializer[]` as `TensorProto` arrays) and binds them directly into the `Model.weights` map, while compiling the runtime operators (`GraphProto.node[]`) into a sequential list of `GraphNode` structs. Input and output descriptors are mapped using `ValueInfoProto` data to validate dimensions at load time.
+
+**Execution:** The graph executor constructs a Directed Acyclic Graph (DAG) from the parsed nodes. It schedules node execution by computing in-degree counts and running Kahn's topological sort algorithm, outputting an ordered queue of executable operators. During inference, the executor maintains a live `tensor_map` containing intermediate feature maps. It traverses the sorted queue, dispatching inputs to the corresponding C++ operator kernels (e.g. `Gemm`, `Conv2D`, `ReLU`) and saving the computed outputs to the `tensor_map` for downstream nodes.
+
+**Memory Management:** Tensors are stored in contiguous row-major format utilizing a standard NCHW (Batch, Channels, Height, Width) dimensional layout. To eliminate pointer arithmetic overhead and cache fragmentation, each `Tensor` object manages its own contiguous storage using a `std::vector<float>` container. Crucible relies on value-return semantics (returning new `Tensor` objects) rather than in-place mutation. This approach guarantees that intermediate activations remain immutable, simplifies memory footprint auditing, prevents memory aliasing bugs under multi-threaded environments, and ensures exceptionally clean memory ownership boundaries.
+
+**FFI & WebAssembly:** The browser-based WebAssembly module is a pure-Rust subset because standard C++ dynamic libraries and file I/O operations cannot be cleanly compiled into a sandboxed `wasm32` target. For native environments, an `extern "C"` ABI bridge maps the C++ engine to a Rust CLI crate. To resolve the classic DLL boundary allocator problem (where memory allocated in one dynamic library by one runtime cannot be safely freed by another), Crucible's C ABI exposes dedicated deallocation functions (`crucible_free_buffer`, `crucible_free_model`). This design guarantees that the same dynamic library allocating a heap segment is also the one that deallocates it.
+
+---
+
 ## Language Map
 
 | Language | Where | Why |
@@ -253,6 +265,16 @@ Built by **Tanmay** (VIT Bhopal, CS batch 2028) as a 30-day, 20-issue project.
 > "Built Crucible, a from-scratch ONNX inference engine in C++17 with Eigen for tensor math, pybind11 Python bindings, Rust CLI, and WebAssembly build — runs MobileNetV2 in 14ms on CPU with zero Python runtime dependency."
 
 See [WRITEUP.md](./WRITEUP.md) for the technical research note.
+
+---
+
+## What I Learned
+
+- **CRT Heap Mismatch & DLL Boundary Allocator:** Memory allocated by one runtime heap context (e.g., MSVC Debug CRT in a C++ DLL) cannot be safely deallocated by another (e.g., Release CRT in a Rust CLI caller). This requires implementing dedicated deallocation functions (`crucible_free_buffer`, `crucible_free_model`) exported at the DLL boundary to align allocator context.
+- **ONNX Protobuf Specification Nuances:** In the ONNX format, static weights reside inside `GraphProto.initializer` as `TensorProto` arrays but are also listed inside `GraphProto.input` as standard graph inputs. Thus, runtime validation must filter out initializer names to avoid throwing missing input errors.
+- **C++ Value-Return Semantics vs. In-Place Mutation:** Implementing non-mutating operators returning new `Tensor` values simplifies memory ownership auditing, prevents multi-threaded aliasing bugs, and keeps intermediate activation states immutable, though it incurs additional memory buffer copies.
+- **Group/Depthwise Convolution Slicing:** Generalizing the im2col transformation to support grouped convolutions requires partition-level channel offsets for both the input activations and weight filters, running independent sub-matrix GEMMs before concatenating output arrays.
+- **Protocol Buffer Packed Primitive Decoding:** Parsing repeating numbers under ONNX's Protobuf encoding demands wire-type checks to process both unpacked (individual tags) and packed (length-delimited sub-buffer cursors) primitive sequences correctly.
 
 ---
 
