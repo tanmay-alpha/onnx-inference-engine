@@ -1,12 +1,15 @@
 /* tslint:disable */
 /* eslint-disable */
 
+export function runFraudModel(model_bytes: Uint8Array, amount: number, old_balance_orig: number, new_balance_orig: number, old_balance_dest: number, new_balance_dest: number, is_cash_out: number, is_transfer: number): number;
+
 export function runInference(model_bytes: Uint8Array, input_data: Float32Array, input_shape: Int32Array): Float32Array;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly runFraudModel: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
     readonly runInference: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
