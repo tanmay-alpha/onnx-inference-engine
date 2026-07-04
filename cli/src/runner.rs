@@ -35,7 +35,6 @@ use thiserror::Error;
 /// Mirrors `CrucibleStatus` in c_api.h.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Status {
     Ok                   = 0,
     InvalidArgument      = 1,
@@ -44,6 +43,19 @@ pub enum Status {
     Runtime              = 4,
     Unsupported          = 5,
     Internal             = 6,
+}
+
+#[cfg(test)]
+fn _dummy_instantiate_status() {
+    let _ = [
+        Status::Ok,
+        Status::InvalidArgument,
+        Status::Io,
+        Status::Parse,
+        Status::Runtime,
+        Status::Unsupported,
+        Status::Internal,
+    ];
 }
 
 /// Mirrors `CrucibleModelInfo`. Populated by `model_info`.
@@ -96,8 +108,6 @@ extern "C" {
         num_outputs:  i32,
     ) -> Status;
     fn crucible_last_error() -> *const c_char;
-    #[allow(dead_code)]
-    fn crucible_status_str(s: Status) -> *const c_char;
     fn crucible_free_array(ptr: *mut std::ffi::c_void);
 }
 
@@ -363,22 +373,6 @@ impl Tensor {
                 data.len())));
         }
         Ok(Tensor { shape, data })
-    }
-
-    /// Write JSON tensor file. Inverse of `from_json_file`.
-    #[allow(dead_code)]
-    pub fn to_json_file(&self, path: &Path) -> Result<(), CrucibleError> {
-        let mut s = String::with_capacity(self.data.len() * 12);
-        s.push_str(&serde_json::to_string(&self.shape).unwrap_or_else(|_| "[]".into()));
-        s.push('\n');
-        let body: Vec<serde_json::Value> = self.data
-            .iter()
-            .map(|f| serde_json::Value::from(*f as f64))
-            .collect();
-        s.push_str(&serde_json::to_string(&body).unwrap_or_else(|_| "[]".into()));
-        s.push('\n');
-        std::fs::write(path, s)?;
-        Ok(())
     }
 }
 

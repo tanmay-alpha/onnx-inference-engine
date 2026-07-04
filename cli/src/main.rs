@@ -116,6 +116,16 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Satisfy dead-code analysis for FFI variants that are matched but not constructed in the normal Rust execution flow.
+    let _ = [
+        runner::Status::Ok,
+        runner::Status::InvalidArgument,
+        runner::Status::Io,
+        runner::Status::Parse,
+        runner::Status::Runtime,
+        runner::Status::Unsupported,
+        runner::Status::Internal,
+    ];
     let cli = Cli::parse();
     match dispatch(cli) {
         Ok(())  => ExitCode::SUCCESS,
