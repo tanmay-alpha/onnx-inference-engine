@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Shield, Lock, AlertTriangle, Inbox } from "lucide-react";
 import { CrucibleLayout } from "../components/crucible/Layout";
+import { runFraudDetection } from "../lib/crucible-wasm";
 
 export const Route = createFileRoute("/fraud")({
   head: () => ({
@@ -46,8 +47,8 @@ function verdict(p: number): { label: string; tone: "ok" | "warn" | "err" } {
   return { label: "Low risk", tone: "ok" };
 }
 
-function scoreTx(tx: Tx): number {
-  // Heuristic that mimics an on-device ONNX model output
+function heuristicScore(tx: Tx): number {
+  // Local fallback if WASM fails to load
   const drained = tx.origBefore > 0 && tx.origAfter / tx.origBefore < 0.02;
   const bigAmount = tx.amount >= 100000;
   const zeroedDest = tx.destBefore + tx.destAfter === 0 && tx.amount > 1000;
@@ -68,16 +69,30 @@ function FraudPage() {
 
   const update = <K extends keyof Tx>(k: K, v: Tx[K]) => setTx((t) => ({ ...t, [k]: v }));
 
-  const run = () => {
+  const run = async () => {
     setStatus("running");
     setResult(null);
     const start = performance.now();
-    setTimeout(() => {
-      const p = scoreTx(tx);
-      const latency = 0.5 + Math.random() * 0.8 + (performance.now() - start) * 0;
-      setResult({ fraud: p >= 0.5, probability: p, latencyMs: Number(latency.toFixed(2)), modelBytes: 220 });
-      setStatus("done");
-    }, 820);
+    try {
+      // Map form fields to FraudDetectionParams
+      const wasmResult = await runFraudDetection({
+        type: tx.type,
+        amount: tx.amount,
+        oldBalanceOrig: tx.origBefore,
+        newBalanceOrig: tx.origAfter,
+        oldBalanceDest: tx.destBefore,
+        newBalanceDest: tx.destAfter,
+      });
+      const latency = Number((performance.now() - start).toFixed(2));
+      setResult({ fraud: wasmResult.probability >= 0.5, probability: wasmResult.probability, latencyMs: latency, modelBytes: 220 });
+    } catch (err) {
+      // WASM unavailable — use heuristic fallback
+      console.warn("WASM inference failed, using heuristic fallback:", err);
+      const p = heuristicScore(tx);
+      const latency = Number((performance.now() - start).toFixed(2));
+      setResult({ fraud: p >= 0.5, probability: p, latencyMs: latency, modelBytes: 0 });
+    }
+    setStatus("done");
   };
 
   const v = result ? verdict(result.probability) : null;

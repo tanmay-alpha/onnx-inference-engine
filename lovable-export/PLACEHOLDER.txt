@@ -1,4 +1,0 @@
-Extract the contents of your Lovable zip file directly into this folder (c:\Users\TANMAY\OneDrive\Desktop\Crucible\lovable-export). 
-
-Once extracted, you will have files like lovable-export/package.json, lovable-export/src, etc. in here.
-Then let me know, and I will handle moving, cleaning up the old frontend, and integration!
