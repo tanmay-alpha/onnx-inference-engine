@@ -207,38 +207,6 @@ function Home() {
         </div>
       </section>
 
-      {/* FINAL CTA */}
-      <section className="c-container" style={{ paddingTop: 24, paddingBottom: 96 }}>
-        <div
-          style={{
-            border: "1px solid var(--rule)",
-            background: "var(--paper)",
-            padding: "56px 48px",
-            display: "grid",
-            gridTemplateColumns: "1.4fr auto",
-            gap: 32,
-            alignItems: "center",
-          }}
-          className="c-hero-split"
-        >
-          <div>
-            <h2 className="c-h2" style={{ fontFamily: "var(--f-serif)", fontSize: "clamp(24px, 2.6vw, 34px)", lineHeight: 1.15, marginBottom: 10 }}>
-              See how local fraud inference feels in practice.
-            </h2>
-            <p className="c-muted" style={{ fontSize: 15, maxWidth: "56ch" }}>
-              Run the demo, inspect the model, or compare the runtime against larger server-side stacks.
-            </p>
-          </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <Link to="/fraud" className="c-btn c-btn-primary c-btn-lg">
-              Open Fraud Demo <ArrowRight size={14} />
-            </Link>
-            <Link to="/benchmark" className="c-btn c-btn-secondary c-btn-lg">
-              Open Benchmark
-            </Link>
-          </div>
-        </div>
-      </section>
     </CrucibleLayout>
   );
 }
