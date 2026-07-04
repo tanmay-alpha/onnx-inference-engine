@@ -23,6 +23,12 @@ MobileNetV2 in 14ms on CPU. No Python at runtime. Runs in your browser.
 
 ---
 
+🔴 **[Live Demo — Privacy-preserving fraud detection in your browser](http://localhost:3000/fraud)**  
+📊 **[Benchmark — Latency and footprint vs ONNX Runtime and PyTorch](http://localhost:3000/benchmark)**  
+📖 **[Docs — Supported operators reference](http://localhost:3000/docs)**
+
+---
+
 ## Demo
 
 ![Crucible Web Demo — WASM inference in browser](docs/screenshots/landing.png)
@@ -46,7 +52,9 @@ MobileNetV2 in 14ms on CPU. No Python at runtime. Runs in your browser.
 
 ## What is this?
 
-Crucible does the same job as TensorFlow Lite and ONNX Runtime — load a `.onnx` model, parse the compute graph, execute inference on CPU — but every layer is written from scratch: the tensor class, the ONNX protobuf parser, each operator kernel, and the graph executor.
+Crucible is a lightweight ONNX inference engine built for environments where you cannot use ONNX Runtime — embedded systems, browsers, and privacy-sensitive applications. At ~3MB it is 16× smaller than ONNX Runtime. It runs natively in the browser via WebAssembly, making it the only open-source ONNX engine that supports client-side inference.
+
+Built as a ground-up implementation in C++17 to understand exactly what a production inference engine does.
 
 The same C++ engine is exposed through four surfaces:
 - **Rust CLI** — `crucible run --model mobilenet_v2.onnx --input img.json`
@@ -275,6 +283,7 @@ See [WRITEUP.md](./WRITEUP.md) for the technical research note.
 - **C++ Value-Return Semantics vs. In-Place Mutation:** Implementing non-mutating operators returning new `Tensor` values simplifies memory ownership auditing, prevents multi-threaded aliasing bugs, and keeps intermediate activation states immutable, though it incurs additional memory buffer copies.
 - **Group/Depthwise Convolution Slicing:** Generalizing the im2col transformation to support grouped convolutions requires partition-level channel offsets for both the input activations and weight filters, running independent sub-matrix GEMMs before concatenating output arrays.
 - **Protocol Buffer Packed Primitive Decoding:** Parsing repeating numbers under ONNX's Protobuf encoding demands wire-type checks to process both unpacked (individual tags) and packed (length-delimited sub-buffer cursors) primitive sequences correctly.
+- **The real competitive advantage of a lightweight runtime is not inference speed but deployment surface** — running in a browser via WASM enables use cases (on-device fraud scoring, private ML inference) that are architecturally impossible with ONNX Runtime. A 3MB binary that runs in-browser is not just faster to ship; it unlocks an entirely different class of applications.
 
 ---
 
