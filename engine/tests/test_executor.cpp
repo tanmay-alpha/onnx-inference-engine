@@ -294,3 +294,104 @@ TEST(Executor, RunsMobileNetV2Shape) {
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], 1000);
 }
+
+TEST(Executor, ConcatOperator) {
+    Model model;
+    model.input_names = {"A", "B"};
+    model.output_names = {"Y"};
+
+    GraphNode concat;
+    concat.op_type = "Concat";
+    concat.name = "c0";
+    concat.inputs = {"A", "B"};
+    concat.outputs = {"Y"};
+    model.graph.node = {concat};
+
+    Tensor A({2, 3}, {1, 2, 3, 4, 5, 6});
+    Tensor B({2, 3}, {7, 8, 9, 10, 11, 12});
+    std::unordered_map<std::string, Tensor> inputs{{"A", A}, {"B", B}};
+
+    Tensor Y = run_inference(model, inputs);
+    EXPECT_EQ(Y.shape(), (std::vector<int64_t>{4, 3}));
+    std::vector<float> expected = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    for (int64_t i = 0; i < Y.size(); ++i) {
+        EXPECT_FLOAT_EQ(Y.data()[i], expected[i]);
+    }
+}
+
+TEST(Executor, AddOperatorSameShape) {
+    Model model;
+    model.input_names = {"A", "B"};
+    model.output_names = {"Y"};
+
+    GraphNode add;
+    add.op_type = "Add";
+    add.name = "add0";
+    add.inputs = {"A", "B"};
+    add.outputs = {"Y"};
+    model.graph.node = {add};
+
+    Tensor A({2, 2}, {1, 2, 3, 4});
+    Tensor B({2, 2}, {5, 6, 7, 8});
+    std::unordered_map<std::string, Tensor> inputs{{"A", A}, {"B", B}};
+
+    Tensor Y = run_inference(model, inputs);
+    EXPECT_EQ(Y.shape(), (std::vector<int64_t>{2, 2}));
+    std::vector<float> expected = {6, 8, 10, 12};
+    for (int64_t i = 0; i < Y.size(); ++i) {
+        EXPECT_FLOAT_EQ(Y.data()[i], expected[i]);
+    }
+}
+
+TEST(Executor, AddOperatorBroadcast) {
+    Model model;
+    model.input_names = {"A", "B"};
+    model.output_names = {"Y"};
+
+    GraphNode add;
+    add.op_type = "Add";
+    add.name = "add0";
+    add.inputs = {"A", "B"};
+    add.outputs = {"Y"};
+    model.graph.node = {add};
+
+    Tensor A({1, 2, 1, 2}, {10, 20, 30, 40});
+    Tensor B({2}, {1, 2});
+    std::unordered_map<std::string, Tensor> inputs{{"A", A}, {"B", B}};
+
+    Tensor Y = run_inference(model, inputs);
+    EXPECT_EQ(Y.shape(), (std::vector<int64_t>{1, 2, 1, 2}));
+    std::vector<float> expected = {11, 21, 32, 42};
+    for (int64_t i = 0; i < Y.size(); ++i) {
+        EXPECT_FLOAT_EQ(Y.data()[i], expected[i]);
+    }
+}
+
+TEST(Executor, IdentityAndDropoutOperator) {
+    Model model;
+    model.input_names = {"A", "B"};
+    model.output_names = {"Y", "Z"};
+
+    GraphNode identity;
+    identity.op_type = "Identity";
+    identity.name = "id0";
+    identity.inputs = {"A"};
+    identity.outputs = {"Y"};
+
+    GraphNode dropout;
+    dropout.op_type = "Dropout";
+    dropout.name = "drop0";
+    dropout.inputs = {"B"};
+    dropout.outputs = {"Z"};
+
+    model.graph.node = {identity, dropout};
+
+    Tensor A({2}, {1.5f, 2.5f});
+    Tensor B({2}, {3.5f, 4.5f});
+    std::unordered_map<std::string, Tensor> inputs{{"A", A}, {"B", B}};
+
+    Tensor Y = run_inference(model, inputs);
+    EXPECT_EQ(Y.shape(), (std::vector<int64_t>{2}));
+    EXPECT_FLOAT_EQ(Y.data()[0], 1.5f);
+    EXPECT_FLOAT_EQ(Y.data()[1], 2.5f);
+}
