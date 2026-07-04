@@ -205,7 +205,9 @@ All benchmarks use the same setup:
 Three engines benchmarked from `benchmarks/run_all.py`:
 - **Crucible:** via Python bindings (`crucible_py.run`)
 - **ONNX Runtime 1.27:** via `onnxruntime.InferenceSession`
-- **PyTorch 2.3:** via `torch.nn.Module.forward` with `torch.no_grad()` (tiny stub)
+- PyTorch 2.3: via `torch.nn.Module.forward` with `torch.no_grad()` (tiny stub)
+
+The benchmark results are displayed interactively in the Next.js frontend (see `docs/screenshots/benchmark.png`).
 
 ### 6.2 Results
 
@@ -262,6 +264,8 @@ The numpy ↔ Tensor bridge uses `py::array_t<float, py::array::c_style | py::ar
 The C++ engine cannot compile to WebAssembly — the standard library's file I/O, dynamic linking, and exception handling are not available in the WASM sandbox. Instead, `wasm/src/lib.rs` implements a **pure-Rust subset** of 4 operators (MatMul, ReLU, Softmax, Sigmoid) that covers the operators exposed in the web demo's emulation mode.
 
 The WASM module is compiled with `wasm-pack build --target web` and produces `crucible_wasm_bg.wasm` + `crucible_wasm.js`. The TypeScript loader (`web/src/lib/crucible-wasm.ts`) lazily initialises the WASM instance on first call.
+
+An interactive demo is served on the landing and playground pages of the Next.js application (see `docs/screenshots/landing.png` and `docs/screenshots/operators.png`).
 
 ---
 
