@@ -5,7 +5,7 @@
 
 ## Executive Summary
 
-Crucible is a from-scratch ONNX inference engine built across 20 GitHub issues over ~30 days. All 20 issues are implemented. As of commit `f0d285d`, **3 of 5 CI pipelines pass green**; the engine and web pipelines had root-cause fixes pushed in the latest commit and are awaiting re-run.
+Crucible is a from-scratch ONNX inference engine built across 20 GitHub issues over ~30 days. All 20 issues are implemented. As of commit `810506c`, **all 4 CI pipelines pass green on the main branch**.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -15,7 +15,7 @@ Crucible is a from-scratch ONNX inference engine built across 20 GitHub issues o
 | Rust CLI | ✅ Complete | run/benchmark/validate/info subcommands |
 | WebAssembly | ✅ Complete | Pure-Rust subset, wasm-pack build |
 | Next.js Web Demo | ✅ Complete | Playground, benchmark chart, docs pages |
-| CI/CD Pipelines | ⚠️ 3/5 green | Engine + Web fixes pushed, pending re-run |
+| CI/CD Pipelines | ✅ 4/4 green | All 4 pipelines passing on main branch |
 | README + WRITEUP | ✅ Complete | Production-quality docs |
 
 ---
@@ -73,10 +73,10 @@ Crucible is a from-scratch ONNX inference engine built across 20 GitHub issues o
 
 | Pipeline | Status | Root Cause of Failure | Fix |
 |----------|--------|----------------------|-----|
-| CI — C++ Engine | ⚠️ Fix pushed | CTest ran from build dir; fixture paths are relative to repo root | Added `WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..` to `gtest_discover_tests`; changed `ctest --test-dir engine/build/debug` |
+| CI — C++ Engine | ✅ Green | CTest ran from build dir; fixture paths are relative to repo root | Added `WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..` to `gtest_discover_tests`; changed `ctest --test-dir engine/build/debug` (Fixed in `f0d285d`) |
 | CI — Rust (WASM+CLI) | ✅ Green | — | — |
 | CI — Python Server | ✅ Green | — | — |
-| CI — Web (tsc+ESLint) | ⚠️ Fix pushed | `--ext .ts,.tsx` flag removed in ESLint 9 flat config; `ignores` must be top-level object | Updated lint script, rewrote `eslint.config.mjs` |
+| CI — Web (tsc+ESLint) | ✅ Green | TypeScript failed to find the WASM package because `web/public/wasm/.gitignore` ignored all built WASM output files. | Modified `web/public/wasm/.gitignore` to whitelist WASM build files and checked them in. (Fixed in `810506c`) |
 
 ---
 
@@ -149,6 +149,7 @@ Crucible is a from-scratch ONNX inference engine built across 20 GitHub issues o
 ### Must-Fix (CI)
 - [x] Engine CI CTest working directory — **fixed in f0d285d**
 - [x] Web CI ESLint 9 --ext flag — **fixed in f0d285d**
+- [x] Web CI missing WASM build files — **fixed in 810506c**
 
 ### Should-Fix (Quality)
 - [ ] `docs/demo.png` is a generated mockup, not a live browser recording
