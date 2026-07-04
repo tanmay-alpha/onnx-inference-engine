@@ -1,0 +1,9 @@
+# Allow committing the built WASM files so that Next.js CI typecheck and build work
+# without needing a full Rust + wasm-pack setup on the web CI runner.
+*
+!crucible_wasm.d.ts
+!crucible_wasm.js
+!crucible_wasm_bg.wasm
+!crucible_wasm_bg.wasm.d.ts
+!package.json
+!.gitignore

@@ -1,0 +1,16 @@
+{
+  "name": "crucible-wasm",
+  "type": "module",
+  "description": "Pure Rust WASM reimplementation of Crucible inference engine",
+  "version": "0.1.0",
+  "files": [
+    "crucible_wasm_bg.wasm",
+    "crucible_wasm.js",
+    "crucible_wasm.d.ts"
+  ],
+  "main": "crucible_wasm.js",
+  "types": "crucible_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
