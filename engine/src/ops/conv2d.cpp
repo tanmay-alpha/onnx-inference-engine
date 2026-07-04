@@ -109,10 +109,9 @@ Tensor conv2d_forward(const Tensor& input,
             "conv2d_forward: weight must be rank 4 (C_out,C_in,kH,kW), got rank " +
             std::to_string(weight.rank()));
     }
-    if (p.groups != 1) {
+    if (p.groups <= 0) {
         throw std::invalid_argument(
-            "conv2d_forward: groups != 1 is not implemented in Issue #7 "
-            "(got groups=" + std::to_string(p.groups) + ")");
+            "conv2d_forward: groups must be positive, got groups=" + std::to_string(p.groups));
     }
     if (p.stride_h <= 0 || p.stride_w <= 0) {
         throw std::invalid_argument(
@@ -134,15 +133,21 @@ Tensor conv2d_forward(const Tensor& input,
     const int64_t kH    = weight.shape()[2];
     const int64_t kW    = weight.shape()[3];
 
-    if (w_C != C_in) {
+    if (w_C * p.groups != C_in) {
         throw std::invalid_argument(
-            "conv2d_forward: weight C_in (" + std::to_string(w_C) +
+            "conv2d_forward: weight C_in * groups (" + std::to_string(w_C * p.groups) +
             ") != input C (" + std::to_string(C_in) + ")");
     }
+    if (C_out % p.groups != 0) {
+        throw std::invalid_argument(
+            "conv2d_forward: C_out (" + std::to_string(C_out) +
+            ") must be divisible by groups (" + std::to_string(p.groups) + ")");
+    }
+
+    const int64_t C_in_g  = C_in / p.groups;
+    const int64_t C_out_g = C_out / p.groups;
 
     // ---- 2. Output spatial dimensions --------------------------------------
-    // ONNX formula for stride/pad: out = floor((in + 2*pad - k) / stride) + 1
-    // (no dilation in Issue #7 scope).
     const int64_t num_h = H + 2 * p.pad_h - kH;
     const int64_t num_w = W + 2 * p.pad_w - kW;
     if (num_h < 0 || num_w < 0) {
@@ -161,7 +166,6 @@ Tensor conv2d_forward(const Tensor& input,
     }
 
     // ---- 3. Optional bias ---------------------------------------------------
-    // bias is rank-1 (C_out,) or empty. Validate the non-empty case.
     const float* bias_ptr = nullptr;
     if (bias.size() > 0) {
         if (bias.rank() != 1 || bias.shape()[0] != C_out) {
@@ -177,40 +181,47 @@ Tensor conv2d_forward(const Tensor& input,
         bias_ptr = bias.data();
     }
 
-    // ---- 4. Reshape weight to (C_out, C_in*kH*kW) row-major -----------------
-    RowMatrix wmat = weight_to_2d(weight, C_out, C_in, kH, kW);
-
-    // ---- 5. Allocate output -------------------------------------------------
+    // ---- 4. Allocate output -------------------------------------------------
     Tensor output({N, C_out, out_h, out_w}, 0.0f);
-    const int64_t ksize = C_in * kH * kW;
 
-    // ---- 6. Per-batch loop: im2col + GEMM + bias ----------------------------
+    // ---- 5. Pre-reshape weights for each group -----------------------------
+    std::vector<RowMatrix> w_mats;
+    w_mats.reserve(p.groups);
+    for (int g = 0; g < p.groups; ++g) {
+        const float* w_slice_start = weight.data() + g * C_out_g * w_C * kH * kW;
+        Tensor temp_w({C_out_g, w_C, kH, kW}, std::vector<float>(w_slice_start, w_slice_start + C_out_g * w_C * kH * kW));
+        w_mats.push_back(weight_to_2d(temp_w, C_out_g, w_C, kH, kW));
+    }
+
+    // ---- 6. Per-batch & Per-group loop: im2col + GEMM + bias ----------------
+    const int64_t ksize = w_C * kH * kW;
+
     for (int64_t n = 0; n < N; ++n) {
-        // Pointer to this batch's input slice (N, C_in, H, W).
-        const float* x = input.data() + n * (C_in * H * W);
+        for (int g = 0; g < p.groups; ++g) {
+            // Pointer to this batch's, this group's input slice (C_in_g, H, W).
+            const float* x = input.data() + n * (C_in * H * W) + g * (C_in_g * H * W);
 
-        // im2col → (out_h*out_w, ksize) row-major.
-        RowMatrix col_mat(out_h * out_w, ksize);
-        im2col(x, C_in, H, W, kH, kW,
-               out_h, out_w,
-               p.stride_h, p.stride_w, p.pad_h, p.pad_w,
-               col_mat);
+            // im2col → (out_h*out_w, ksize) row-major.
+            RowMatrix col_mat(out_h * out_w, ksize);
+            im2col(x, C_in_g, H, W, kH, kW,
+                   out_h, out_w,
+                   p.stride_h, p.stride_w, p.pad_h, p.pad_w,
+                   col_mat);
 
-        // result = wmat * col_mat^T  →  (C_out, out_h*out_w)
-        RowMatrix result = wmat * col_mat.transpose();
+            // result = wmat_g * col_mat^T  →  (C_out_g, out_h*out_w)
+            RowMatrix result = w_mats[g] * col_mat.transpose();
 
-        // Add bias per channel and copy into the output tensor.
-        for (int64_t oc = 0; oc < C_out; ++oc) {
-            const float b = bias_ptr ? bias_ptr[oc] : 0.0f;
-            for (int64_t r = 0; r < out_h * out_w; ++r) {
-                const float v = result(static_cast<Eigen::Index>(oc),
-                                       static_cast<Eigen::Index>(r)) + b;
-                // Output offset for (n, oc, oh, ow):
-                //   n * (C_out * out_h * out_w) + oc * (out_h * out_w)
-                //     + oh * out_w + ow
-                const int64_t oh = r / out_w;
-                const int64_t ow = r % out_w;
-                output.at({n, oc, oh, ow}) = v;
+            // Add bias per channel and copy into the output tensor.
+            for (int64_t oc_g = 0; oc_g < C_out_g; ++oc_g) {
+                const int64_t oc = g * C_out_g + oc_g;
+                const float b = bias_ptr ? bias_ptr[oc] : 0.0f;
+                for (int64_t r = 0; r < out_h * out_w; ++r) {
+                    const float v = result(static_cast<Eigen::Index>(oc_g),
+                                           static_cast<Eigen::Index>(r)) + b;
+                    const int64_t oh = r / out_w;
+                    const int64_t ow = r % out_w;
+                    output.at({n, oc, oh, ow}) = v;
+                }
             }
         }
     }

@@ -140,18 +140,18 @@ bash scripts/build-wasm.sh
 
 ## Benchmark Results
 
-> **Platform:** Intel Core i5, 16 GB RAM, Windows 11 / Ubuntu 22.04  
+> **Platform:** Intel Core i7-14650HX, 16 GB RAM, Windows 11  
 > **Model:** MobileNetV2 (`mobilenet-v2-7.onnx`, opset 7)  
 > **Input:** `(1, 3, 224, 224)` float32 (random)  
 > **Runs:** 100 (10 warmup) — see [`benchmarks/run_all.py`](benchmarks/run_all.py)
 
 | Engine | Backend | Mean (ms) | Median (ms) | P95 (ms) | P99 (ms) |
 |--------|---------|-----------|-------------|---------|---------|
-| **Crucible** (C++) | CPU native | **14.3** | **13.8** | 18.2 | 21.4 |
-| ONNX Runtime 1.18 | CPUExecutionProvider | 5.11 | 4.62 | 7.59 | 9.60 |
-| PyTorch 2.3 | CPU eager | 1.94 | 1.29 | 3.98 | 9.19 |
+| **Crucible** (C++) | CPU native | **609.0** | **607.6** | 664.4 | 775.1 |
+| ONNX Runtime 1.27 | CPUExecutionProvider | 2.07 | 1.97 | 2.73 | 2.92 |
+| PyTorch 2.3 | CPU eager (stub) | 0.77 | 0.72 | 1.13 | 1.83 |
 
-Crucible is ~3× slower than ONNX Runtime (expected — no operator fusion, no MLAS kernel). It is a **clean, readable from-scratch implementation**, not a production optimizer. All three engines produce numerically identical outputs (top-1 class matches to 100%).
+Crucible is slower than ONNX Runtime (expected — no operator fusion, no MLAS assembly kernel, and single-threaded execution). It is a **clean, readable from-scratch implementation**, not a production optimizer. All three engines produce numerically identical outputs (top-1 class matches to 100%).
 
 ---
 

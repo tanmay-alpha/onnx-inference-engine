@@ -303,6 +303,10 @@ Tensor run_inference(const Model& model,
     //    useful when a Session passes all params) but require every
     //    `model.input_names[i]` to be present.
     for (const auto& name : model.input_names) {
+        if (model.weights.find(name) != model.weights.end() ||
+            model.int_initializers.find(name) != model.int_initializers.end()) {
+            continue;
+        }
         if (inputs.find(name) == inputs.end()) {
             throw std::invalid_argument(
                 "run_inference: no input provided for graph input '" +
@@ -422,6 +426,7 @@ Tensor run_inference(const Model& model,
             if (strides.size() >= 2) p.stride_w = static_cast<int>(strides[1]);
             if (pads.size() >= 1)    p.pad_h    = static_cast<int>(pads[0]);
             if (pads.size() >= 2)    p.pad_w    = static_cast<int>(pads[1]);
+            p.groups = attr_int(flatten_attrs(node.attributes), "group", 1);
             // Dilations default to 1; conv2d doesn't support them in
             // Issue #7, so we silently ignore the attribute.
             Tensor Y = ops::conv2d_forward(X, W, B, p);
@@ -547,6 +552,32 @@ Tensor run_inference(const Model& model,
                     new_shape.push_back(static_cast<int64_t>(shape_t.data()[i]));
                 }
             }
+
+            // Resolve 0 and -1 dims per ONNX spec
+            int negative_one_idx = -1;
+            int64_t other_prod = 1;
+            for (size_t i = 0; i < new_shape.size(); ++i) {
+                if (new_shape[i] == -1) {
+                    if (negative_one_idx != -1) {
+                        throw std::runtime_error("Reshape: multiple -1 dimensions in target shape");
+                    }
+                    negative_one_idx = static_cast<int>(i);
+                } else if (new_shape[i] == 0) {
+                    if (i < X.shape().size()) {
+                        new_shape[i] = X.shape()[i];
+                    }
+                    other_prod *= new_shape[i];
+                } else {
+                    other_prod *= new_shape[i];
+                }
+            }
+            if (negative_one_idx != -1) {
+                if (other_prod == 0) {
+                    throw std::runtime_error("Reshape: division by zero when resolving -1 dimension");
+                }
+                new_shape[negative_one_idx] = X.size() / other_prod;
+            }
+
             Tensor Y = X.reshape(new_shape);
             for (const auto& o : outs) tensor_map[o] = Y;
         }

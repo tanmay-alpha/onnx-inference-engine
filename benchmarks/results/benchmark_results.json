@@ -1,0 +1,88 @@
+{
+  "meta": {
+    "generated_at_unix": 1783151357,
+    "wall_clock_seconds": 68.42142590000003,
+    "runs": 100,
+    "warmup": 10,
+    "seed": 0,
+    "measured_on": "2026-07-04 on Intel(R) Core(TM) i7-14650HX"
+  },
+  "results": [
+    {
+      "engine": "crucible",
+      "backend": "cpp",
+      "model": "C:\\Users\\TANMAY\\OneDrive\\Desktop\\Crucible\\models\\mobilenet_v2.onnx",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "stats": {
+        "runs": 100,
+        "mean_ms": 608.9955469999859,
+        "median_ms": 607.6390499997615,
+        "p95_ms": 664.4153999995979,
+        "p99_ms": 775.1361999999062,
+        "min_ms": 514.7313999996186,
+        "max_ms": 784.9144000001615,
+        "throughput_inf_per_sec": 1.6420481314291502
+      }
+    },
+    {
+      "engine": "onnxruntime",
+      "backend": "CPUExecutionProvider",
+      "model": "C:\\Users\\TANMAY\\OneDrive\\Desktop\\Crucible\\models\\mobilenet_v2.onnx",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "stats": {
+        "runs": 100,
+        "mean_ms": 2.0675259999825357,
+        "median_ms": 1.9729499995264632,
+        "p95_ms": 2.687799999876006,
+        "p99_ms": 2.7772000003096764,
+        "min_ms": 1.5960999999151682,
+        "max_ms": 3.1619000001228414,
+        "throughput_inf_per_sec": 483.6698546999878
+      }
+    },
+    {
+      "engine": "pytorch",
+      "backend": "torch-stub",
+      "model": "tiny_convnet",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "stats": {
+        "runs": 100,
+        "mean_ms": 0.6804049999482231,
+        "median_ms": 0.634950000403478,
+        "p95_ms": 1.0898000000452157,
+        "p99_ms": 1.5389999998660642,
+        "min_ms": 0.41679999958432745,
+        "max_ms": 1.5780000003360328,
+        "throughput_inf_per_sec": 1469.7128916984695
+      }
+    }
+  ],
+  "summary": {
+    "engines": [
+      "crucible",
+      "onnxruntime",
+      "pytorch"
+    ],
+    "fastest_mean": "pytorch",
+    "fastest_p95": "pytorch",
+    "crucible_vs_ort": 294.5527877304228,
+    "crucible_vs_pytorch": 895.0486064128405,
+    "ac_within_3x": false,
+    "ac_ratio_limit": 3.0
+  }
+}

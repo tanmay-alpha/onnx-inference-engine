@@ -239,6 +239,32 @@ def main(argv: List[str] | None = None) -> int:
     summary = _summarise(results)
     _emit_ac_check(summary)
 
+    # Resolve CPU model and today's date
+    import datetime
+    import platform
+    today = datetime.date.today().isoformat()
+    cpu_model = "Unknown CPU"
+    if platform.system() == "Windows":
+        try:
+            out = subprocess.check_output("wmic cpu get name", shell=True).decode().strip().split("\n")
+            if len(out) > 1:
+                cpu_model = out[1].strip()
+        except Exception:
+            pass
+    elif platform.system() == "Linux":
+        try:
+            for line in open("/proc/cpuinfo"):
+                if "model name" in line:
+                    cpu_model = line.split(":", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+    elif platform.system() == "Darwin":
+        try:
+            cpu_model = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).decode().strip()
+        except Exception:
+            pass
+
     # Top-level shape matches what the Issue #18 chart and the
     # /workspace/OWNER plan reference. Add a `meta` block for
     # provenance so a downstream reader can tell when the file
@@ -250,6 +276,7 @@ def main(argv: List[str] | None = None) -> int:
             "runs": args.runs,
             "warmup": args.warmup,
             "seed": args.seed,
+            "measured_on": f"{today} on {cpu_model}",
         },
         "results": results,
         "summary": summary,

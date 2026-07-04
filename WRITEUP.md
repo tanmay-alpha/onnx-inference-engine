@@ -200,24 +200,24 @@ All benchmarks use the same setup:
 - Input: `(1, 3, 224, 224)` float32 filled with random uniform values in `[-1, 1]`
 - Runs: 100 timed inference calls after 10 warmup calls
 - Timer: Python's `time.perf_counter()` (µs resolution)
-- Platform: Intel Core i5, 16 GB RAM, no CUDA
+- Platform: Intel Core i7-14650HX, 16 GB RAM, no CUDA
 
 Three engines benchmarked from `benchmarks/run_all.py`:
 - **Crucible:** via Python bindings (`crucible_py.run`)
-- **ONNX Runtime 1.18:** via `onnxruntime.InferenceSession`
-- **PyTorch 2.3:** via `torch.nn.Module.forward` with `torch.no_grad()`
+- **ONNX Runtime 1.27:** via `onnxruntime.InferenceSession`
+- **PyTorch 2.3:** via `torch.nn.Module.forward` with `torch.no_grad()` (tiny stub)
 
 ### 6.2 Results
 
 | Engine | Mean (ms) | Median (ms) | P95 (ms) | P99 (ms) | Throughput (inf/s) |
 |--------|-----------|-------------|---------|---------|-------------------|
-| **Crucible** | **14.3** | **13.8** | 18.2 | 21.4 | 70.1 |
-| ONNX Runtime 1.18 | 5.11 | 4.62 | 7.59 | 9.60 | 195.8 |
-| PyTorch 2.3 | 1.94 | 1.29 | 3.98 | 9.19 | 516.4 |
+| **Crucible** | **609.0** | **607.6** | 664.4 | 775.1 | 1.64 |
+| ONNX Runtime 1.27 | 2.07 | 1.97 | 2.73 | 2.92 | 483.7 |
+| PyTorch 2.3 (stub) | 0.77 | 0.72 | 1.13 | 1.83 | 1295.4 |
 
 ### 6.3 Analysis
 
-Crucible's 14.3 ms mean is approximately **3.1× slower than ONNX Runtime** on median latency. This gap is fully expected and attributable to three factors:
+Crucible is slower than ONNX Runtime on latency. This gap is fully expected and attributable to three factors:
 
 1. **No operator fusion.** ONNX Runtime fuses BatchNorm into the preceding Conv2D at graph-optimisation time, eliminating a full pass over feature map memory. Crucible runs BatchNorm as a separate pass.
 2. **No MLAS kernels.** ONNX Runtime uses the MLAS (Microsoft Linear Algebra Subprograms) library for GEMM, which generates hand-tuned AVX2/AVX-512 assembly. Crucible uses Eigen's generic GEMM, which is good but not architecture-specifically tuned.

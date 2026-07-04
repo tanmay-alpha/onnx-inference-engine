@@ -87,11 +87,12 @@ public:
     };
 
     Tag read_tag() {
+        std::size_t tag_pos = pos_;
         std::uint64_t v = read_varint();
         std::uint32_t field = static_cast<std::uint32_t>(v >> 3);
         std::uint8_t  wire  = static_cast<std::uint8_t>(v & 0x7);
         if (field == 0) {
-            throw std::runtime_error("ONNX: tag has field number 0");
+            throw std::runtime_error("ONNX: tag has field number 0 at pos " + std::to_string(tag_pos));
         }
         return {field, wire};
     }
@@ -199,11 +200,9 @@ struct TensorParseResult {
     std::string name;
     int32_t data_type = -1;
     std::vector<int64_t> dims;
-    // Exactly one of `float_data` / `int64_data` is populated, depending
-    // on data_type. We use a tagged union via std::variant to be
-    // explicit; simpler than two separate result types.
     std::vector<float>    float_data;
     std::vector<int64_t>  int64_data;
+    std::vector<std::uint8_t> raw_data;
 };
 
 static TensorParseResult parse_tensor(Cursor& c) {
@@ -211,13 +210,45 @@ static TensorParseResult parse_tensor(Cursor& c) {
     while (!c.eof()) {
         auto tag = c.read_tag();
         switch (tag.field) {
-            case 1: {  // dims (repeated int64 — wire-format is varint, not packed)
-                t.dims.push_back(static_cast<int64_t>(c.read_varint()));
+            case 1: {  // dims (repeated int64)
+                if (tag.wire == 2) {
+                    auto bytes = c.read_length_delimited();
+                    Cursor inner(bytes.data(), bytes.size());
+                    while (!inner.eof()) {
+                        t.dims.push_back(static_cast<int64_t>(inner.read_varint()));
+                    }
+                } else {
+                    t.dims.push_back(static_cast<int64_t>(c.read_varint()));
+                }
                 break;
             }
             case 2:  // data_type (int32)
                 t.data_type = static_cast<int32_t>(c.read_varint());
                 break;
+            case 4: {  // float_data (repeated float)
+                if (tag.wire == 2) {
+                    auto bytes = c.read_length_delimited();
+                    Cursor inner(bytes.data(), bytes.size());
+                    while (!inner.eof()) {
+                        t.float_data.push_back(bits_to_float(inner.read_fixed32()));
+                    }
+                } else {
+                    t.float_data.push_back(bits_to_float(c.read_fixed32()));
+                }
+                break;
+            }
+            case 7: {  // int64_data (repeated int64)
+                if (tag.wire == 2) {
+                    auto bytes = c.read_length_delimited();
+                    Cursor inner(bytes.data(), bytes.size());
+                    while (!inner.eof()) {
+                        t.int64_data.push_back(static_cast<int64_t>(inner.read_varint()));
+                    }
+                } else {
+                    t.int64_data.push_back(static_cast<int64_t>(c.read_varint()));
+                }
+                break;
+            }
             case 8: {  // name
                 auto bytes = c.read_length_delimited();
                 t.name.assign(reinterpret_cast<const char*>(bytes.data()),
@@ -225,31 +256,7 @@ static TensorParseResult parse_tensor(Cursor& c) {
                 break;
             }
             case 9: {  // raw_data (bytes)
-                auto bytes = c.read_length_delimited();
-                if (t.data_type == onnx_dtype::FLOAT) {
-                    if (bytes.size() % sizeof(float) != 0) {
-                        throw std::runtime_error(
-                            "ONNX: float raw_data size not multiple of 4");
-                    }
-                    t.float_data.resize(bytes.size() / sizeof(float));
-                    std::memcpy(t.float_data.data(), bytes.data(),
-                                bytes.size());
-                } else if (t.data_type == onnx_dtype::INT64) {
-                    if (bytes.size() % sizeof(int64_t) != 0) {
-                        throw std::runtime_error(
-                            "ONNX: int64 raw_data size not multiple of 8");
-                    }
-                    t.int64_data.resize(bytes.size() / sizeof(int64_t));
-                    std::memcpy(t.int64_data.data(), bytes.data(),
-                                bytes.size());
-                } else {
-                    // Unknown dtype with raw_data — unsupported, but
-                    // don't crash; leave data empty.
-                }
-                break;
-            }
-            case 13: {  // float_data (repeated float — wire-format is FIXED32 in proto2)
-                t.float_data.push_back(bits_to_float(c.read_fixed32()));
+                t.raw_data = c.read_length_delimited();
                 break;
             }
             default:
@@ -257,6 +264,27 @@ static TensorParseResult parse_tensor(Cursor& c) {
                 break;
         }
     }
+
+    if (!t.raw_data.empty()) {
+        if (t.data_type == onnx_dtype::FLOAT) {
+            if (t.raw_data.size() % sizeof(float) != 0) {
+                throw std::runtime_error(
+                    "ONNX: float raw_data size not multiple of 4");
+            }
+            t.float_data.resize(t.raw_data.size() / sizeof(float));
+            std::memcpy(t.float_data.data(), t.raw_data.data(),
+                        t.raw_data.size());
+        } else if (t.data_type == onnx_dtype::INT64) {
+            if (t.raw_data.size() % sizeof(int64_t) != 0) {
+                throw std::runtime_error(
+                    "ONNX: int64 raw_data size not multiple of 8");
+            }
+            t.int64_data.resize(t.raw_data.size() / sizeof(int64_t));
+            std::memcpy(t.int64_data.data(), t.raw_data.data(),
+                        t.raw_data.size());
+        }
+    }
+
     return t;
 }
 
@@ -296,14 +324,30 @@ static Attribute parse_attribute(Cursor& c) {
                            bytes.size());
                 break;
             }
-            case 7: {  // ints (repeated int64 — wire-format is varint in proto2)
-                a.type = Attribute::Type::IntArray;
-                a.ints.push_back(static_cast<int64_t>(c.read_varint()));
+            case 7: {  // floats (repeated float)
+                if (tag.wire == 2) {
+                    auto bytes = c.read_length_delimited();
+                    Cursor inner(bytes.data(), bytes.size());
+                    while (!inner.eof()) {
+                        a.floats.push_back(bits_to_float(inner.read_fixed32()));
+                    }
+                } else {
+                    a.floats.push_back(bits_to_float(c.read_fixed32()));
+                }
+                a.type = Attribute::Type::FloatArray;
                 break;
             }
-            case 8: {  // floats (repeated float — wire-format is FIXED32 in proto2)
-                a.type = Attribute::Type::FloatArray;
-                a.floats.push_back(bits_to_float(c.read_fixed32()));
+            case 8: {  // ints (repeated int64)
+                if (tag.wire == 2) {
+                    auto bytes = c.read_length_delimited();
+                    Cursor inner(bytes.data(), bytes.size());
+                    while (!inner.eof()) {
+                        a.ints.push_back(static_cast<int64_t>(inner.read_varint()));
+                    }
+                } else {
+                    a.ints.push_back(static_cast<int64_t>(c.read_varint()));
+                }
+                a.type = Attribute::Type::IntArray;
                 break;
             }
             default:
@@ -427,12 +471,14 @@ static Graph parse_graph(Cursor& c) {
                 }
                 if (tp.data_type == onnx_dtype::FLOAT) {
                     // Construct Tensor from dims + float_data.
-                    if ((int64_t)tp.float_data.size() !=
-                        (tp.dims.empty() ? 1LL : product_i64(tp.dims))) {
+                    int64_t expected_size = tp.dims.empty() ? 1LL : product_i64(tp.dims);
+                    if ((int64_t)tp.float_data.size() != expected_size) {
                         throw std::runtime_error(
-                            "ONNX: float initializer size mismatch (dims=" +
-                            std::to_string(tp.dims.size()) + ", data=" +
-                            std::to_string(tp.float_data.size()) + ")");
+                            "ONNX: float initializer size mismatch for '" + tp.name +
+                            "' (dims=" + std::to_string(tp.dims.size()) +
+                            ", expected=" + std::to_string(expected_size) +
+                            ", float_data=" + std::to_string(tp.float_data.size()) +
+                            ", raw_data=" + std::to_string(tp.raw_data.size()) + ")");
                     }
                     g.weights[tp.name] = Tensor(tp.dims, tp.float_data);
                 } else if (tp.data_type == onnx_dtype::INT64) {

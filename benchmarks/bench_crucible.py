@@ -60,6 +60,8 @@ def _load_crucible_model(model_path: Path):
         # default preset output), build/debug/python, or anything
         # already on PYTHONPATH.
         build_dirs = [
+            REPO_ROOT / "engine" / "build" / "release" / "python",
+            REPO_ROOT / "engine" / "build" / "debug" / "python",
             REPO_ROOT / "build" / "release" / "python",
             REPO_ROOT / "build" / "debug" / "python",
         ]
