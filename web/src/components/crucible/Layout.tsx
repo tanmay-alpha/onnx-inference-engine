@@ -2,7 +2,7 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Github, Linkedin } from "lucide-react";
 
-const GITHUB_URL = "https://github.com/crucible-engine/crucible";
+const GITHUB_URL = "https://github.com/tanmay-alpha/Crucible";
 const LINKEDIN_URL = "https://www.linkedin.com/in/tanmaymangal/";
 
 const NAV: { to: string; label: string }[] = [
