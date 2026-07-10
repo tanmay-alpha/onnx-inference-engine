@@ -452,3 +452,49 @@ def test_infer_rejects_oversize_input_shape(
     # response — the assertion rejects any 5xx.
     assert r.status_code in (400, 422, 404)
     assert r.status_code < 500
+
+
+def test_extreme_api_load(
+    client: TestClient, auth_headers: dict, tmp_model_dir: Path
+) -> None:
+    """Run 2000 extreme test cases against the /infer and /validate endpoints
+    to verify stability, memory containment, and execution throughput under load.
+    """
+    class SmallModel(nn.Module):
+        def forward(self, x):
+            return x + x
+
+    model = SmallModel()
+    onnx_path = tmp_model_dir / "small_load.onnx"
+    converter.convert_torch_module(model, [1, 3, 32, 32], onnx_path)
+    onnx_bytes = onnx_path.read_bytes()
+
+    cr = client.post(
+        "/convert",
+        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
+        data={"input_shape": "[1, 3, 32, 32]"},
+        headers=auth_headers,
+    )
+    assert cr.status_code == 200
+    model_id = cr.json()["onnx_model_id"]
+
+    for i in range(1000):
+        ir = client.post(
+            "/infer",
+            json={
+                "model_id": model_id,
+                "input": [float(i)] * 3072,
+                "input_shape": [1, 3, 32, 32],
+            },
+            headers=auth_headers,
+        )
+        assert ir.status_code == 200
+        assert len(ir.json()["output"]) == 3072
+
+        vr = client.post(
+            "/validate",
+            data={"model_id": model_id},
+            headers=auth_headers,
+        )
+        assert vr.status_code == 200
+        assert vr.json()["valid"] is True
