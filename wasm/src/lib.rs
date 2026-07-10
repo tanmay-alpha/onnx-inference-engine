@@ -886,4 +886,41 @@ mod tests {
         let y2 = add(&a, &c).unwrap();
         assert_eq!(y2.data, vec![11.0, 12.0, 13.0, 14.0]);
     }
+
+    #[test]
+    fn test_extreme_fraud_fuzzing() {
+        let bytes = std::fs::read("../web/public/models/fraud_detector.onnx")
+            .expect("Failed to read fraud_detector.onnx for extreme testing");
+
+        let mut seed: u32 = 1337;
+        let mut next_random = || {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed % 1000) as f32 / 10.0
+        };
+
+        for i in 0..2000 {
+            let amount = next_random() * 1000.0;
+            let old_balance_orig = next_random() * 5000.0;
+            let new_balance_orig = (old_balance_orig - amount).max(0.0);
+            let old_balance_dest = next_random() * 5000.0;
+            let new_balance_dest = old_balance_dest + amount;
+            let is_cash_out = if i % 2 == 0 { 1.0 } else { 0.0 };
+            let is_transfer = if i % 2 != 0 { 1.0 } else { 0.0 };
+
+            let score = run_fraud_model(
+                &bytes,
+                amount,
+                old_balance_orig,
+                new_balance_orig,
+                old_balance_dest,
+                new_balance_dest,
+                is_cash_out,
+                is_transfer,
+            );
+
+            assert!(score.is_ok(), "Fuzz iteration {} failed: {:?}", i, score.err());
+            let val = score.unwrap();
+            assert!(val >= 0.0 && val <= 1.0, "Fuzz iteration {} returned invalid score: {}", i, val);
+        }
+    }
 }
