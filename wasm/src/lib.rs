@@ -1,3 +1,5 @@
+#![allow(clippy::excessive_precision, clippy::too_many_arguments)]
+
 use wasm_bindgen::prelude::*;
 use std::collections::HashMap;
 
