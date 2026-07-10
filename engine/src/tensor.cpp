@@ -6,6 +6,7 @@
 #include <numeric>
 #include <ostream>
 #include <sstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -31,6 +32,9 @@ int64_t shape_product_or_throw(const std::vector<int64_t>& shape) {
             throw std::invalid_argument(
                 "Tensor: shape dimensions must be non-negative, got " +
                 std::to_string(d));
+        }
+        if (d > 0 && product > std::numeric_limits<int64_t>::max() / d) {
+            throw std::out_of_range("Tensor: shape product overflows int64_t");
         }
         product *= d;
     }

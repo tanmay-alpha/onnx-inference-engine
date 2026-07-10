@@ -27,6 +27,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <limits>
 #include <vector>
 
 namespace crucible {
@@ -43,7 +44,15 @@ constexpr int32_t INT64  = 7;
 // at file scope so the message parsers below can use it.
 static int64_t product_i64(const std::vector<int64_t>& dims) {
     int64_t p = 1;
-    for (auto d : dims) p *= d;
+    for (auto d : dims) {
+        if (d < 0) {
+            throw std::runtime_error("ONNX: negative dimension in initializer");
+        }
+        if (d > 0 && p > std::numeric_limits<int64_t>::max() / d) {
+            throw std::runtime_error("ONNX: initializer shape product overflows int64_t");
+        }
+        p *= d;
+    }
     return p;
 }
 
