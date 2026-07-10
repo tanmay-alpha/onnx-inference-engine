@@ -63,28 +63,30 @@ export interface SupportedOp {
  * to high-fidelity static metrics if the local C++ run is missing or unbuilt.
  */
 export function getBenchmarkResults(): BenchmarkData {
-  try {
-    const filePath = path.join(process.cwd(), "../benchmarks/results/benchmark_results.json");
-    if (fs.existsSync(filePath)) {
-      const content = fs.readFileSync(filePath, "utf-8");
-      const data = JSON.parse(content) as BenchmarkData;
+  if (typeof window === "undefined") {
+    try {
+      const filePath = path.join(process.cwd(), "../benchmarks/results/benchmark_results.json");
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, "utf-8");
+        const data = JSON.parse(content) as BenchmarkData;
 
-      // If crucible ran in fallback mode (latency near zero or uncompiled),
-      // we enrich the statistics with the true compiled C++ release numbers
-      // to make the dashboard UI informative.
-      const hasRealCppData = data.results.some(
-        (r) => r.engine === "crucible" && r.stats.mean_ms > 0.1,
-      );
+        // If crucible ran in fallback mode (latency near zero or uncompiled),
+        // we enrich the statistics with the true compiled C++ release numbers
+        // to make the dashboard UI informative.
+        const hasRealCppData = data.results.some(
+          (r) => r.engine === "crucible" && r.stats.mean_ms > 0.1,
+        );
 
-      if (hasRealCppData) {
-        return data;
+        if (hasRealCppData) {
+          return data;
+        }
       }
+    } catch (e) {
+      console.warn(
+        "Failed to read benchmark_results.json from file system, using static fallback:",
+        e,
+      );
     }
-  } catch (e) {
-    console.warn(
-      "Failed to read benchmark_results.json from file system, using static fallback:",
-      e,
-    );
   }
 
   // Realistic C++ Release Mode benchmark results on CPU

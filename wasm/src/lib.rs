@@ -581,6 +581,50 @@ pub fn softmax(input: &Tensor, axis_attr: Option<i64>) -> Result<Tensor, String>
     Ok(Tensor::new(input.shape.clone(), data))
 }
 
+
+pub fn add(a: &Tensor, b: &Tensor) -> Result<Tensor, String> {
+    if a.shape == b.shape {
+        let mut data = Vec::with_capacity(a.data.len());
+        for i in 0..a.data.len() {
+            data.push(a.data[i] + b.data[i]);
+        }
+        return Ok(Tensor::new(a.shape.clone(), data));
+    }
+
+    if b.data.len() == 1 {
+        let val = b.data[0];
+        let data = a.data.iter().map(|&x| x + val).collect();
+        return Ok(Tensor::new(a.shape.clone(), data));
+    }
+    if a.data.len() == 1 {
+        let val = a.data[0];
+        let data = b.data.iter().map(|&x| x + val).collect();
+        return Ok(Tensor::new(b.shape.clone(), data));
+    }
+
+    if b.shape.len() == 1 && !a.shape.is_empty() && b.shape[0] == *a.shape.last().unwrap() {
+        let c = b.shape[0] as usize;
+        let spatial = a.data.len() / c / (a.shape[0] as usize);
+        let n_outer = a.shape[0] as usize;
+        let mut data = vec![0.0f32; a.data.len()];
+        for n in 0..n_outer {
+            for j in 0..c {
+                let val_b = b.data[j];
+                let base = (n * c + j) * spatial;
+                for k in 0..spatial {
+                    data[base + k] = a.data[base + k] + val_b;
+                }
+            }
+        }
+        return Ok(Tensor::new(a.shape.clone(), data));
+    }
+
+    Err(format!(
+        "add: unsupported broadcast (A shape {:?} B shape {:?})",
+        a.shape, b.shape
+    ))
+}
+
 // ============================================================================
 // Pure-Rust Executor
 // ============================================================================
@@ -654,6 +698,16 @@ fn run_inference_internal(
             let x = require_tensor(&tensor_map, &ins[0])?;
             let axis_attr = node.attributes.get("axis").map(|a| a.i);
             let y = softmax(x, axis_attr)?;
+            for out in outs {
+                tensor_map.insert(out.clone(), y.clone());
+            }
+        } else if op == "Add" {
+            if ins.len() < 2 {
+                return Err(format!("Add '{}': need 2 inputs, got {}", node.name, ins.len()));
+            }
+            let a = require_tensor(&tensor_map, &ins[0])?;
+            let b = require_tensor(&tensor_map, &ins[1])?;
+            let y = add(a, b)?;
             for out in outs {
                 tensor_map.insert(out.clone(), y.clone());
             }
@@ -817,5 +871,17 @@ mod tests {
         let y = softmax(&x, None).unwrap();
         let sum: f32 = y.data.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_add() {
+        let a = Tensor::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]);
+        let b = Tensor::new(vec![2, 2], vec![0.5, 1.5, 2.5, 3.5]);
+        let y = add(&a, &b).unwrap();
+        assert_eq!(y.data, vec![1.5, 3.5, 5.5, 7.5]);
+
+        let c = Tensor::new(vec![1], vec![10.0]);
+        let y2 = add(&a, &c).unwrap();
+        assert_eq!(y2.data, vec![11.0, 12.0, 13.0, 14.0]);
     }
 }
