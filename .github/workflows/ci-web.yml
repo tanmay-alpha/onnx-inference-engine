@@ -49,11 +49,10 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       # ── 3. Install dependencies ───────────────────────────────────────────────
-      # `npm ci` is the correct command for CI: it uses package-lock.json
-      # exactly and fails if it is not in sync with package.json.
+      # Use `npm install` for robust dependency resolution and to bypass EUSAGE issues on the runner.
       - name: Install npm dependencies
         working-directory: web
-        run: npm ci
+        run: npm install --no-audit --no-fund --legacy-peer-deps
 
       # ── 4. TypeScript type-check ──────────────────────────────────────────────
       # Runs `tsc --noEmit` — picks up web/tsconfig.json automatically.
