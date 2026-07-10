@@ -79,10 +79,18 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Crucible — ONNX inference engine for the browser" },
-      { name: "description", content: "A from-scratch ONNX runtime. C++17 core with a hand-written protobuf decoder and Kahn's-algorithm graph executor. Pure-Rust reimplementation compiled to WebAssembly. Fraud inference in the browser tab." },
+      {
+        name: "description",
+        content:
+          "A from-scratch ONNX runtime. C++17 core with a hand-written protobuf decoder and Kahn's-algorithm graph executor. Pure-Rust reimplementation compiled to WebAssembly. Fraud inference in the browser tab.",
+      },
       { name: "author", content: "Crucible" },
       { property: "og:title", content: "Crucible — ONNX inference engine for the browser" },
-      { property: "og:description", content: "3.1 MB WASM runtime. Zero server calls. C++ core, Rust WASM build, honest benchmarks." },
+      {
+        property: "og:description",
+        content:
+          "3.1 MB WASM runtime. Zero server calls. C++ core, Rust WASM build, honest benchmarks.",
+      },
       { property: "og:type", content: "website" },
       { property: "og:site_name", content: "Crucible" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -91,7 +99,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     links: [
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
-      { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" },
+      {
+        rel: "stylesheet",
+        href: "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap",
+      },
       { rel: "stylesheet", href: appCss },
       { rel: "stylesheet", href: crucibleCss },
       { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },

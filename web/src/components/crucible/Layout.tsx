@@ -66,13 +66,15 @@ export function CrucibleLayout({ children }: { children: ReactNode }) {
                 CRUCIBLE
               </Link>
               <p className="c-footer-desc">
-                A privacy-first ONNX inference runtime for the browser. A compact fraud
-                model runs locally with WebAssembly — transaction data stays in the tab.
+                A privacy-first ONNX inference runtime for the browser. A compact fraud model runs
+                locally with WebAssembly — transaction data stays in the tab.
               </p>
             </div>
             <div className="c-footer-col">
               <h4>Project</h4>
-              <a href={GITHUB_URL} target="_blank" rel="noreferrer noopener">GitHub</a>
+              <a href={GITHUB_URL} target="_blank" rel="noreferrer noopener">
+                GitHub
+              </a>
               <Link to="/docs">Docs</Link>
               <Link to="/benchmark">Benchmark</Link>
               <Link to="/architecture">Architecture</Link>
@@ -90,7 +92,14 @@ export function CrucibleLayout({ children }: { children: ReactNode }) {
                   <Linkedin size={13} /> Tanmay Mangal
                 </span>
               </a>
-              <span style={{ display: "block", padding: "4px 0", color: "var(--ink-subtle)", fontSize: 12 }}>
+              <span
+                style={{
+                  display: "block",
+                  padding: "4px 0",
+                  color: "var(--ink-subtle)",
+                  fontSize: 12,
+                }}
+              >
                 Built by Tanmay Mangal
               </span>
             </div>

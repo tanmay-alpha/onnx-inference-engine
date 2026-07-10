@@ -1,6 +1,6 @@
 # Crucible — Direction Proposal (Section 1)
 
-Per your brief, I'm proposing the token system *first*, before touching pages. Nothing below gets built until you confirm or redirect.
+Per your brief, I'm proposing the token system _first_, before touching pages. Nothing below gets built until you confirm or redirect.
 
 ## Direction: "Signal Readout"
 
@@ -10,16 +10,16 @@ The signature isn't a color or a font — it's that **live measurements are the 
 
 ### Color (6 tokens, all light-first)
 
-| Token | Hex | Role |
-|---|---|---|
-| `--surface` | `#FAFAF7` | Page background — bone white, faint warm cast, not cream |
-| `--panel` | `#FFFFFF` | Instrument panel / card surface |
-| `--rule` | `#DCDCD3` | 1px hairlines, tick marks, grid |
-| `--ink` | `#0E0E10` | Primary text, axis labels |
-| `--ink-dim` | `#5A5A55` | Secondary text, units |
-| `--trace` | `#1F3A8A` | The one accent — deep indigo signal trace, used for live values, active graph edges, primary CTA |
-| `--warn` | `#B45309` | Amber, only for warn/review states |
-| `--ok` | `#166534` | Deep green, only for pass/legitimate states |
+| Token       | Hex       | Role                                                                                             |
+| ----------- | --------- | ------------------------------------------------------------------------------------------------ |
+| `--surface` | `#FAFAF7` | Page background — bone white, faint warm cast, not cream                                         |
+| `--panel`   | `#FFFFFF` | Instrument panel / card surface                                                                  |
+| `--rule`    | `#DCDCD3` | 1px hairlines, tick marks, grid                                                                  |
+| `--ink`     | `#0E0E10` | Primary text, axis labels                                                                        |
+| `--ink-dim` | `#5A5A55` | Secondary text, units                                                                            |
+| `--trace`   | `#1F3A8A` | The one accent — deep indigo signal trace, used for live values, active graph edges, primary CTA |
+| `--warn`    | `#B45309` | Amber, only for warn/review states                                                               |
+| `--ok`      | `#166534` | Deep green, only for pass/legitimate states                                                      |
 
 No terracotta. No cream. No dark surfaces except a **single monospace readout strip** where hex/binary bytes are shown (that's the wire-format decoder's native habitat — it earns the dark treatment).
 
@@ -34,6 +34,7 @@ No terracotta. No cream. No dark surfaces except a **single monospace readout st
 **One-sentence concept:** every page is an instrument panel — a labeled bezel (route name, unit, timestamp) wrapping a live readout area, with static prose set as marginalia in a narrow left gutter.
 
 Rough wireframe:
+
 ```text
 ┌─ CRUCIBLE ──────── /architecture ── 14:32:07 UTC ─┐
 │ gutter │  READOUT AREA                            │
@@ -42,6 +43,7 @@ Rough wireframe:
 │        │                                          │
 └────────┴──────────────────────────────────────────┘
 ```
+
 Hairline rules at 1px `--rule`. No rounded corners above 2px. No shadows — depth comes from rules and whitespace only.
 
 ### Signature element

@@ -8,9 +8,16 @@ export const Route = createFileRoute("/fraud")({
   head: () => ({
     meta: [
       { title: "Fraud Detector · Crucible" },
-      { name: "description", content: "Run fraud inference on transactions entirely in-browser via Crucible's WASM ONNX runtime." },
+      {
+        name: "description",
+        content:
+          "Run fraud inference on transactions entirely in-browser via Crucible's WASM ONNX runtime.",
+      },
       { property: "og:title", content: "Privacy-First Fraud Detection · Crucible" },
-      { property: "og:description", content: "Zero network bytes. Zero data leaks. ML in the tab." },
+      {
+        property: "og:description",
+        content: "Zero network bytes. Zero data leaks. ML in the tab.",
+      },
     ],
   }),
   component: FraudPage,
@@ -33,12 +40,42 @@ interface Result {
 }
 
 const PRESETS: { label: string; tone: "success" | "danger" | "warn"; tx: Tx }[] = [
-  { label: "Everyday transfer · ₹4,850", tone: "success",
-    tx: { type: "TRANSFER", amount: 4850, origBefore: 42000, origAfter: 37150, destBefore: 12000, destAfter: 16850 } },
-  { label: "Account drained · ₹2,01,350", tone: "danger",
-    tx: { type: "TRANSFER", amount: 201350, origBefore: 201350, origAfter: 0, destBefore: 0, destAfter: 0 } },
-  { label: "Borderline cash-out · ₹1,54,290", tone: "warn",
-    tx: { type: "CASH_OUT", amount: 154290, origBefore: 155000, origAfter: 710, destBefore: 5000, destAfter: 0 } },
+  {
+    label: "Everyday transfer · ₹4,850",
+    tone: "success",
+    tx: {
+      type: "TRANSFER",
+      amount: 4850,
+      origBefore: 42000,
+      origAfter: 37150,
+      destBefore: 12000,
+      destAfter: 16850,
+    },
+  },
+  {
+    label: "Account drained · ₹2,01,350",
+    tone: "danger",
+    tx: {
+      type: "TRANSFER",
+      amount: 201350,
+      origBefore: 201350,
+      origAfter: 0,
+      destBefore: 0,
+      destAfter: 0,
+    },
+  },
+  {
+    label: "Borderline cash-out · ₹1,54,290",
+    tone: "warn",
+    tx: {
+      type: "CASH_OUT",
+      amount: 154290,
+      origBefore: 155000,
+      origAfter: 710,
+      destBefore: 5000,
+      destAfter: 0,
+    },
+  },
 ];
 
 function verdict(p: number): { label: string; tone: "ok" | "warn" | "err" } {
@@ -52,7 +89,7 @@ function heuristicScore(tx: Tx): number {
   const drained = tx.origBefore > 0 && tx.origAfter / tx.origBefore < 0.02;
   const bigAmount = tx.amount >= 100000;
   const zeroedDest = tx.destBefore + tx.destAfter === 0 && tx.amount > 1000;
-  const mismatch = Math.abs((tx.origBefore - tx.origAfter) - tx.amount) > 1;
+  const mismatch = Math.abs(tx.origBefore - tx.origAfter - tx.amount) > 1;
   let s = 0.02;
   if (drained) s += 0.55;
   if (bigAmount) s += 0.22;
@@ -84,7 +121,12 @@ function FraudPage() {
         newBalanceDest: tx.destAfter,
       });
       const latency = Number((performance.now() - start).toFixed(2));
-      setResult({ fraud: wasmResult.probability >= 0.5, probability: wasmResult.probability, latencyMs: latency, modelBytes: 220 });
+      setResult({
+        fraud: wasmResult.probability >= 0.5,
+        probability: wasmResult.probability,
+        latencyMs: latency,
+        modelBytes: 220,
+      });
     } catch (err) {
       // WASM unavailable — use heuristic fallback
       console.warn("WASM inference failed, using heuristic fallback:", err);
@@ -97,16 +139,18 @@ function FraudPage() {
 
   const v = result ? verdict(result.probability) : null;
   const toneColor =
-    v?.tone === "err" ? "var(--risk)" :
-    v?.tone === "warn" ? "var(--warn)" :
-    "var(--ok)";
+    v?.tone === "err" ? "var(--risk)" : v?.tone === "warn" ? "var(--warn)" : "var(--ok)";
 
   return (
     <CrucibleLayout>
       <section className="c-container">
         <div style={{ marginBottom: 32, maxWidth: 720 }}>
-          <span className="c-badge c-badge-info"><Lock size={12} /> On-device demo</span>
-          <h1 className="c-h2" style={{ fontSize: 44, marginTop: 14 }}>Browser-based transaction analysis</h1>
+          <span className="c-badge c-badge-info">
+            <Lock size={12} /> On-device demo
+          </span>
+          <h1 className="c-h2" style={{ fontSize: 44, marginTop: 14 }}>
+            Browser-based transaction analysis
+          </h1>
           <p className="c-muted">
             A mock banking portal running Crucible's ONNX runtime in WebAssembly. Customer records
             never leave the tab — the model is fetched once, then evaluated locally against every
@@ -117,12 +161,22 @@ function FraudPage() {
         <div className="c-two-col">
           <div className="c-card">
             <h3 className="c-h3">Transaction input</h3>
-            <p className="c-muted" style={{ marginBottom: 18 }}>Pick a scenario or enter values by hand.</p>
+            <p className="c-muted" style={{ marginBottom: 18 }}>
+              Pick a scenario or enter values by hand.
+            </p>
 
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 22 }}>
               {PRESETS.map((p) => (
-                <button key={p.label} className="c-preset" style={{ width: "auto", flex: "1 1 30%" }}
-                  onClick={() => { setTx(p.tx); setStatus("idle"); setResult(null); }}>
+                <button
+                  key={p.label}
+                  className="c-preset"
+                  style={{ width: "auto", flex: "1 1 30%" }}
+                  onClick={() => {
+                    setTx(p.tx);
+                    setStatus("idle");
+                    setResult(null);
+                  }}
+                >
                   {p.label}
                 </button>
               ))}
@@ -131,7 +185,11 @@ function FraudPage() {
             <div style={{ display: "grid", gap: 14 }}>
               <div>
                 <label className="c-label">Transaction type</label>
-                <select className="c-select" value={tx.type} onChange={(e) => update("type", e.target.value as TxType)}>
+                <select
+                  className="c-select"
+                  value={tx.type}
+                  onChange={(e) => update("type", e.target.value as TxType)}
+                >
                   <option value="TRANSFER">TRANSFER</option>
                   <option value="CASH_OUT">CASH_OUT</option>
                   <option value="OTHER">OTHER</option>
@@ -139,26 +197,51 @@ function FraudPage() {
               </div>
               <div>
                 <label className="c-label">Amount (₹)</label>
-                <input className="c-input" type="number" value={tx.amount} onChange={(e) => update("amount", Number(e.target.value))} />
+                <input
+                  className="c-input"
+                  type="number"
+                  value={tx.amount}
+                  onChange={(e) => update("amount", Number(e.target.value))}
+                />
               </div>
               <div className="c-field-row">
                 <div>
                   <label className="c-label">Origin balance before</label>
-                  <input className="c-input" type="number" value={tx.origBefore} onChange={(e) => update("origBefore", Number(e.target.value))} />
+                  <input
+                    className="c-input"
+                    type="number"
+                    value={tx.origBefore}
+                    onChange={(e) => update("origBefore", Number(e.target.value))}
+                  />
                 </div>
                 <div>
                   <label className="c-label">Origin balance after</label>
-                  <input className="c-input" type="number" value={tx.origAfter} onChange={(e) => update("origAfter", Number(e.target.value))} />
+                  <input
+                    className="c-input"
+                    type="number"
+                    value={tx.origAfter}
+                    onChange={(e) => update("origAfter", Number(e.target.value))}
+                  />
                 </div>
               </div>
               <div className="c-field-row">
                 <div>
                   <label className="c-label">Destination balance before</label>
-                  <input className="c-input" type="number" value={tx.destBefore} onChange={(e) => update("destBefore", Number(e.target.value))} />
+                  <input
+                    className="c-input"
+                    type="number"
+                    value={tx.destBefore}
+                    onChange={(e) => update("destBefore", Number(e.target.value))}
+                  />
                 </div>
                 <div>
                   <label className="c-label">Destination balance after</label>
-                  <input className="c-input" type="number" value={tx.destAfter} onChange={(e) => update("destAfter", Number(e.target.value))} />
+                  <input
+                    className="c-input"
+                    type="number"
+                    value={tx.destAfter}
+                    onChange={(e) => update("destAfter", Number(e.target.value))}
+                  />
                 </div>
               </div>
             </div>
@@ -170,7 +253,8 @@ function FraudPage() {
               onClick={run}
               aria-live="polite"
             >
-              <Shield size={16} /> {status === "running" ? "Analysing transaction…" : "Analyse transaction"}
+              <Shield size={16} />{" "}
+              {status === "running" ? "Analysing transaction…" : "Analyse transaction"}
             </button>
             {status === "running" && (
               <div style={{ marginTop: 14 }}>
@@ -182,11 +266,20 @@ function FraudPage() {
             )}
           </div>
 
-          <div className="c-card" style={{ display: "flex", flexDirection: "column", justifyContent: status === "done" ? "flex-start" : "center" }}>
+          <div
+            className="c-card"
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: status === "done" ? "flex-start" : "center",
+            }}
+          >
             {status !== "done" && (
               <div className="c-card-dashed" style={{ padding: 40, textAlign: "center" }}>
                 <Inbox size={22} color="var(--ink-muted)" style={{ marginBottom: 10 }} />
-                <div className="c-eyebrow" style={{ marginBottom: 10 }}>Awaiting input</div>
+                <div className="c-eyebrow" style={{ marginBottom: 10 }}>
+                  Awaiting input
+                </div>
                 <h3 className="c-h3">No inference yet</h3>
                 <p className="c-muted">
                   Fill the fields and press <em>Run local fraud check</em>. The ONNX model executes
@@ -200,8 +293,10 @@ function FraudPage() {
                   <span
                     className="c-badge c-badge-lg"
                     style={{
-                      background: v.tone === "err" ? "#F3D7D7" : v.tone === "warn" ? "#F3E7C4" : "#DDEEDF",
-                      borderColor: v.tone === "err" ? "#E4B4B4" : v.tone === "warn" ? "#DCC58A" : "#B4D8BE",
+                      background:
+                        v.tone === "err" ? "#F3D7D7" : v.tone === "warn" ? "#F3E7C4" : "#DDEEDF",
+                      borderColor:
+                        v.tone === "err" ? "#E4B4B4" : v.tone === "warn" ? "#DCC58A" : "#B4D8BE",
                       color: toneColor,
                     }}
                   >
@@ -209,7 +304,15 @@ function FraudPage() {
                   </span>
                 </div>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-                  <div className="c-mono-num" style={{ fontSize: 56, fontWeight: 600, letterSpacing: "-0.03em", color: toneColor }}>
+                  <div
+                    className="c-mono-num"
+                    style={{
+                      fontSize: 56,
+                      fontWeight: 600,
+                      letterSpacing: "-0.03em",
+                      color: toneColor,
+                    }}
+                  >
                     {(result.probability * 100).toFixed(1)}%
                   </div>
                   <div className="c-muted">fraud probability</div>
@@ -222,9 +325,15 @@ function FraudPage() {
                     />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-                    <span className="c-muted" style={{ fontSize: 11 }}>Legitimate</span>
-                    <span className="c-muted" style={{ fontSize: 11 }}>Review</span>
-                    <span className="c-muted" style={{ fontSize: 11 }}>Elevated risk</span>
+                    <span className="c-muted" style={{ fontSize: 11 }}>
+                      Legitimate
+                    </span>
+                    <span className="c-muted" style={{ fontSize: 11 }}>
+                      Review
+                    </span>
+                    <span className="c-muted" style={{ fontSize: 11 }}>
+                      Elevated risk
+                    </span>
                   </div>
                 </div>
 
@@ -233,15 +342,21 @@ function FraudPage() {
                 <div className="c-grid-3" style={{ gap: 10 }}>
                   <div className="c-metric" style={{ padding: 14 }}>
                     <div className="c-metric-label">Warm latency</div>
-                    <div className="c-metric-value" style={{ fontSize: 20 }}>{result.latencyMs} ms</div>
+                    <div className="c-metric-value" style={{ fontSize: 20 }}>
+                      {result.latencyMs} ms
+                    </div>
                   </div>
                   <div className="c-metric" style={{ padding: 14 }}>
                     <div className="c-metric-label">Model bytes</div>
-                    <div className="c-metric-value" style={{ fontSize: 20 }}>{result.modelBytes} B</div>
+                    <div className="c-metric-value" style={{ fontSize: 20 }}>
+                      {result.modelBytes} B
+                    </div>
                   </div>
                   <div className="c-metric" style={{ padding: 14 }}>
                     <div className="c-metric-label">Bytes sent</div>
-                    <div className="c-metric-value" style={{ fontSize: 20, color: "var(--ok)" }}>0</div>
+                    <div className="c-metric-value" style={{ fontSize: 20, color: "var(--ok)" }}>
+                      0
+                    </div>
                   </div>
                 </div>
 
@@ -268,8 +383,8 @@ function FraudPage() {
               <p className="c-muted">
                 Crucible flips the topology. The model ships as static assets, is evaluated in a
                 WebAssembly sandbox with no network access, and only a low-cardinality risk score
-                crosses the boundary. Compliance surface collapses; latency drops from a
-                round-trip to sub-millisecond kernel time.
+                crosses the boundary. Compliance surface collapses; latency drops from a round-trip
+                to sub-millisecond kernel time.
               </p>
             </div>
           </div>

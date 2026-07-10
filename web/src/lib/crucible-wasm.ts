@@ -1,4 +1,7 @@
-import init, { runInference as wasmRunInference, runFraudModel as wasmRunFraudModel } from '../../public/wasm/crucible_wasm';
+import init, {
+  runInference as wasmRunInference,
+  runFraudModel as wasmRunFraudModel,
+} from "../../public/wasm/crucible_wasm";
 
 let initialized = false;
 let fraudModelBytes: Uint8Array | null = null;
@@ -24,10 +27,10 @@ export async function initWasm(): Promise<void> {
 export async function runWasmInference(
   modelBytes: Uint8Array,
   inputData: Float32Array,
-  inputShape: number[]
+  inputShape: number[],
 ): Promise<Float32Array> {
   await initWasm();
-  
+
   // Note: wasmRunInference is mapped from Rust's run_inference(model_bytes, input_data, input_shape)
   // using wasm-bindgen. It accepts Uint8Array, Float32Array, and Int32Array (or standard number Array).
   const shapeArray = new Int32Array(inputShape);
@@ -41,12 +44,12 @@ export interface FraudDetectionParams {
   newBalanceOrig: number;
   oldBalanceDest: number;
   newBalanceDest: number;
-  type: 'CASH_OUT' | 'TRANSFER' | 'OTHER';
+  type: "CASH_OUT" | "TRANSFER" | "OTHER";
 }
 
 export interface FraudDetectionResult {
   probability: number;
-  label: 'FRAUD' | 'LEGITIMATE';
+  label: "FRAUD" | "LEGITIMATE";
   latencyMs: number;
 }
 
@@ -56,20 +59,20 @@ export interface FraudDetectionResult {
  * No transaction data leaves the device.
  */
 export async function runFraudDetection(
-  params: FraudDetectionParams
+  params: FraudDetectionParams,
 ): Promise<FraudDetectionResult> {
   await initWasm();
 
   // Lazy-load and cache the fraud model bytes
   if (!fraudModelBytes) {
-    const response = await fetch('/models/fraud_detector.onnx');
+    const response = await fetch("/models/fraud_detector.onnx");
     if (!response.ok) throw new Error(`Failed to fetch fraud model: ${response.status}`);
     const buffer = await response.arrayBuffer();
     fraudModelBytes = new Uint8Array(buffer);
   }
 
-  const isCashOut = params.type === 'CASH_OUT' ? 1.0 : 0.0;
-  const isTransfer = params.type === 'TRANSFER' ? 1.0 : 0.0;
+  const isCashOut = params.type === "CASH_OUT" ? 1.0 : 0.0;
+  const isTransfer = params.type === "TRANSFER" ? 1.0 : 0.0;
 
   const t0 = performance.now();
   const probability = wasmRunFraudModel(
@@ -80,13 +83,13 @@ export async function runFraudDetection(
     params.oldBalanceDest,
     params.newBalanceDest,
     isCashOut,
-    isTransfer
+    isTransfer,
   );
   const latencyMs = performance.now() - t0;
 
   return {
     probability,
-    label: probability >= 0.5 ? 'FRAUD' : 'LEGITIMATE',
+    label: probability >= 0.5 ? "FRAUD" : "LEGITIMATE",
     latencyMs,
   };
 }

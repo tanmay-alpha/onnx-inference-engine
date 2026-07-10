@@ -89,7 +89,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Install only the runtime Python deps. We deliberately leave
 # pytest out — it's a dev dep and would add 50 MB to the image.
 COPY server/requirements.txt /crucible/server/requirements.txt
-RUN pip install --no-cache-dir -r /crucible/server/requirements.txt
+RUN pip install --no-cache-dir -r /crucible/server/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Copy the server source.
 COPY server/ /crucible/server/

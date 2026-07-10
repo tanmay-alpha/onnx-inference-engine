@@ -1,5 +1,5 @@
-import fs from 'fs';
-import path from 'path';
+import fs from "fs";
+import path from "path";
 
 export interface BenchmarkStats {
   runs: number;
@@ -64,24 +64,27 @@ export interface SupportedOp {
  */
 export function getBenchmarkResults(): BenchmarkData {
   try {
-    const filePath = path.join(process.cwd(), '../benchmarks/results/benchmark_results.json');
+    const filePath = path.join(process.cwd(), "../benchmarks/results/benchmark_results.json");
     if (fs.existsSync(filePath)) {
-      const content = fs.readFileSync(filePath, 'utf-8');
+      const content = fs.readFileSync(filePath, "utf-8");
       const data = JSON.parse(content) as BenchmarkData;
-      
+
       // If crucible ran in fallback mode (latency near zero or uncompiled),
       // we enrich the statistics with the true compiled C++ release numbers
       // to make the dashboard UI informative.
       const hasRealCppData = data.results.some(
-        r => r.engine === 'crucible' && r.stats.mean_ms > 0.1
+        (r) => r.engine === "crucible" && r.stats.mean_ms > 0.1,
       );
-      
+
       if (hasRealCppData) {
         return data;
       }
     }
   } catch (e) {
-    console.warn('Failed to read benchmark_results.json from file system, using static fallback:', e);
+    console.warn(
+      "Failed to read benchmark_results.json from file system, using static fallback:",
+      e,
+    );
   }
 
   // Realistic C++ Release Mode benchmark results on CPU
@@ -91,7 +94,7 @@ export function getBenchmarkResults(): BenchmarkData {
       wall_clock_seconds: 3.73,
       runs: 100,
       warmup: 10,
-      seed: 0
+      seed: 0,
     },
     results: [
       {
@@ -107,8 +110,8 @@ export function getBenchmarkResults(): BenchmarkData {
           p99_ms: 22.1,
           min_ms: 12.8,
           max_ms: 31.4,
-          throughput_inf_per_sec: 69.9
-        }
+          throughput_inf_per_sec: 69.9,
+        },
       },
       {
         engine: "onnxruntime",
@@ -123,8 +126,8 @@ export function getBenchmarkResults(): BenchmarkData {
           p99_ms: 18.1,
           min_ms: 9.8,
           max_ms: 24.3,
-          throughput_inf_per_sec: 86.9
-        }
+          throughput_inf_per_sec: 86.9,
+        },
       },
       {
         engine: "pytorch",
@@ -139,9 +142,9 @@ export function getBenchmarkResults(): BenchmarkData {
           p99_ms: 28.5,
           min_ms: 15.6,
           max_ms: 39.2,
-          throughput_inf_per_sec: 54.3
-        }
-      }
+          throughput_inf_per_sec: 54.3,
+        },
+      },
     ],
     summary: {
       engines: ["crucible", "onnxruntime", "pytorch"],
@@ -151,8 +154,8 @@ export function getBenchmarkResults(): BenchmarkData {
       crucible_vs_pytorch: 0.78,
       ac_within_3x: true,
       ac_ratio_limit: 3.0,
-      note: "Crucible is running with C++ core Eigen integration. Performance is within 1.24x of ONNX Runtime CPU and beats PyTorch CPU by 22%."
-    }
+      note: "Crucible is running with C++ core Eigen integration. Performance is within 1.24x of ONNX Runtime CPU and beats PyTorch CPU by 22%.",
+    },
   };
 }
 
@@ -162,11 +165,11 @@ export function getBenchmarkResults(): BenchmarkData {
  */
 export function getChartData(): ChartDataPoint[] {
   return [
-    { size: 'Tiny (1M)', crucible: 1.2, onnxruntime: 0.8, pytorch: 1.5 },
-    { size: 'Small (5M)', crucible: 5.4, onnxruntime: 3.8, pytorch: 6.2 },
-    { size: 'Medium (11M)', crucible: 14.3, onnxruntime: 11.5, pytorch: 18.4 },
-    { size: 'Large (25M)', crucible: 32.1, onnxruntime: 25.4, pytorch: 39.2 },
-    { size: 'Huge (50M)', crucible: 68.4, onnxruntime: 54.2, pytorch: 82.5 },
+    { size: "Tiny (1M)", crucible: 1.2, onnxruntime: 0.8, pytorch: 1.5 },
+    { size: "Small (5M)", crucible: 5.4, onnxruntime: 3.8, pytorch: 6.2 },
+    { size: "Medium (11M)", crucible: 14.3, onnxruntime: 11.5, pytorch: 18.4 },
+    { size: "Large (25M)", crucible: 32.1, onnxruntime: 25.4, pytorch: 39.2 },
+    { size: "Huge (50M)", crucible: 68.4, onnxruntime: 54.2, pytorch: 82.5 },
   ];
 }
 
@@ -176,108 +179,109 @@ export function getChartData(): ChartDataPoint[] {
 export function getSupportedOps(): SupportedOp[] {
   return [
     {
-      name: 'Linear Matrix Multiply',
-      opType: 'MatMul',
-      category: 'Linear Algebra',
-      description: 'Performs matrix multiplication of 2D inputs.',
-      backend: 'Eigen::Map row-major product matrix',
-      wasmSupported: true
+      name: "Linear Matrix Multiply",
+      opType: "MatMul",
+      category: "Linear Algebra",
+      description: "Performs matrix multiplication of 2D inputs.",
+      backend: "Eigen::Map row-major product matrix",
+      wasmSupported: true,
     },
     {
-      name: 'General Matrix Multiply',
-      opType: 'Gemm',
-      category: 'Linear Algebra',
-      description: 'General matrix multiplication mapping: Y = alpha * A * B + beta * C.',
-      backend: 'Eigen::Map product + broadcast addition',
-      wasmSupported: false
+      name: "General Matrix Multiply",
+      opType: "Gemm",
+      category: "Linear Algebra",
+      description: "General matrix multiplication mapping: Y = alpha * A * B + beta * C.",
+      backend: "Eigen::Map product + broadcast addition",
+      wasmSupported: false,
     },
     {
-      name: '2D Convolution',
-      opType: 'Conv',
-      category: 'Convolution',
-      description: '2D spatial convolution supporting padding, stride, channels, and groups=1.',
-      backend: 'im2col mapping + Eigen GEMM multiplication',
-      wasmSupported: false
+      name: "2D Convolution",
+      opType: "Conv",
+      category: "Convolution",
+      description: "2D spatial convolution supporting padding, stride, channels, and groups=1.",
+      backend: "im2col mapping + Eigen GEMM multiplication",
+      wasmSupported: false,
     },
     {
-      name: 'Rectified Linear Unit',
-      opType: 'Relu',
-      category: 'Activation',
-      description: 'Applies element-wise thresholding: max(0, x).',
-      backend: 'Eigen element-wise cwiseMax(0.0f)',
-      wasmSupported: true
+      name: "Rectified Linear Unit",
+      opType: "Relu",
+      category: "Activation",
+      description: "Applies element-wise thresholding: max(0, x).",
+      backend: "Eigen element-wise cwiseMax(0.0f)",
+      wasmSupported: true,
     },
     {
-      name: 'Sigmoid Activation',
-      opType: 'Sigmoid',
-      category: 'Activation',
-      description: 'Applies element-wise sigmoid mapping: 1 / (1 + e^-x).',
-      backend: 'Eigen unary expression (exponential)',
-      wasmSupported: true
+      name: "Sigmoid Activation",
+      opType: "Sigmoid",
+      category: "Activation",
+      description: "Applies element-wise sigmoid mapping: 1 / (1 + e^-x).",
+      backend: "Eigen unary expression (exponential)",
+      wasmSupported: true,
     },
     {
-      name: 'Softmax Normalization',
-      opType: 'Softmax',
-      category: 'Activation',
-      description: 'Exponent-normalizes elements along the specified axis (defaults to -1).',
-      backend: 'Eigen 2D slice reduction (numerical stable max shift)',
-      wasmSupported: true
+      name: "Softmax Normalization",
+      opType: "Softmax",
+      category: "Activation",
+      description: "Exponent-normalizes elements along the specified axis (defaults to -1).",
+      backend: "Eigen 2D slice reduction (numerical stable max shift)",
+      wasmSupported: true,
     },
     {
-      name: 'GELU Activation',
-      opType: 'Gelu',
-      category: 'Activation',
-      description: 'Gaussian Error Linear Unit using tanh approximation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).',
-      backend: 'Eigen unary expression (approximation coefficients)',
-      wasmSupported: false
+      name: "GELU Activation",
+      opType: "Gelu",
+      category: "Activation",
+      description:
+        "Gaussian Error Linear Unit using tanh approximation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).",
+      backend: "Eigen unary expression (approximation coefficients)",
+      wasmSupported: false,
     },
     {
-      name: 'Max Pooling',
-      opType: 'MaxPool',
-      category: 'Pooling',
-      description: 'Applies max pooling in a 2D sliding window.',
-      backend: 'Sliding window spatial block scan',
-      wasmSupported: false
+      name: "Max Pooling",
+      opType: "MaxPool",
+      category: "Pooling",
+      description: "Applies max pooling in a 2D sliding window.",
+      backend: "Sliding window spatial block scan",
+      wasmSupported: false,
     },
     {
-      name: 'Average Pooling',
-      opType: 'AveragePool',
-      category: 'Pooling',
-      description: 'Applies average pooling in a 2D sliding window.',
-      backend: 'Sliding window spatial block sum / area size',
-      wasmSupported: false
+      name: "Average Pooling",
+      opType: "AveragePool",
+      category: "Pooling",
+      description: "Applies average pooling in a 2D sliding window.",
+      backend: "Sliding window spatial block sum / area size",
+      wasmSupported: false,
     },
     {
-      name: 'Global Average Pooling',
-      opType: 'GlobalAveragePool',
-      category: 'Pooling',
-      description: 'Collapses 2D spatial dimensions to their channel-wise mean.',
-      backend: 'Eigen channel-wise block average reduction',
-      wasmSupported: false
+      name: "Global Average Pooling",
+      opType: "GlobalAveragePool",
+      category: "Pooling",
+      description: "Collapses 2D spatial dimensions to their channel-wise mean.",
+      backend: "Eigen channel-wise block average reduction",
+      wasmSupported: false,
     },
     {
-      name: 'Batch Normalization',
-      opType: 'BatchNormalization',
-      category: 'Normalization',
-      description: 'Normalizes activation channels in inference mode.',
-      backend: 'Eigen broadcast scaling: (X - mean) * scale / sqrt(var + eps) + B',
-      wasmSupported: false
+      name: "Batch Normalization",
+      opType: "BatchNormalization",
+      category: "Normalization",
+      description: "Normalizes activation channels in inference mode.",
+      backend: "Eigen broadcast scaling: (X - mean) * scale / sqrt(var + eps) + B",
+      wasmSupported: false,
     },
     {
-      name: 'Flatten Tensor',
-      opType: 'Flatten',
-      category: 'Tensor Manipulation',
-      description: 'Collapses input shape dimensions into a 2D layout based on split axis.',
-      backend: 'Vector shape transformation',
-      wasmSupported: false
+      name: "Flatten Tensor",
+      opType: "Flatten",
+      category: "Tensor Manipulation",
+      description: "Collapses input shape dimensions into a 2D layout based on split axis.",
+      backend: "Vector shape transformation",
+      wasmSupported: false,
     },
     {
-      name: 'Reshape Tensor',
-      opType: 'Reshape',
-      category: 'Tensor Manipulation',
-      description: 'Changes the dimensions of the shape array while preserving total size.',
-      backend: 'Vector shape transformation',
-      wasmSupported: false
-    }
+      name: "Reshape Tensor",
+      opType: "Reshape",
+      category: "Tensor Manipulation",
+      description: "Changes the dimensions of the shape array while preserving total size.",
+      backend: "Vector shape transformation",
+      wasmSupported: false,
+    },
   ];
 }
