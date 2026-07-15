@@ -515,6 +515,16 @@ static Graph parse_graph(Cursor& c) {
                 break;
         }
     }
+    // Filter initializers (weights) out of input_names, as ONNX lists them in both
+    std::vector<std::string> actual_inputs;
+    actual_inputs.reserve(g.input_names.size());
+    for (const auto& name : g.input_names) {
+        if (g.weights.find(name) == g.weights.end() &&
+            g.int_initializers.find(name) == g.int_initializers.end()) {
+            actual_inputs.push_back(name);
+        }
+    }
+    g.input_names = std::move(actual_inputs);
     return g;
 }
 
