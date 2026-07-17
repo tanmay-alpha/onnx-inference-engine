@@ -143,7 +143,7 @@ impl CrucibleError {
         // field was malformed).
         let detail = unsafe {
             let p = crucible_last_error();
-            if p.is_null() { String::new() } else {
+            if p.is_null() { "(no detail available from engine)".to_string() } else {
                 CStr::from_ptr(p).to_string_lossy().into_owned()
             }
         };
@@ -239,7 +239,12 @@ impl Model {
         // output buffers up front. We re-query each call to keep
         // the public API simple — info is cheap.
         let info = self.info()?;
-        let n_out = info.num_outputs as usize;
+        let n_out = info.num_outputs;
+        if n_out < 0 {
+            return Err(CrucibleError::Internal(format!(
+                "C library returned negative num_outputs: {n_out}")));
+        }
+        let n_out = n_out as usize;
         if n_out == 0 {
             return Ok(Vec::new());
         }
@@ -259,7 +264,7 @@ impl Model {
         // SAFETY: all out-pointers are valid; the slices point to
         // caller-owned buffers of the right length. After the call,
         // each non-null out_desc[i].shape and out_buf[i] must be
-        // freed with libc::free because the C side used malloc.
+        // freed with crucible_free_array to match the C allocator.
         let s = unsafe {
             crucible_run(
                 self.handle,
@@ -284,7 +289,14 @@ impl Model {
                 continue;
             }
             // Copy shape out of the malloc'd array BEFORE freeing it.
-            let rank = od.rank as usize;
+            let rank = od.rank;
+            if rank < 0 {
+                crucible_free_array(od.shape as *mut std::ffi::c_void);
+                crucible_free_array(out_buf[i] as *mut std::ffi::c_void);
+                return Err(CrucibleError::Internal(format!(
+                    "C library returned negative rank: {rank}")));
+            }
+            let rank = rank as usize;
             let mut shape = Vec::<i64>::with_capacity(rank);
             // SAFETY: od.shape is malloc'd and `rank` matches the
             // number of elements the C side wrote.
@@ -353,8 +365,13 @@ impl Tensor {
                 "input JSON missing 'shape' array".into()))?;
         let mut shape = Vec::with_capacity(shape_v.len());
         for d in shape_v {
-            shape.push(d.as_i64().ok_or_else(|| CrucibleError::InvalidArgument(
-                "input JSON shape entries must be int".into()))?);
+            let val = d.as_i64().ok_or_else(|| CrucibleError::InvalidArgument(
+                "input JSON shape entries must be int".into()))?;
+            if val < 0 {
+                return Err(CrucibleError::InvalidArgument(
+                    format!("negative dimension in shape: {val}")));
+            }
+            shape.push(val);
         }
         let data_v = v.get("data")
             .and_then(|x| x.as_array())
@@ -366,7 +383,10 @@ impl Tensor {
                 "input JSON data entries must be number".into()))? as f32);
         }
         // Cross-check: declared size must match data length.
-        let expected: i64 = shape.iter().product();
+        let expected: i64 = shape.iter().try_fold(1i64, |acc, &d| {
+            acc.checked_mul(d).ok_or(CrucibleError::Parse(
+                format!("shape dimensions overflow i64: {shape:?}")))
+        })?;
         if expected as usize != data.len() {
             return Err(CrucibleError::InvalidArgument(format!(
                 "input shape product {expected} != data length {}",
@@ -398,7 +418,11 @@ pub fn validate_model(path: &Path) -> Result<ModelInfo, CrucibleError> {
 /// Top-k indices by descending value. Used by `run --top` to print
 /// ImageNet predictions.
 pub fn top_k_indices(values: &[f32], k: usize) -> Vec<(usize, f32)> {
-    let mut indexed: Vec<(usize, f32)> = values.iter().copied().enumerate().collect();
+    let mut indexed: Vec<(usize, f32)> = values.iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, val)| !val.is_nan())
+        .collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     indexed.truncate(k);
     indexed
@@ -412,7 +436,7 @@ pub fn top_k_indices(values: &[f32], k: usize) -> Vec<(usize, f32)> {
 /// loader's path so the user knows WHERE to put libcrucible.{so,dylib,dll}.
 /// We try the names in the order most-likely-to-succeed; if none
 /// load, we report the canonical "searched these" list.
-fn load_library_diagnostics(_model_path: &str) -> String {
+fn load_library_diagnostics(model_path: &str) -> String {
     #[cfg(target_os = "windows")]
     const CANDIDATES: &[&str] = &["crucible.dll"];
     #[cfg(target_os = "macos")]
@@ -420,11 +444,16 @@ fn load_library_diagnostics(_model_path: &str) -> String {
     #[cfg(all(unix, not(target_os = "macos")))]
     const CANDIDATES: &[&str] = &["libcrucible.so"];
 
+    let model_dir = std::path::Path::new(model_path)
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+
     format!(
-        "could not load the Crucible native library. Tried: {:?}. \
-         Build the engine (cmake --build build/release) and either copy \
-         the resulting shared object next to the CLI or add its \
-         directory to LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH.",
-        CANDIDATES,
+        "could not load the Crucible native library when loading model at '{}'. \
+         Tried library names: {:?}. Build the engine (cmake --build build/release) and either copy \
+         the resulting shared object to '{}' or add its directory to \
+         LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH.",
+        model_path, CANDIDATES, model_dir,
     )
 }

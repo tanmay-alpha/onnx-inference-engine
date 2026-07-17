@@ -23,12 +23,12 @@ namespace crucible::ops {
 Tensor matmul(const Tensor& A, const Tensor& B);
 
 // Compute Y = alpha * op(A) @ op(B) + beta * C
-//   where op(X) is X if transX == 0, X^T otherwise.
+//   where op(X) is X if transX, X^T otherwise.
 // C may be empty (rank 0) in which case the bias is omitted.
 // C may broadcast: rank-1 of size M (rows of result) or rank-2 of size MxN.
 // Throws std::invalid_argument on rank or shape mismatch.
 Tensor gemm(const Tensor& A, const Tensor& B, const Tensor& C,
             float alpha = 1.0f, float beta = 1.0f,
-            int transA = 0, int transB = 0);
+            bool transA = false, bool transB = false);
 
 }  // namespace crucible::ops

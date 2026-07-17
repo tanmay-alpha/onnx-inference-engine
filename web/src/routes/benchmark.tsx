@@ -13,6 +13,7 @@ import {
 import { CrucibleLayout } from "../components/crucible/Layout";
 import { Check, X } from "lucide-react";
 import { getBenchmarkResults, getChartData } from "../lib/api";
+import { useState, useMemo } from "react";
 
 export const Route = createFileRoute("/benchmark")({
   head: () => ({
@@ -32,60 +33,13 @@ export const Route = createFileRoute("/benchmark")({
   component: BenchmarkPage,
 });
 
-// Real benchmark data from our measured C++ release build
-const _bdata = getBenchmarkResults();
-const _crucible = _bdata.results.find((r) => r.engine === "crucible")!;
-const _ort = _bdata.results.find((r) => r.engine === "onnxruntime")!;
-const _torch = _bdata.results.find((r) => r.engine === "pytorch")!;
-
-// Chart data — latency vs model size from api.ts
-const LATENCY = getChartData().map((d) => ({
-  size: d.size,
-  "Crucible Native": d.crucible,
-  "ONNX Runtime": d.onnxruntime,
-  PyTorch: d.pytorch,
-}));
-
+// Static reference data (independent of fetched benchmark results)
 const FOOTPRINT = [
   { runtime: "Crucible WASM", binaryMB: 3.1, coldMs: 48, browser: true },
   { runtime: "Crucible Native", binaryMB: 1.4, coldMs: 12, browser: false },
   { runtime: "TFLite", binaryMB: 2.1, coldMs: 35, browser: true },
   { runtime: "ONNX Runtime", binaryMB: 51.2, coldMs: 820, browser: false },
   { runtime: "PyTorch", binaryMB: 756.0, coldMs: 2100, browser: false },
-];
-
-// Distribution table built from real stats
-const STATS = [
-  {
-    runtime: "Crucible Native (C++/Eigen)",
-    min: _crucible.stats.min_ms,
-    max: _crucible.stats.max_ms,
-    median: _crucible.stats.median_ms,
-    p95: _crucible.stats.p95_ms,
-    p99: _crucible.stats.p99_ms,
-    mean: _crucible.stats.mean_ms,
-    throughput: _crucible.stats.throughput_inf_per_sec,
-  },
-  {
-    runtime: "ONNX Runtime (CPU / MLAS)",
-    min: _ort.stats.min_ms,
-    max: _ort.stats.max_ms,
-    median: _ort.stats.median_ms,
-    p95: _ort.stats.p95_ms,
-    p99: _ort.stats.p99_ms,
-    mean: _ort.stats.mean_ms,
-    throughput: _ort.stats.throughput_inf_per_sec,
-  },
-  {
-    runtime: "PyTorch (CPU / ATen)",
-    min: _torch.stats.min_ms,
-    max: _torch.stats.max_ms,
-    median: _torch.stats.median_ms,
-    p95: _torch.stats.p95_ms,
-    p99: _torch.stats.p99_ms,
-    mean: _torch.stats.mean_ms,
-    throughput: _torch.stats.throughput_inf_per_sec,
-  },
 ];
 
 const COLORS = {
@@ -104,6 +58,64 @@ const tooltipStyle = {
 } as const;
 
 function BenchmarkPage() {
+  const _bdata = useMemo(() => getBenchmarkResults(), []);
+  const _crucible = _bdata?.results?.find((r: any) => r.engine === "crucible");
+  const _ort = _bdata?.results?.find((r: any) => r.engine === "onnxruntime");
+  const _torch = _bdata?.results?.find((r: any) => r.engine === "pytorch");
+
+  if (!_crucible || !_ort || !_torch) {
+    return (
+      <CrucibleLayout>
+        <section className="c-container">
+          <h1 className="c-h2">Benchmark Console</h1>
+          <p className="c-muted">No benchmark data available. Run the benchmark suite first.</p>
+        </section>
+      </CrucibleLayout>
+    );
+  }
+
+  // Chart data — latency vs model size from api.ts (depends on engine results)
+  const LATENCY = getChartData().map((d) => ({
+    size: d.size,
+    "Crucible Native": d.crucible,
+    "ONNX Runtime": d.onnxruntime,
+    PyTorch: d.pytorch,
+  }));
+
+  // Distribution table built from real stats
+  const STATS = [
+    {
+      runtime: "Crucible Native (C++/Eigen)",
+      min: _crucible.stats.min_ms,
+      max: _crucible.stats.max_ms,
+      median: _crucible.stats.median_ms,
+      p95: _crucible.stats.p95_ms,
+      p99: _crucible.stats.p99_ms,
+      mean: _crucible.stats.mean_ms,
+      throughput: _crucible.stats.throughput_inf_per_sec,
+    },
+    {
+      runtime: "ONNX Runtime (CPU / MLAS)",
+      min: _ort.stats.min_ms,
+      max: _ort.stats.max_ms,
+      median: _ort.stats.median_ms,
+      p95: _ort.stats.p95_ms,
+      p99: _ort.stats.p99_ms,
+      mean: _ort.stats.mean_ms,
+      throughput: _ort.stats.throughput_inf_per_sec,
+    },
+    {
+      runtime: "PyTorch (CPU / ATen)",
+      min: _torch.stats.min_ms,
+      max: _torch.stats.max_ms,
+      median: _torch.stats.median_ms,
+      p95: _torch.stats.p95_ms,
+      p99: _torch.stats.p99_ms,
+      mean: _torch.stats.mean_ms,
+      throughput: _torch.stats.throughput_inf_per_sec,
+    },
+  ];
+
   return (
     <CrucibleLayout>
       <section className="c-container">

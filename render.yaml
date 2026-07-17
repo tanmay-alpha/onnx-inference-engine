@@ -13,9 +13,9 @@ services:
       - key: NODE_VERSION
         value: "20"
 
-  # ── Backend: FastAPI inference server ────────────────────────────────────
-  # Disabled on free tier (requires Docker build which is slow).
-  # Uncomment to deploy the Python server separately.
+  # ── Backend: FastAPI inference server ──────────────────────────────────────
+  # Disabled on free tier — requires Docker build which is slow.
+  # To enable, uncomment the service below and ensure server/Dockerfile is present.
   #
   # - type: web
   #   name: crucible-api

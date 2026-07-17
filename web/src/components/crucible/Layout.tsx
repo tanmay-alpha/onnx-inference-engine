@@ -44,7 +44,12 @@ export function CrucibleLayout({ children }: { children: ReactNode }) {
             {NAV.map((n) => {
               const active = n.to === "/" ? pathname === "/" : pathname.startsWith(n.to);
               return (
-                <Link key={n.to} to={n.to} className={`c-nav-link${active ? " active" : ""}`}>
+                <Link
+                  key={n.to}
+                  to={n.to}
+                  className={`c-nav-link${active ? " active" : ""}`}
+                  aria-current={active ? "page" : undefined}
+                >
                   {n.label}
                 </Link>
               );

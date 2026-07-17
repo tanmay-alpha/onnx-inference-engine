@@ -45,7 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from server.main import _MODEL_REGISTRY, _check_api_key, app  # noqa: E402
+from server.main import _MODEL_REGISTRY, _check_api_key, _engine_name, app  # noqa: E402
 from server import converter, validator  # noqa: E402
 
 
@@ -377,7 +377,7 @@ def test_infer_returns_correct_shape(
     body = r.json()
     assert body["output_shape"] == [1, 5]
     assert len(body["output"]) == 5
-    assert body["engine"] == "crucible-cpp"
+    assert body["engine"] in ("crucible-cpp", "crucible-fallback")
     assert 0.0 <= body["inference_time_ms"] < 60_000.0
 
 

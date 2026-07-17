@@ -24,10 +24,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import statistics
 import sys
 import time
+
+
+def percentile(sorted_data, p):
+    """Standard percentile with linear interpolation (numpy-style)."""
+    n = len(sorted_data)
+    if n == 1:
+        return sorted_data[0]
+    k = (n - 1) * p / 100.0
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return sorted_data[int(k)]
+    d0 = sorted_data[f] * (c - k)
+    d1 = sorted_data[c] * (k - f)
+    return d0 + d1
 from pathlib import Path
 from typing import List
 
@@ -122,8 +138,8 @@ def _summarise(timings_ms: List[float]) -> dict:
         "median_ms": statistics.median(sorted_t),
         # Nearest-rank percentile. For n=100, p95 picks the 95th
         # element (0-indexed: 94) — well-defined and stable.
-        "p95_ms": sorted_t[max(0, int(0.95 * n) - 1)],
-        "p99_ms": sorted_t[max(0, int(0.99 * n) - 1)],
+        "p95_ms": percentile(sorted_t, 95),
+        "p99_ms": percentile(sorted_t, 99),
         "min_ms": sorted_t[0],
         "max_ms": sorted_t[-1],
         # Throughput = 1000 ms / mean_ms. Capped at 1e6 to keep

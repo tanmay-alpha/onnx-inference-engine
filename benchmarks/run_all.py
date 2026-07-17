@@ -71,7 +71,7 @@ def _run_one(script_name: str, *args: str) -> dict:
         cmd = [sys.executable, str(script_path), "--output", str(tmp_path),
                *args]
         result = subprocess.run(
-            cmd, capture_output=True, text=True, check=False,
+            cmd, capture_output=True, text=True, check=False, timeout=120,
         )
         if result.returncode != 0:
             print(
@@ -229,10 +229,15 @@ def main(argv: List[str] | None = None) -> int:
     for engine in engines:
         script = script_for[engine]
         print(f"[run_all] -> {script}", file=sys.stderr)
-        result = _run_one(script,
-                          "--runs", str(args.runs),
-                          "--warmup", str(args.warmup),
-                          "--seed", str(args.seed))
+        try:
+            result = _run_one(script,
+                              "--runs", str(args.runs),
+                              "--warmup", str(args.warmup),
+                              "--seed", str(args.seed))
+        except subprocess.TimeoutExpired:
+            print(f"[run_all] {script} timed out after 120s", file=sys.stderr)
+            results.append({"engine": script.replace("bench_", "").replace(".py", ""), "error": "timeout"})
+            continue
         results.append(result)
     elapsed = time.perf_counter() - t0
 

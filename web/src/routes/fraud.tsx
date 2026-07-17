@@ -85,7 +85,8 @@ function verdict(p: number): { label: string; tone: "ok" | "warn" | "err" } {
 }
 
 function heuristicScore(tx: Tx): number {
-  // Local fallback if WASM fails to load
+  // Deterministic fallback based on structural signals:
+  // drained account, large amount, zeroed destination, type mismatch.
   const drained = tx.origBefore > 0 && tx.origAfter / tx.origBefore < 0.02;
   const bigAmount = tx.amount >= 100000;
   const zeroedDest = tx.destBefore + tx.destAfter === 0 && tx.amount > 1000;
@@ -96,7 +97,7 @@ function heuristicScore(tx: Tx): number {
   if (zeroedDest) s += 0.18;
   if (mismatch) s += 0.12;
   if (tx.type === "CASH_OUT") s += 0.08;
-  return Math.min(0.995, Math.max(0.005, s + (Math.random() - 0.5) * 0.03));
+  return Math.min(0.995, Math.max(0.005, s));
 }
 
 function FraudPage() {
@@ -200,8 +201,11 @@ function FraudPage() {
                 <input
                   className="c-input"
                   type="number"
+                  min="0"
+                  step="0.01"
                   value={tx.amount}
                   onChange={(e) => update("amount", Number(e.target.value))}
+                  autoComplete="off"
                 />
               </div>
               <div className="c-field-row">
@@ -210,8 +214,11 @@ function FraudPage() {
                   <input
                     className="c-input"
                     type="number"
+                    min="0"
+                    step="0.01"
                     value={tx.origBefore}
                     onChange={(e) => update("origBefore", Number(e.target.value))}
+                    autoComplete="off"
                   />
                 </div>
                 <div>
@@ -219,8 +226,11 @@ function FraudPage() {
                   <input
                     className="c-input"
                     type="number"
+                    min="0"
+                    step="0.01"
                     value={tx.origAfter}
                     onChange={(e) => update("origAfter", Number(e.target.value))}
+                    autoComplete="off"
                   />
                 </div>
               </div>
@@ -230,8 +240,11 @@ function FraudPage() {
                   <input
                     className="c-input"
                     type="number"
+                    min="0"
+                    step="0.01"
                     value={tx.destBefore}
                     onChange={(e) => update("destBefore", Number(e.target.value))}
+                    autoComplete="off"
                   />
                 </div>
                 <div>
@@ -239,8 +252,11 @@ function FraudPage() {
                   <input
                     className="c-input"
                     type="number"
+                    min="0"
+                    step="0.01"
                     value={tx.destAfter}
                     onChange={(e) => update("destAfter", Number(e.target.value))}
+                    autoComplete="off"
                   />
                 </div>
               </div>

@@ -44,7 +44,7 @@ public:
 
     /// Allocate `prod(shape)` floats initialised to `fill`.
     /// Throws std::invalid_argument if any dimension is non-positive.
-    explicit Tensor(std::vector<int64_t> shape, float fill = 0.0f);
+    Tensor(std::vector<int64_t> shape, float fill = 0.0f);
 
     /// Wrap a caller-owned buffer. The data is copied (no aliasing).
     /// Throws std::invalid_argument if data.size() != prod(shape).
@@ -77,8 +77,9 @@ public:
     Tensor reshape(std::vector<int64_t> new_shape) const;
 
     /// Return a 1-D tensor containing all elements in row-major order.
-    /// Equivalent to reshape({size()}); for an empty tensor, returns another
-    /// empty tensor.
+    /// Equivalent to reshape({size()}); for an empty tensor (rank 0), returns a
+    /// rank-1 tensor of size 1 containing the single scalar value (if any).
+    /// Throws std::invalid_argument if called on a rank-0 tensor with size() == 0.
     Tensor flatten() const;
 
     /// Print a human-readable representation to std::cout. Truncates after
