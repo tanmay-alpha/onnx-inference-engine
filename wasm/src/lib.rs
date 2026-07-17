@@ -154,7 +154,8 @@ fn parse_attribute(c: &mut Cursor) -> Result<Attribute, String> {
         let (field, wire) = c.read_tag()?;
         match field {
             1 => {
-                attr.name = String::from_utf8_lossy(c.read_length_delimited()?).into_owned();
+                attr.name = String::from_utf8(c.read_length_delimited()?)
+                    .map_err(|_| "ONNX: invalid UTF-8 in attribute name")?;
             }
             2 => {
                 let bits = c.read_fixed32()?;
@@ -213,16 +214,20 @@ fn parse_node(c: &mut Cursor) -> Result<GraphNode, String> {
         let (field, wire) = c.read_tag()?;
         match field {
             1 => {
-                node.inputs.push(String::from_utf8_lossy(c.read_length_delimited()?).into_owned());
+                node.inputs.push(String::from_utf8(c.read_length_delimited()?)
+                    .map_err(|_| "ONNX: invalid UTF-8 in node input name")?);
             }
             2 => {
-                node.outputs.push(String::from_utf8_lossy(c.read_length_delimited()?).into_owned());
+                node.outputs.push(String::from_utf8(c.read_length_delimited()?)
+                    .map_err(|_| "ONNX: invalid UTF-8 in node output name")?);
             }
             3 => {
-                node.name = String::from_utf8_lossy(c.read_length_delimited()?).into_owned();
+                node.name = String::from_utf8(c.read_length_delimited()?)
+                    .map_err(|_| "ONNX: invalid UTF-8 in node name")?;
             }
             4 => {
-                node.op_type = String::from_utf8_lossy(c.read_length_delimited()?).into_owned();
+                node.op_type = String::from_utf8(c.read_length_delimited()?)
+                    .map_err(|_| "ONNX: invalid UTF-8 in op_type")?;
             }
             5 => {
                 let bytes = c.read_length_delimited()?;
@@ -272,7 +277,8 @@ fn parse_tensor(c: &mut Cursor) -> Result<TensorParseResult, String> {
                 res.data_type = c.read_varint()? as i32;
             }
             8 => {
-                res.name = String::from_utf8_lossy(c.read_length_delimited()?).into_owned();
+                res.name = String::from_utf8(c.read_length_delimited()?)
+                    .map_err(|_| "ONNX: invalid UTF-8 in tensor name")?;
             }
             9 => {
                 let bytes = c.read_length_delimited()?;
@@ -328,7 +334,8 @@ fn parse_value_info(c: &mut Cursor) -> Result<String, String> {
     while !c.eof() {
         let (field, wire) = c.read_tag()?;
         if field == 1 {
-            name = String::from_utf8_lossy(c.read_length_delimited()?).into_owned();
+            name = String::from_utf8(c.read_length_delimited()?)
+                .map_err(|_| "ONNX: invalid UTF-8 in value info name")?;
         } else {
             c.skip_field(wire)?;
         }
@@ -357,7 +364,8 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
                 g.nodes.push(parse_node(&mut inner)?);
             }
             2 => {
-                g.name = String::from_utf8_lossy(c.read_length_delimited()?).into_owned();
+                g.name = String::from_utf8(c.read_length_delimited()?)
+                    .map_err(|_| "ONNX: invalid UTF-8 in graph name")?;
             }
             5 => {
                 let bytes = c.read_length_delimited()?;
@@ -370,7 +378,14 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
                     let expected_len = if tp.dims.is_empty() {
                         1
                     } else {
-                        tp.dims.iter().product::<i64>() as usize
+                        tp.dims.iter().try_fold(1usize, |acc, &d| {
+                            if d <= 0 {
+                                return Err("ONNX: non-positive dimension".into());
+                            }
+                            let d_us = d as usize;
+                            acc.checked_mul(d_us)
+                                .ok_or_else(|| "ONNX: dim product overflowed usize".into())
+                        })?
                     };
                     if tp.float_data.len() != expected_len {
                         return Err(format!(
@@ -575,9 +590,16 @@ pub fn softmax(input: &Tensor, axis_attr: Option<i64>) -> Result<Tensor, String>
             sum += val;
         }
 
-        for j in 0..axis_dim {
-            data[start + j] = exps[j] / sum;
-        }
+            if sum == 0.0 {
+                let uniform = 1.0 / axis_dim as f32;
+                for j in 0..axis_dim {
+                    data[start + j] = uniform;
+                }
+            } else {
+                for j in 0..axis_dim {
+                    data[start + j] = exps[j] / sum;
+                }
+            }
     }
 
     Ok(Tensor::new(input.shape.clone(), data))

@@ -15,6 +15,7 @@ Why we keep the model classes tiny?
 """
 from __future__ import annotations
 
+import math
 from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -36,7 +37,7 @@ class _Base(BaseModel):
         Crucible's own code never calls `.model_dump` on a request
         model.
     """
-    model_config = ConfigDict(protected_namespaces=())
+    model_config = ConfigDict(protected_namespaces=('model_',))
 
 
 class ConvertResponse(_Base):
@@ -48,9 +49,6 @@ class ConvertResponse(_Base):
     """
     onnx_model_id: str = Field(
         ..., description="UUID identifying the saved ONNX model"
-    )
-    model_path: str = Field(
-        ..., description="Absolute filesystem path of the saved .onnx"
     )
     operators_used: List[str] = Field(
         ..., description="Distinct op_type strings in the graph, "
@@ -108,7 +106,7 @@ class InferResponse(_Base):
     only — JSON encode/decode is excluded.
     """
     output: List[float] = Field(
-        ..., description="Flattened float32 output, row-major"
+        ..., description="Flattened float values serialized as JSON numbers (double precision)"
     )
     output_shape: List[int] = Field(
         ..., description="Reshape target for `output`"

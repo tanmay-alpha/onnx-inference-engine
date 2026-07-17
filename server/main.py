@@ -67,6 +67,10 @@ from server.schemas import (
 SERVER_VERSION = "1.0.0"
 ENGINE_NAME = "crucible-cpp"
 
+def _engine_name() -> str:
+    """Return the active engine identifier based on backend."""
+    return ENGINE_NAME if BACKEND == "cpp" else "crucible-fallback"
+
 # Max upload size — 200 MB. MobileNetV2 is ~14 MB; ResNet50 is ~100 MB;
 # anything beyond that is almost certainly an attack or a misuse.
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
@@ -86,18 +90,15 @@ PUBLIC_PATHS = frozenset({"/health", "/operators", "/docs", "/openapi.json"})
 
 
 def _model_dir() -> Path:
-    """Resolve the model dir on every call.
-
-    Why a function and not a module constant?
-        Tests want to monkeypatch CRUCIBLE_MODEL_DIR and have the
-        change take effect. A module-level `Path(os.environ.get(...))`
-        captures the env var at import time and ignores later
-        mutations. A function reads the env var fresh each time,
-        so tests can use `monkeypatch.setenv` to redirect writes
-        to a tmp_path.
-    """
+    """Resolve the model dir on every call."""
     d = Path(os.environ.get("CRUCIBLE_MODEL_DIR", "/tmp/models"))
-    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cannot create model directory at {d}: permission denied"
+        )
     return d
 
 
@@ -183,10 +184,17 @@ def _register_model(onnx_path: Path) -> str:
     """Store a model under the resolved model dir and return its uuid."""
     model_id = uuid.uuid4().hex
     target = _model_dir() / f"{model_id}.onnx"
-    # shutil.move so we tolerate cross-device tmp dirs.
-    import shutil
-    shutil.move(str(onnx_path), str(target))
-    _MODEL_REGISTRY[model_id] = target
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        import shutil
+        shutil.move(str(onnx_path), str(tmp_path))
+        _MODEL_REGISTRY[model_id] = tmp_path
+    except Exception:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
     return model_id
 
 
@@ -283,7 +291,7 @@ def health() -> HealthResponse:
     """Liveness probe. Always returns 200 unless the process is dead."""
     return HealthResponse(
         status="ok",
-        engine=ENGINE_NAME,
+        engine=_engine_name(),
         version=SERVER_VERSION,
     )
 
@@ -439,7 +447,7 @@ def infer(req: InferRequest) -> InferResponse:
         output=out_arr.reshape(-1).tolist(),
         output_shape=list(out_arr.shape),
         inference_time_ms=elapsed_ms,
-        engine=ENGINE_NAME,
+        engine=_engine_name(),
     )
 
 

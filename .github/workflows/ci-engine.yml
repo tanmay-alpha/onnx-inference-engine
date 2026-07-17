@@ -53,7 +53,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engine/build/debug
-          key: cmake-debug-${{ runner.os }}-${{ hashFiles('engine/CMakeLists.txt', 'engine/src/**', 'engine/include/**') }}
+          key: cmake-debug-${{ runner.os }}-${{ hashFiles('engine/CMakeLists.txt', 'engine/src/**', 'engine/include/**', 'engine/CMakePresets.json') }}
           restore-keys: cmake-debug-${{ runner.os }}-
 
       # ── 4. Configure ─────────────────────────────────────────────────────────

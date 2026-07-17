@@ -98,7 +98,11 @@ function PlaygroundPage() {
   };
 
   const updateShape = (i: number, v: number) => {
-    setShape((s) => s.map((x, idx) => (idx === i ? Math.max(1, v) : x)));
+    setShape((s) => s.map((x, idx) => {
+      if (idx !== i) return x;
+      const parsed = Number.parseInt(v.toString(), 10);
+      return Number.isNaN(parsed) || parsed < 1 ? 1 : parsed;
+    }));
   };
 
   return (

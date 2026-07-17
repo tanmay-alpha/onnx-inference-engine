@@ -9,6 +9,7 @@
 //! them by "thing being printed" (info, prediction, bench stats,
 //! validate result) keeps the formatting decisions visible together.
 
+use std::ffi::c_char;
 use std::io::Write;
 use std::path::Path;
 
@@ -20,14 +21,14 @@ pub fn format_model_info_text(info: &ModelInfo, path: &Path) -> String {
     let mut s = String::new();
     s.push_str(&format!("Model        : {}\n", path.display()));
     s.push_str(&format!("ABI version  : {}\n", info.abi_version));
-    s.push_str(&format!("Inputs       : {}\n", info.num_inputs));
-    for i in 0..info.num_inputs as isize {
-        let name = unsafe { read_c_str_ptr(*info.input_names.offset(i)) };
+    let input_names = unsafe { read_c_str_array(info.input_names, info.num_inputs) };
+    let output_names = unsafe { read_c_str_array(info.output_names, info.num_outputs) };
+    s.push_str(&format!("Inputs       : {}\n", input_names.len()));
+    for (i, name) in input_names.iter().enumerate() {
         s.push_str(&format!("              [{i}] {name}\n"));
     }
-    s.push_str(&format!("Outputs      : {}\n", info.num_outputs));
-    for i in 0..info.num_outputs as isize {
-        let name = unsafe { read_c_str_ptr(*info.output_names.offset(i)) };
+    s.push_str(&format!("Outputs      : {}\n", output_names.len()));
+    for (i, name) in output_names.iter().enumerate() {
         s.push_str(&format!("              [{i}] {name}\n"));
     }
     s.push_str(&format!("Initializers : {}\n", info.num_initializers));
@@ -38,12 +39,8 @@ pub fn format_model_info_text(info: &ModelInfo, path: &Path) -> String {
 /// JSON rendering of the same info block. The `shape` arrays are
 /// represented as nested arrays so the JSON is unambiguous.
 pub fn format_model_info_json(info: &ModelInfo, path: &Path) -> serde_json::Value {
-    let inputs: Vec<String> = (0..info.num_inputs as isize)
-        .map(|i| unsafe { read_c_str_ptr(*info.input_names.offset(i)) })
-        .collect();
-    let outputs: Vec<String> = (0..info.num_outputs as isize)
-        .map(|i| unsafe { read_c_str_ptr(*info.output_names.offset(i)) })
-        .collect();
+    let input_names = unsafe { read_c_str_array(info.input_names, info.num_inputs) };
+    let output_names = unsafe { read_c_str_array(info.output_names, info.num_outputs) };
     serde_json::json!({
         "model":          path.display().to_string(),
         "abi_version":    info.abi_version,
@@ -51,8 +48,8 @@ pub fn format_model_info_json(info: &ModelInfo, path: &Path) -> serde_json::Valu
         "num_outputs":    info.num_outputs,
         "num_initializers": info.num_initializers,
         "num_nodes":      info.num_nodes,
-        "input_names":    inputs,
-        "output_names":   outputs,
+        "input_names":    input_names,
+        "output_names":   output_names,
     })
 }
 
@@ -161,7 +158,18 @@ pub fn format_bench_json(
 /// of the model). We copy immediately so the borrow is short.
 unsafe fn read_c_str_ptr(p: *const std::os::raw::c_char) -> String {
     if p.is_null() { return "<null>".to_string(); }
-    std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+    CStr::from_ptr(p).to_string_lossy().into_owned()
+}
+
+/// SAFETY: read a null-terminated string array. Returns an empty
+/// Vec if the pointer itself is null or if num is 0.
+unsafe fn read_c_str_array(ptr: *const *const c_char, num: i32) -> Vec<String> {
+    if ptr.is_null() || num <= 0 {
+        return Vec::new();
+    }
+    (0..num as isize)
+        .map(|i| read_c_str_ptr(*ptr.offset(i)))
+        .collect()
 }
 
 /// Flush stdout. Used by the CLI after every command so a piping

@@ -27,8 +27,10 @@ co_l          = rng.choice([0,1], n_legit, p=[0.65,0.35]).astype(np.float32)
 tr_l          = rng.choice([0,1], n_legit, p=[0.85,0.15]).astype(np.float32)
 
 amount_f      = rng.uniform(100_000, 1_000_000, n_fraud).astype(np.float32)
-oldorg_f      = (amount_f * rng.uniform(0.98, 1.05, n_fraud)).astype(np.float32)
-neworg_f      = np.zeros(n_fraud, dtype=np.float32)
+# Fraud samples: oldbalanceOrig is typically close to the amount
+# (account is drained), with some variation — NOT all zeros.
+oldorg_f      = (amount_f * rng.uniform(0.90, 1.10, n_fraud)).astype(np.float32)
+neworg_f      = np.clip(oldorg_f - amount_f * rng.uniform(0.85, 1.00, n_fraud), 0.0, None).astype(np.float32)
 olddst_f      = rng.exponential(10_000, n_fraud).astype(np.float32)
 newdst_f      = (olddst_f + amount_f).astype(np.float32)
 co_f          = rng.choice([0,1], n_fraud, p=[0.5,0.5]).astype(np.float32)
@@ -71,10 +73,10 @@ graph = helper.make_graph(
      helper.make_node("Sigmoid",["z"],       ["prob"])],
     "fraud_detector",
     [helper.make_tensor_value_info("input",TensorProto.FLOAT,[None,7])],
-    [helper.make_tensor_value_info("prob", TensorProto.FLOAT,[None,1])],
+    [helper.make_tensor_value_info("prob", TensorProto.FLOAT, [None])],
     [numpy_helper.from_array(W,"W"), numpy_helper.from_array(b,"b")],
 )
-m = helper.make_model(graph, opset_imports=[helper.make_opsetid("",13)])
+m = helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
 m.ir_version = 8
 onnx.checker.check_model(m)
 

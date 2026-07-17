@@ -24,6 +24,28 @@ from onnx import (
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES_DIR = os.path.join(REPO_ROOT, "engine", "tests", "fixtures")
 
+# Validate expected layout: repo root should contain an engine/ directory.
+engine_dir = os.path.join(REPO_ROOT, "engine")
+if not os.path.isdir(engine_dir):
+    raise FileNotFoundError(
+        f"Expected Crucible layout: {engine_dir} not found. "
+        f"The repo root appears to be {REPO_ROOT}. "
+        f"Run generate_fixtures.py from the Crucible project root."
+    )
+
+
+def _make_tensor(name, dtype, dims, raw_bytes):
+    """Create an initializer tensor with validated shape and native byte order."""
+    # Validate dims
+    for d in dims:
+        if d <= 0:
+            raise ValueError(f"Tensor '{name}': non-positive dimension {d}")
+    # Ensure native byte order
+    arr = np.frombuffer(raw_bytes, dtype=dtype)
+    if arr.dtype.byteorder not in ('=', sys.byteorder):
+        arr = arr.byteswap().newbyteorder('=')
+    return helper.make_tensor(name, dtype, dims, arr.tobytes(), raw=True)
+
 
 def make_matmul_add():
     """input -> MatMul(W) -> Add(b) -> output."""
@@ -120,7 +142,6 @@ def make_empty():
 
 
 def write_model(model, name):
-    os.makedirs(FIXTURES_DIR, exist_ok=True)
     path = os.path.join(FIXTURES_DIR, name + ".onnx")
     data = model.SerializeToString()
     with open(path, "wb") as f:
@@ -128,13 +149,22 @@ def write_model(model, name):
     print(f"  wrote {path}  ({len(data)} bytes)")
 
 
+def _validate_opset(model, min_opset):
+    """Verify the model's default ONNX opset is >= min_opset."""
+    for imp in model.opset_import:
+        if imp.domain == "" and int(imp.version) < min_opset:
+            raise ValueError(
+                f"Model '{model.graph.name}': default opset {imp.version} < required {min_opset}"
+            )
+
+
 def main():
     print(f"Generating fixtures in {FIXTURES_DIR}")
-    write_model(make_matmul_add(),    "matmul_add")
-    write_model(make_gemm(),          "gemm")
-    write_model(make_reshape(),       "reshape")
-    write_model(make_chain_4_nodes(), "chain4")
-    write_model(make_empty(),         "empty")
+    os.makedirs(FIXTURES_DIR, exist_ok=True)
+    for make_fn in (make_matmul_add, make_gemm, make_reshape, make_chain_4_nodes, make_empty):
+        model = make_fn()
+        _validate_opset(model, 17)
+        write_model(model, make_fn.__name__.removeprefix("make_"))
     print("Done.")
 
 

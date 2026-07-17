@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 import time
@@ -78,6 +79,19 @@ def _bench(sess, x: np.ndarray, input_name: str,
     return timings
 
 
+def percentile(sorted_data, p):
+    """Standard percentile with linear interpolation."""
+    n = len(sorted_data)
+    if n == 1:
+        return sorted_data[0]
+    k = (n - 1) * p / 100.0
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return sorted_data[int(k)]
+    return sorted_data[f] * (c - k) + sorted_data[c] * (k - f)
+
+
 def _summarise(timings_ms: List[float]) -> dict:
     sorted_t = sorted(timings_ms)
     n = len(sorted_t)
@@ -85,8 +99,8 @@ def _summarise(timings_ms: List[float]) -> dict:
         "runs": n,
         "mean_ms":   statistics.fmean(sorted_t),
         "median_ms": statistics.median(sorted_t),
-        "p95_ms": sorted_t[max(0, int(0.95 * n) - 1)],
-        "p99_ms": sorted_t[max(0, int(0.99 * n) - 1)],
+        "p95_ms": percentile(sorted_t, 95),
+        "p99_ms": percentile(sorted_t, 99),
         "min_ms": sorted_t[0],
         "max_ms": sorted_t[-1],
         "throughput_inf_per_sec": min(1e6, 1000.0 / statistics.fmean(sorted_t)),

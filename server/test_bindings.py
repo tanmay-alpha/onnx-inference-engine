@@ -61,7 +61,8 @@ def _import_crucible_py():
                 try:
                     import crucible_py  # type: ignore[import-not-found]
                     return crucible_py
-                except ImportError:
+                except ImportError as e:
+                    print(f"[debug] crucible_py import failed from {path}: {e}")
                     continue
     return None
 

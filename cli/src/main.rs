@@ -55,7 +55,8 @@ enum Command {
         input: PathBuf,
 
         /// Number of top predictions to print (default 5).
-        #[arg(long, value_name = "N", default_value_t = 5)]
+        #[arg(long, value_name = "N", default_value_t = 5,
+              value_parser = clap::value_parser!(usize).range(1..))]
         top: usize,
 
         /// Path to a JSON file with class labels (one per line, in
@@ -84,11 +85,13 @@ enum Command {
         input: PathBuf,
 
         /// Number of timed runs after warmup.
-        #[arg(long, value_name = "N", default_value_t = 100)]
+        #[arg(long, value_name = "N", default_value_t = 100,
+              value_parser = clap::value_parser!(usize).range(1..))]
         runs: usize,
 
         /// Number of un-timed warmup runs.
-        #[arg(long, value_name = "N", default_value_t = 10)]
+        #[arg(long, value_name = "N", default_value_t = 10,
+              value_parser = clap::value_parser!(usize).range(1..))]
         warmup: usize,
 
         /// Emit machine-readable JSON on stdout.
@@ -116,16 +119,6 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    // Satisfy dead-code analysis for FFI variants that are matched but not constructed in the normal Rust execution flow.
-    let _ = [
-        runner::Status::Ok,
-        runner::Status::InvalidArgument,
-        runner::Status::Io,
-        runner::Status::Parse,
-        runner::Status::Runtime,
-        runner::Status::Unsupported,
-        runner::Status::Internal,
-    ];
     let cli = Cli::parse();
     match dispatch(cli) {
         Ok(())  => ExitCode::SUCCESS,
@@ -225,7 +218,9 @@ fn cmd_run(
                 "top":   arr,
             })
         };
-        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()));
+        let json_str = serde_json::to_string_pretty(&v)
+            .map_err(|e| runner::CrucibleError::Parse(format!("JSON serialization failed: {e}")))?;
+        println!("{json_str}");
     } else {
         // Text mode.
         if let Some(max_n) = print_output {
@@ -267,7 +262,9 @@ fn cmd_bench(
     let (mean, median, p95, p99, mn, mx) = compute_stats(&samples_ms);
     if json {
         let v = formatter::format_bench_json(runs, mean, median, p95, p99, mn, mx);
-        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()));
+        let json_str = serde_json::to_string_pretty(&v)
+            .map_err(|e| runner::CrucibleError::Parse(format!("JSON serialization failed: {e}")))?;
+        println!("{json_str}");
     } else {
         print!("{}", formatter::format_bench_text(runs, mean, median, p95, p99, mn, mx));
         formatter::flush();
@@ -277,11 +274,18 @@ fn cmd_bench(
 
 fn compute_stats(samples: &[f64]) -> (f64, f64, f64, f64, f64, f64) {
     if samples.is_empty() { return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0); }
-    let mut s: Vec<f64> = samples.to_vec();
+    let mut s: Vec<f64> = samples.iter().filter(|v| !v.is_nan()).copied().collect();
+    if s.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    }
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = s.len();
     let mean   = s.iter().sum::<f64>() / n as f64;
-    let median = s[n / 2];
+    let median = if n % 2 == 0 {
+        (s[n / 2 - 1] + s[n / 2]) / 2.0
+    } else {
+        s[n / 2]
+    };
     let p95    = s[((n as f64 * 0.95).floor() as usize).min(n - 1)];
     let p99    = s[((n as f64 * 0.99).floor() as usize).min(n - 1)];
     let mn     = s[0];
@@ -309,7 +313,9 @@ fn cmd_info(model_path: &Path, json: bool) -> Result<(), runner::CrucibleError> 
     let info  = model.info()?;
     if json {
         let v = formatter::format_model_info_json(&info, model_path);
-        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()));
+        let json_str = serde_json::to_string_pretty(&v)
+            .map_err(|e| runner::CrucibleError::Parse(format!("JSON serialization failed: {e}")))?;
+        println!("{json_str}");
     } else {
         print!("{}", formatter::format_model_info_text(&info, model_path));
         formatter::flush();
