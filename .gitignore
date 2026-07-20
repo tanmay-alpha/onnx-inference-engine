@@ -8,6 +8,7 @@ cli/target/
 wasm/target/
 wasm/pkg/
 web/.next/
+public/
 build/
 dist/
 out/

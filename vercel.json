@@ -1,5 +1,3 @@
 {
-  "installCommand": "cd web && npm install",
-  "buildCommand": "cd web && npm run build",
-  "outputDirectory": "web/.output/public"
+  "buildCommand": "cd web && npm run build && node -e \"require('fs').cpSync('.output/public', '../public', {recursive: true})\""
 }
