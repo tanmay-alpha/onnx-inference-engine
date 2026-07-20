@@ -115,7 +115,9 @@ function PlaygroundPage() {
       // Use real WASM inference only when a model has been loaded; otherwise
       // surface a clear error rather than fabricating results.
       if (!modelBytes) {
-        throw new Error("No model loaded. Drop an .onnx file or click the drop zone to choose one.");
+        throw new Error(
+          "No model loaded. Drop an .onnx file or click the drop zone to choose one.",
+        );
       }
       const inputData = new Float32Array(parsedValues);
       const t0 = performance.now();
@@ -134,12 +136,14 @@ function PlaygroundPage() {
   };
 
   const updateShape = (i: number, v: number) => {
-    setShape((s) => s.map((x, idx) => {
-      if (idx !== i) return x;
-      const parsed = Number.parseInt(String(v), 10);
-      if (Number.isNaN(parsed) || parsed < 1) return 1;
-      return parsed;
-    }));
+    setShape((s) =>
+      s.map((x, idx) => {
+        if (idx !== i) return x;
+        const parsed = Number.parseInt(String(v), 10);
+        if (Number.isNaN(parsed) || parsed < 1) return 1;
+        return parsed;
+      }),
+    );
   };
 
   return (
@@ -274,7 +278,11 @@ function PlaygroundPage() {
             {running && <div className="c-loading-bar" style={{ marginTop: 12 }} />}
 
             {error && (
-              <div role="alert" className="c-fade-in" style={{ marginTop: 12, color: "var(--risk)", fontSize: 13 }}>
+              <div
+                role="alert"
+                className="c-fade-in"
+                style={{ marginTop: 12, color: "var(--risk)", fontSize: 13 }}
+              >
                 {error}
               </div>
             )}

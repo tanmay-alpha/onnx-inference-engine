@@ -35,6 +35,7 @@ use thiserror::Error;
 /// Mirrors `CrucibleStatus` in c_api.h.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Status {
     Ok                   = 0,
     InvalidArgument      = 1,
@@ -291,8 +292,10 @@ impl Model {
             // Copy shape out of the malloc'd array BEFORE freeing it.
             let rank = od.rank;
             if rank < 0 {
-                crucible_free_array(od.shape as *mut std::ffi::c_void);
-                crucible_free_array(out_buf[i] as *mut std::ffi::c_void);
+                unsafe {
+                    crucible_free_array(od.shape as *mut std::ffi::c_void);
+                    crucible_free_array(out_buf[i] as *mut std::ffi::c_void);
+                }
                 return Err(CrucibleError::Internal(format!(
                     "C library returned negative rank: {rank}")));
             }

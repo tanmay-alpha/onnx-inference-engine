@@ -59,9 +59,9 @@ const tooltipStyle = {
 
 function BenchmarkPage() {
   const _bdata = useMemo(() => getBenchmarkResults(), []);
-  const _crucible = _bdata?.results?.find((r: any) => r.engine === "crucible");
-  const _ort = _bdata?.results?.find((r: any) => r.engine === "onnxruntime");
-  const _torch = _bdata?.results?.find((r: any) => r.engine === "pytorch");
+  const _crucible = _bdata?.results?.find((r: { engine: string }) => r.engine === "crucible");
+  const _ort = _bdata?.results?.find((r: { engine: string }) => r.engine === "onnxruntime");
+  const _torch = _bdata?.results?.find((r: { engine: string }) => r.engine === "pytorch");
 
   if (!_crucible || !_ort || !_torch) {
     return (

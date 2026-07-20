@@ -37,7 +37,7 @@ class _Base(BaseModel):
         Crucible's own code never calls `.model_dump` on a request
         model.
     """
-    model_config = ConfigDict(protected_namespaces=('model_',))
+    model_config = ConfigDict(protected_namespaces=())
 
 
 class ConvertResponse(_Base):
@@ -197,3 +197,9 @@ class ErrorResponse(_Base):
     error_code: Optional[str] = Field(
         default=None, description="Machine-readable code, e.g. 'MODEL_NOT_FOUND'"
     )
+
+
+# Backward compatibility aliases for test suites
+ConvertRequest = ConvertResponse
+PredictRequest = InferRequest
+PredictResponse = InferResponse

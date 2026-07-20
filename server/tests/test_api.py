@@ -191,7 +191,7 @@ def test_health_ok(client: TestClient) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
-    assert body["engine"] == "crucible-cpp"
+    assert body["engine"] == _engine_name()
     assert body["version"]
 
 
