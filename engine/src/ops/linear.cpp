@@ -82,7 +82,7 @@ Tensor matmul(const Tensor& A, const Tensor& B) {
 
 Tensor gemm(const Tensor& A, const Tensor& B, const Tensor& C,
             float alpha, float beta,
-            int transA, int transB) {
+            bool transA, bool transB) {
     auto a = require_2d(A, "gemm A");
     auto b = require_2d(B, "gemm B");
 
@@ -90,10 +90,10 @@ Tensor gemm(const Tensor& A, const Tensor& B, const Tensor& C,
     //   A is (M, K) (or (K, M) if transA)
     //   B is (K, N) (or (N, K) if transB)
     //   Y is (M, N)
-    int64_t M = (transA == 0) ? a.rows : a.cols;
-    int64_t K = (transA == 0) ? a.cols : a.rows;
-    int64_t K2 = (transB == 0) ? b.rows : b.cols;
-    int64_t N = (transB == 0) ? b.cols : b.rows;
+    int64_t M = (!transA) ? a.rows : a.cols;
+    int64_t K = (!transA) ? a.cols : a.rows;
+    int64_t K2 = (!transB) ? b.rows : b.cols;
+    int64_t N = (!transB) ? b.cols : b.rows;
     if (K != K2) {
         throw std::invalid_argument(
             "gemm: K dimension mismatch (A=" + std::to_string(K) +
@@ -104,12 +104,12 @@ Tensor gemm(const Tensor& A, const Tensor& B, const Tensor& C,
     RowMatrix Yb = view(B);
 
     RowMatrix Yc = RowMatrix::Zero(M, N);
-    if (transA == 0) {
-        if (transB == 0) Yc = Ya * Yb;
-        else             Yc = Ya * Yb.transpose();
+    if (!transA) {
+        if (!transB) Yc = Ya * Yb;
+        else         Yc = Ya * Yb.transpose();
     } else {
-        if (transB == 0) Yc = Ya.transpose() * Yb;
-        else             Yc = Ya.transpose() * Yb.transpose();
+        if (!transB) Yc = Ya.transpose() * Yb;
+        else         Yc = Ya.transpose() * Yb.transpose();
     }
     Yc *= alpha;
 

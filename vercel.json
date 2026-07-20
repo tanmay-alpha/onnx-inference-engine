@@ -1,3 +1,5 @@
 {
-  "buildCommand": "cd web && NITRO_PRESET=vercel npm run build"
+  "installCommand": "cd web && npm install",
+  "buildCommand": "cd web && npm run build",
+  "outputDirectory": "web/.output/public"
 }
