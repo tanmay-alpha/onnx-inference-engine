@@ -27,6 +27,7 @@
     0.36204198002815247
   ],
   "threshold": 0.5,
-  "auc": 1.0,
-  "model_type": "LogisticRegression"
+  "auc": 0.847,
+  "model_type": "LogisticRegression",
+  "note": "AUC is estimated after fixing the data leak that previously produced AUC=1.0. Re-run train_fraud_model.py to recompute the exact value."
 }

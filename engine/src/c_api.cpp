@@ -141,11 +141,7 @@ extern "C" CRUCIBLE_API CrucibleModel* crucible_load(const char* path) {
     }
     try {
         auto m = std::make_unique<crucible::abi_detail::ModelHolder>(
-            crucible::abi_detail::ModelHolder{
-                crucible::load_model(path),
-                {},
-                {}
-            }
+            crucible::load_model(path)
         );
 
         // Cache c_str() pointers once so model_info can fill
@@ -245,8 +241,8 @@ extern "C" CRUCIBLE_API CrucibleStatus crucible_run(
                     "input descriptor is malformed");
                 return CRUCIBLE_ERR_INVALID_ARGUMENT;
             }
-            std::vector<int64_t> shape(desc.shape, desc.shape + desc.rank);
-            std::vector<float>   data(desc.data, desc.data + desc.size);
+            std::vector<int64_t> shape(desc.shape, desc.shape + static_cast<size_t>(desc.rank));
+            std::vector<float>   data(desc.data, desc.data + static_cast<size_t>(desc.size));
             cpp_inputs.emplace(
                 model->holder->input_name_ptrs[i],
                 crucible::Tensor(std::move(shape), std::move(data)));

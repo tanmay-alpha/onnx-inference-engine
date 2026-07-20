@@ -31,6 +31,12 @@ import sys
 import time
 
 
+from pathlib import Path
+from typing import List
+
+import numpy as np
+
+
 def percentile(sorted_data, p):
     """Standard percentile with linear interpolation (numpy-style)."""
     n = len(sorted_data)
@@ -44,10 +50,6 @@ def percentile(sorted_data, p):
     d0 = sorted_data[f] * (c - k)
     d1 = sorted_data[c] * (k - f)
     return d0 + d1
-from pathlib import Path
-from typing import List
-
-import numpy as np
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +138,7 @@ def _summarise(timings_ms: List[float]) -> dict:
         "runs": n,
         "mean_ms":   statistics.fmean(sorted_t),
         "median_ms": statistics.median(sorted_t),
-        # Nearest-rank percentile. For n=100, p95 picks the 95th
-        # element (0-indexed: 94) — well-defined and stable.
+        # Linear-interpolation percentile (numpy-style, ~IEEE 754 pctl).
         "p95_ms": percentile(sorted_t, 95),
         "p99_ms": percentile(sorted_t, 99),
         "min_ms": sorted_t[0],

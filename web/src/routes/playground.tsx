@@ -1,7 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, useCallback } from "react";
 import { Play, Upload, ChevronRight, ChevronDown } from "lucide-react";
 import { CrucibleLayout } from "../components/crucible/Layout";
+import { initWasm, runWasmInference } from "../lib/crucible-wasm";
 
 export const Route = createFileRoute("/playground")({
   head: () => ({
@@ -48,9 +49,11 @@ const DEFAULT_MODEL = {
 
 function PlaygroundPage() {
   const [modelName, setModelName] = useState(DEFAULT_MODEL.name);
+  const [modelBytes, setModelBytes] = useState<Uint8Array | null>(null);
   const [shape, setShape] = useState<number[]>([1, 7]);
   const [values, setValues] = useState("0.31, 0.55, 0.02, 1.0, 0.88, 0.12, 0.44");
   const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{
     latencyMs: number;
     output: number[];
@@ -59,6 +62,7 @@ function PlaygroundPage() {
   const [expanded, setExpanded] = useState<number | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const dropRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const nodes = DEFAULT_MODEL.nodes;
 
@@ -73,35 +77,68 @@ function PlaygroundPage() {
   const expectedSize = shape.reduce((a, b) => a * b, 1);
   const valid = parsedValues.length === expectedSize && parsedValues.every((v) => !Number.isNaN(v));
 
-  const run = () => {
-    if (!valid) return;
-    setRunning(true);
-    setResult(null);
-    setTimeout(() => {
-      // Fake forward pass: sigmoid of weighted sum
-      const sum = parsedValues.reduce((a, b, i) => a + b * (0.1 + i * 0.07), 0);
-      const out = 1 / (1 + Math.exp(-sum + 1.5));
-      setResult({
-        latencyMs: Number((0.6 + Math.random() * 0.6).toFixed(2)),
-        output: [Number(out.toFixed(6))],
-        shape: [1, 1],
-      });
-      setRunning(false);
-    }, 820);
-  };
+  const handleModelFile = useCallback((f: File) => {
+    setModelName(f.name);
+    setError(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const buf = ev.target?.result;
+      if (buf instanceof ArrayBuffer) {
+        setModelBytes(new Uint8Array(buf));
+      }
+    };
+    reader.onerror = () => setError(`Failed to read file: ${f.name}`);
+    reader.readAsArrayBuffer(f);
+  }, []);
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragActive(false);
     const f = e.dataTransfer.files[0];
-    if (f) setModelName(f.name);
+    if (f) handleModelFile(f);
+  };
+
+  const onDropZoneKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      fileInputRef.current?.click();
+    }
+  };
+
+  const run = async () => {
+    if (!valid) return;
+    setRunning(true);
+    setResult(null);
+    setError(null);
+    try {
+      await initWasm();
+      // Use real WASM inference only when a model has been loaded; otherwise
+      // surface a clear error rather than fabricating results.
+      if (!modelBytes) {
+        throw new Error("No model loaded. Drop an .onnx file or click the drop zone to choose one.");
+      }
+      const inputData = new Float32Array(parsedValues);
+      const t0 = performance.now();
+      const output = await runWasmInference(modelBytes, inputData, shape);
+      const latencyMs = performance.now() - t0;
+      setResult({
+        latencyMs: Number(latencyMs.toFixed(3)),
+        output: Array.from(output),
+        shape: shape.slice(1).concat([output.length]),
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRunning(false);
+    }
   };
 
   const updateShape = (i: number, v: number) => {
     setShape((s) => s.map((x, idx) => {
       if (idx !== i) return x;
-      const parsed = Number.parseInt(v.toString(), 10);
-      return Number.isNaN(parsed) || parsed < 1 ? 1 : parsed;
+      const parsed = Number.parseInt(String(v), 10);
+      if (Number.isNaN(parsed) || parsed < 1) return 1;
+      return parsed;
     }));
   };
 
@@ -127,13 +164,18 @@ function PlaygroundPage() {
             <div
               ref={dropRef}
               className={`c-drop${dragActive ? " hover" : ""}`}
+              role="button"
+              tabIndex={0}
+              aria-label="Drop an ONNX model file here, or press Enter to browse"
+              onClick={() => fileInputRef.current?.click()}
+              onKeyDown={onDropZoneKeyDown}
               onDragOver={(e) => {
                 e.preventDefault();
                 setDragActive(true);
               }}
               onDragLeave={() => setDragActive(false)}
               onDrop={onDrop}
-              style={{ marginTop: 12 }}
+              style={{ marginTop: 12, cursor: "pointer" }}
             >
               <Upload size={22} style={{ marginBottom: 8 }} />
               <div style={{ fontSize: 14, fontWeight: 600, color: "var(--ink)" }}>
@@ -145,6 +187,17 @@ function PlaygroundPage() {
                   {modelName}
                 </span>
               </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".onnx"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleModelFile(f);
+                  e.target.value = "";
+                }}
+              />
             </div>
 
             <div style={{ marginTop: 18 }}>
@@ -219,6 +272,12 @@ function PlaygroundPage() {
               <Play size={15} /> {running ? "Running WASM..." : "Run Inference"}
             </button>
             {running && <div className="c-loading-bar" style={{ marginTop: 12 }} />}
+
+            {error && (
+              <div role="alert" className="c-fade-in" style={{ marginTop: 12, color: "var(--risk)", fontSize: 13 }}>
+                {error}
+              </div>
+            )}
 
             {result && (
               <div className="c-fade-in" style={{ marginTop: 22 }}>
@@ -310,6 +369,8 @@ function PlaygroundPage() {
                     className="c-node"
                     style={{ width: "100%" }}
                     onClick={() => setExpanded(expanded === i ? null : i)}
+                    aria-expanded={expanded === i}
+                    aria-controls={`node-detail-${i}`}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       {expanded === i ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -321,7 +382,7 @@ function PlaygroundPage() {
                     <span className="c-node-shape">→ {n.output}</span>
                   </button>
                   {expanded === i && (
-                    <div className="c-node-details c-fade-in">
+                    <div id={`node-detail-${i}`} className="c-node-details c-fade-in">
                       <div>
                         <span style={{ color: "var(--ink-muted)" }}>inputs: </span>
                         <span className="mono" style={{ color: "var(--trace)" }}>

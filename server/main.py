@@ -385,7 +385,6 @@ async def convert(
 
     return ConvertResponse(
         onnx_model_id=model_id,
-        model_path=str(_MODEL_REGISTRY[model_id]),
         operators_used=ops,
         all_supported=not unsupported,
         unsupported_ops=unsupported,
@@ -402,6 +401,15 @@ def infer(req: InferRequest) -> InferResponse:
     the numpy fallback if the bindings aren't built).
     """
     model_path = _lookup_model(req.model_id)
+    if not model_path.is_file():
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Model file for id {req.model_id!r} not found on disk. "
+                "The model may have been removed by a server restart or "
+                "temporary directory cleanup."
+            ),
+        )
 
     # Pydantic should have caught this, but the schemas validator
     # only checks each dim < 2**31 — the product can still be huge.
@@ -481,6 +489,15 @@ async def validate(
             result = validator.validate_model_bytes(data)
         else:
             path = _lookup_model(model_id)  # type: ignore[arg-type]
+            if not path.is_file():
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"Model file for id {model_id!r} not found on disk. "
+                        "The model may have been removed by a server restart or "
+                        "temporary directory cleanup."
+                    ),
+                )
             result = validator.validate_model_path(path)
     except HTTPException:
         raise
