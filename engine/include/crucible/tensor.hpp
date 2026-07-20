@@ -64,9 +64,9 @@ public:
     // ---- Element access ------------------------------------------------------
 
     /// Read/write element access with bounds + rank checks.
-    /// Throws std::invalid_argument if the number of indices does not
-    /// match the tensor's rank. Throws std::out_of_range if any index
-    /// is negative or exceeds its dimension's size.
+    /// Throws std::out_of_range if the number of indices does not
+    /// match the tensor's rank or if any index is negative or exceeds
+    /// its dimension's size.
     float&       at(const std::vector<int64_t>& indices);
     const float& at(const std::vector<int64_t>& indices) const;
 

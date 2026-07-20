@@ -140,13 +140,8 @@ extern "C" CRUCIBLE_API CrucibleModel* crucible_load(const char* path) {
         return nullptr;
     }
     try {
-        auto m = std::make_unique<crucible::abi_detail::ModelHolder>(
-            crucible::abi_detail::ModelHolder{
-                crucible::load_model(path),
-                {},
-                {}
-            }
-        );
+        auto m = std::make_unique<crucible::abi_detail::ModelHolder>();
+        m->model = crucible::load_model(path);
 
         // Cache c_str() pointers once so model_info can fill
         // CrucibleModelInfo.input_names without copying.
