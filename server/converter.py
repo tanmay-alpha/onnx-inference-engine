@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import io
 import os
+import tempfile
 from pathlib import Path
 from typing import List, Union
 
@@ -66,22 +67,32 @@ _DEFAULT_MODEL_DIR = os.environ.get("CRUCIBLE_MODEL_DIR", "/tmp/models")
 
 
 def _resolve_safe_path(output_path: Union[str, Path]) -> Path:
-    """Resolve output_path and ensure it lives under the model directory.
+    """Resolve output_path and ensure it lives under the model directory or temp dir.
 
     Prevents path traversal attacks where a caller passes
     "../../etc/passwd" or similar. Both the caller-supplied path and
     the model directory are canonicalized with realpath before
     comparison, so symlinks and relative segments are resolved.
     """
-    base = Path(_DEFAULT_MODEL_DIR).resolve()
+    model_dir = Path(os.environ.get("CRUCIBLE_MODEL_DIR", "/tmp/models")).resolve()
+    temp_dir = Path(tempfile.gettempdir()).resolve()
     target = Path(output_path).resolve()
+
     try:
-        target.relative_to(base)
-    except ValueError as exc:
-        raise ValueError(
-            f"output_path must be inside {base}, got {target}"
-        ) from exc
-    return target
+        target.relative_to(model_dir)
+        return target
+    except ValueError:
+        pass
+
+    try:
+        target.relative_to(temp_dir)
+        return target
+    except ValueError:
+        pass
+
+    raise ValueError(
+        f"output_path must be inside {model_dir} or {temp_dir}, got {target}"
+    )
 
 
 # ---------------------------------------------------------------------------

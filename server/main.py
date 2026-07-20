@@ -184,17 +184,9 @@ def _register_model(onnx_path: Path) -> str:
     """Store a model under the resolved model dir and return its uuid."""
     model_id = uuid.uuid4().hex
     target = _model_dir() / f"{model_id}.onnx"
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        import shutil
-        shutil.move(str(onnx_path), str(tmp_path))
-        _MODEL_REGISTRY[model_id] = tmp_path
-    except Exception:
-        if tmp_path and tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-        raise
+    import shutil
+    shutil.move(str(onnx_path), str(target))
+    _MODEL_REGISTRY[model_id] = target
     return model_id
 
 

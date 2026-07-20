@@ -9,7 +9,7 @@
 //! them by "thing being printed" (info, prediction, bench stats,
 //! validate result) keeps the formatting decisions visible together.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, CStr};
 use std::io::Write;
 use std::path::Path;
 

@@ -154,7 +154,7 @@ fn parse_attribute(c: &mut Cursor) -> Result<Attribute, String> {
         let (field, wire) = c.read_tag()?;
         match field {
             1 => {
-                attr.name = String::from_utf8(c.read_length_delimited()?)
+                attr.name = String::from_utf8(c.read_length_delimited()?.to_vec())
                     .map_err(|_| "ONNX: invalid UTF-8 in attribute name")?;
             }
             2 => {
@@ -214,19 +214,19 @@ fn parse_node(c: &mut Cursor) -> Result<GraphNode, String> {
         let (field, wire) = c.read_tag()?;
         match field {
             1 => {
-                node.inputs.push(String::from_utf8(c.read_length_delimited()?)
+                node.inputs.push(String::from_utf8(c.read_length_delimited()?.to_vec())
                     .map_err(|_| "ONNX: invalid UTF-8 in node input name")?);
             }
             2 => {
-                node.outputs.push(String::from_utf8(c.read_length_delimited()?)
+                node.outputs.push(String::from_utf8(c.read_length_delimited()?.to_vec())
                     .map_err(|_| "ONNX: invalid UTF-8 in node output name")?);
             }
             3 => {
-                node.name = String::from_utf8(c.read_length_delimited()?)
+                node.name = String::from_utf8(c.read_length_delimited()?.to_vec())
                     .map_err(|_| "ONNX: invalid UTF-8 in node name")?;
             }
             4 => {
-                node.op_type = String::from_utf8(c.read_length_delimited()?)
+                node.op_type = String::from_utf8(c.read_length_delimited()?.to_vec())
                     .map_err(|_| "ONNX: invalid UTF-8 in op_type")?;
             }
             5 => {
@@ -277,7 +277,7 @@ fn parse_tensor(c: &mut Cursor) -> Result<TensorParseResult, String> {
                 res.data_type = c.read_varint()? as i32;
             }
             8 => {
-                res.name = String::from_utf8(c.read_length_delimited()?)
+                res.name = String::from_utf8(c.read_length_delimited()?.to_vec())
                     .map_err(|_| "ONNX: invalid UTF-8 in tensor name")?;
             }
             9 => {
@@ -334,7 +334,7 @@ fn parse_value_info(c: &mut Cursor) -> Result<String, String> {
     while !c.eof() {
         let (field, wire) = c.read_tag()?;
         if field == 1 {
-            name = String::from_utf8(c.read_length_delimited()?)
+            name = String::from_utf8(c.read_length_delimited()?.to_vec())
                 .map_err(|_| "ONNX: invalid UTF-8 in value info name")?;
         } else {
             c.skip_field(wire)?;
@@ -364,7 +364,7 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
                 g.nodes.push(parse_node(&mut inner)?);
             }
             2 => {
-                g.name = String::from_utf8(c.read_length_delimited()?)
+                g.name = String::from_utf8(c.read_length_delimited()?.to_vec())
                     .map_err(|_| "ONNX: invalid UTF-8 in graph name")?;
             }
             5 => {
@@ -380,11 +380,11 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
                     } else {
                         tp.dims.iter().try_fold(1usize, |acc, &d| {
                             if d <= 0 {
-                                return Err("ONNX: non-positive dimension".into());
+                                return Err("ONNX: non-positive dimension".to_string());
                             }
                             let d_us = d as usize;
                             acc.checked_mul(d_us)
-                                .ok_or_else(|| "ONNX: dim product overflowed usize".into())
+                                .ok_or_else(|| "ONNX: dim product overflowed usize".to_string())
                         })?
                     };
                     if tp.float_data.len() != expected_len {

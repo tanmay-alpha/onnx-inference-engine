@@ -56,7 +56,7 @@ enum Command {
 
         /// Number of top predictions to print (default 5).
         #[arg(long, value_name = "N", default_value_t = 5,
-              value_parser = clap::value_parser!(usize).range(1..))]
+              value_parser = parse_positive_usize)]
         top: usize,
 
         /// Path to a JSON file with class labels (one per line, in
@@ -86,12 +86,12 @@ enum Command {
 
         /// Number of timed runs after warmup.
         #[arg(long, value_name = "N", default_value_t = 100,
-              value_parser = clap::value_parser!(usize).range(1..))]
+              value_parser = parse_positive_usize)]
         runs: usize,
 
         /// Number of un-timed warmup runs.
         #[arg(long, value_name = "N", default_value_t = 10,
-              value_parser = clap::value_parser!(usize).range(1..))]
+              value_parser = parse_positive_usize)]
         warmup: usize,
 
         /// Emit machine-readable JSON on stdout.
@@ -281,7 +281,7 @@ fn compute_stats(samples: &[f64]) -> (f64, f64, f64, f64, f64, f64) {
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = s.len();
     let mean   = s.iter().sum::<f64>() / n as f64;
-    let median = if n % 2 == 0 {
+    let median = if n.is_multiple_of(2) {
         (s[n / 2 - 1] + s[n / 2]) / 2.0
     } else {
         s[n / 2]
@@ -338,4 +338,12 @@ fn load_labels(path: &Path) -> Result<Vec<String>, runner::CrucibleError> {
         out.push(t.to_string());
     }
     Ok(out)
+}
+
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let val: usize = s.parse().map_err(|_| format!("'{s}' is not a valid positive integer"))?;
+    if val == 0 {
+        return Err("value must be at least 1".to_string());
+    }
+    Ok(val)
 }
