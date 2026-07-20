@@ -11,9 +11,15 @@ let serverEntryPromise: Promise<ServerEntry> | undefined;
 
 async function getServerEntry(): Promise<ServerEntry> {
   if (!serverEntryPromise) {
-    serverEntryPromise = import("@tanstack/react-start/server-entry").then(
-      (m) => (m.default ?? m) as ServerEntry,
-    );
+    serverEntryPromise = new Promise((resolve, reject) => {
+      import("@tanstack/react-start/server-entry")
+        .then((m) => resolve((m.default ?? m) as ServerEntry))
+        .catch(reject);
+    });
+    serverEntryPromise.catch((err) => {
+      console.error("Server entry import failed, will retry on next request:", err);
+      serverEntryPromise = undefined;
+    });
   }
   return serverEntryPromise;
 }

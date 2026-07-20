@@ -188,6 +188,11 @@ Tensor global_avgpool_forward(const Tensor& x) {
     // Gemm sees a clean (N, C, 1, 1) tensor and the (N, C, H, W)
     // layout invariant is preserved across the head.
     Tensor y({N, C, 1, 1}, 0.0f);
+    if (H == 0 || W == 0) {
+        throw std::invalid_argument(
+            "GlobalAveragePool: zero spatial dimension (H=" +
+            std::to_string(H) + ", W=" + std::to_string(W) + ")");
+    }
     const float denom = static_cast<float>(H) * static_cast<float>(W);
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {

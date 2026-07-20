@@ -193,18 +193,39 @@ namespace {
 // `libc` crate does on Unix). On Windows, MSVC's malloc/free pair
 // is matched. We do not use `new` / `delete` here precisely to keep
 // the deallocation story under the caller's control.
-void tensor_to_buffers(const crucible::Tensor& src,
+// Returns CRUCIBLE_OK on success or an error status on failure.
+CrucibleStatus tensor_to_buffers(const crucible::Tensor& src,
                        float** out_buf,
                        CrucibleTensorDesc* out_desc) {
     const auto& shape = src.shape();
     out_desc->rank  = static_cast<int32_t>(shape.size());
     out_desc->size  = src.size();
-    out_desc->shape = static_cast<int64_t*>(
-        std::malloc(out_desc->rank * sizeof(int64_t)));
-    std::memcpy(out_desc->shape, shape.data(),
-                out_desc->rank * sizeof(int64_t));
-    *out_buf = static_cast<float*>(std::malloc(src.size() * sizeof(float)));
-    std::memcpy(*out_buf, src.data(), src.size() * sizeof(float));
+    out_desc->shape = nullptr;
+    *out_buf       = nullptr;
+    if (out_desc->rank > 0) {
+        out_desc->shape = static_cast<int64_t*>(
+            std::malloc(out_desc->rank * sizeof(int64_t)));
+        if (out_desc->shape == nullptr) {
+            store_error(CRUCIBLE_ERR_RUNTIME,
+                "tensor_to_buffers: allocation failed for shape");
+            return CRUCIBLE_ERR_RUNTIME;
+        }
+        std::memcpy(out_desc->shape, shape.data(),
+                    out_desc->rank * sizeof(int64_t));
+    }
+    if (src.size() > 0) {
+        *out_buf = static_cast<float*>(
+            std::malloc(src.size() * sizeof(float)));
+        if (*out_buf == nullptr) {
+            std::free(out_desc->shape);
+            out_desc->shape = nullptr;
+            store_error(CRUCIBLE_ERR_RUNTIME,
+                "tensor_to_buffers: allocation failed for data");
+            return CRUCIBLE_ERR_RUNTIME;
+        }
+        std::memcpy(*out_buf, src.data(), src.size() * sizeof(float));
+    }
+    return CRUCIBLE_OK;
 }
 }  // namespace
 
@@ -227,6 +248,11 @@ extern "C" CRUCIBLE_API CrucibleStatus crucible_run(
     if (num_outputs != static_cast<int32_t>(model->holder->output_name_ptrs.size())) {
         store_error(CRUCIBLE_ERR_INVALID_ARGUMENT,
             "num_outputs does not match model");
+        return CRUCIBLE_ERR_INVALID_ARGUMENT;
+    }
+    if (num_outputs > 0 && (outputs == nullptr || output_descs == nullptr)) {
+        store_error(CRUCIBLE_ERR_INVALID_ARGUMENT,
+            "output buffers null with num_outputs > 0");
         return CRUCIBLE_ERR_INVALID_ARGUMENT;
     }
     try {
@@ -253,7 +279,11 @@ extern "C" CRUCIBLE_API CrucibleStatus crucible_run(
         if (num_outputs > 0) {
             crucible::Tensor out = crucible::run_inference(
                 model->holder->model, cpp_inputs);
-            tensor_to_buffers(out, &outputs[0], &output_descs[0]);
+            CrucibleStatus ttb_status = tensor_to_buffers(
+                out, &outputs[0], &output_descs[0]);
+            if (ttb_status != CRUCIBLE_OK) {
+                return ttb_status;
+            }
             // For any additional declared outputs we don't have a
             // multi-output path yet; surface that by leaving the
             // buffer null and rank=0 so the Rust side knows the
@@ -267,8 +297,9 @@ extern "C" CRUCIBLE_API CrucibleStatus crucible_run(
         }
         return CRUCIBLE_OK;
     } catch (const std::exception& e) {
-        store_error(classify(e), e.what());
-        return CRUCIBLE_ERR_RUNTIME;
+        CrucibleStatus s = classify(e);
+        store_error(s, e.what());
+        return s;
     } catch (...) {
         store_error(CRUCIBLE_ERR_INTERNAL, "unknown exception during run");
         return CRUCIBLE_ERR_INTERNAL;

@@ -23,6 +23,7 @@ export function renderErrorPage(): string {
       a, button { padding: 0.5rem 1rem; border-radius: 0.375rem; font: inherit; cursor: pointer; text-decoration: none; border: 1px solid transparent; }
       .primary { background: #111; color: #fff; }
       .secondary { background: #fff; color: #111; border-color: #d1d5db; }
+      .muted { color: #6b7280; font-size: 0.8rem; margin-top: 1rem; }
     </style>
   </head>
   <body>
@@ -33,14 +34,30 @@ export function renderErrorPage(): string {
         <button id="retry-btn" class="primary" type="button">Try again</button>
         <a class="secondary" href="/">Go home</a>
       </div>
+      <p id="retry-note" class="muted" style="display:none"></p>
     </div>
     <script>
       // Attach the click handler after DOMContentLoaded so that strict
       // CSP (script-src 'self') doesn't break this page.
-      document.addEventListener('DOMContentLoaded', function () {
+      // Limit retries to prevent an infinite reload loop when the server
+      // is in a permanently broken state.
+      (function () {
+        var MAX_RETRIES = 3;
+        var key = '__crucible_retry_count';
+        var count = parseInt(sessionStorage.getItem(key) || '0', 10);
         var btn = document.getElementById('retry-btn');
-        if (btn) btn.addEventListener('click', function () { location.reload(); });
-      });
+        var note = document.getElementById('retry-note');
+        if (count >= MAX_RETRIES) {
+          if (btn) btn.disabled = true;
+          if (btn) btn.textContent = 'Retries exhausted';
+          if (note) { note.style.display = 'block'; note.textContent = 'The page failed to load after ' + MAX_RETRIES + ' attempts. Please try again later or go home.'; }
+        } else {
+          if (btn) btn.addEventListener('click', function () {
+            sessionStorage.setItem(key, String(count + 1));
+            location.reload();
+          });
+        }
+      })();
     </script>
   </body>
 </html>`;

@@ -374,19 +374,19 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
                 if tp.name.is_empty() {
                     return Err("ONNX: initializer with empty name".into());
                 }
+                let expected_len = if tp.dims.is_empty() {
+                    1
+                } else {
+                    tp.dims.iter().try_fold(1usize, |acc, &d| {
+                        if d <= 0 {
+                            return Err("ONNX: non-positive dimension".to_string());
+                        }
+                        let d_us = d as usize;
+                        acc.checked_mul(d_us)
+                            .ok_or_else(|| "ONNX: dim product overflowed usize".to_string())
+                    })?
+                };
                 if tp.data_type == 1 {
-                    let expected_len = if tp.dims.is_empty() {
-                        1
-                    } else {
-                        tp.dims.iter().try_fold(1usize, |acc, &d| {
-                            if d <= 0 {
-                                return Err("ONNX: non-positive dimension".to_string());
-                            }
-                            let d_us = d as usize;
-                            acc.checked_mul(d_us)
-                                .ok_or_else(|| "ONNX: dim product overflowed usize".to_string())
-                        })?
-                    };
                     if tp.float_data.len() != expected_len {
                         return Err(format!(
                             "ONNX: float initializer size mismatch (dims={:?}, data={})",
@@ -396,6 +396,12 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
                     }
                     g.weights.insert(tp.name, Tensor::new(tp.dims, tp.float_data));
                 } else if tp.data_type == 7 {
+                    if tp.int64_data.len() != expected_len {
+                        return Err(format!(
+                            "ONNX: int64 initializer size mismatch (dims={:?}, expected={}, data={})",
+                            tp.dims, expected_len, tp.int64_data.len()
+                        ));
+                    }
                     g.int_initializers.insert(tp.name, tp.int64_data);
                 }
             }
@@ -449,8 +455,8 @@ pub fn topological_sort(nodes: &[GraphNode]) -> Result<Vec<GraphNode>, String> {
         }
     }
 
-    let mut in_degree = vec![0; nodes.size()];
-    let mut consumers = vec![vec![]; nodes.size()];
+    let mut in_degree = vec![0; nodes.len()];
+    let mut consumers = vec![vec![]; nodes.len()];
 
     for (i, node) in nodes.iter().enumerate() {
         for in_name in &node.inputs {
@@ -493,15 +499,6 @@ pub fn topological_sort(nodes: &[GraphNode]) -> Result<Vec<GraphNode>, String> {
     Ok(sorted)
 }
 
-// Helper trait to query size/len of slices
-trait SizeExt {
-    fn size(&self) -> usize;
-}
-impl<T> SizeExt for [T] {
-    fn size(&self) -> usize {
-        self.len()
-    }
-}
 
 // =================================────────────────===========================
 // Pure-Rust Operator Subset Reimplementation
@@ -521,6 +518,9 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor, String> {
     if k1 != k2 {
         return Err(format!("matmul: inner dimension mismatch (A.cols={}, B.rows={})", k1, k2));
     }
+    if m <= 0 || n <= 0 || k1 <= 0 {
+        return Err(format!("matmul: dimensions must be positive (m={}, k={}, n={})", m, k1, n));
+    }
 
     let m_us = m as usize;
     let n_us = n as usize;
@@ -533,7 +533,13 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor, String> {
         for c in 0..n_us {
             let mut sum = 0.0f32;
             for i in 0..k1_us {
-                sum += a.data[r * k1_us + i] * b.data[i * n_us + c];
+                let ai = r.checked_mul(k1_us).ok_or_else(|| {
+                    format!("matmul: row offset overflow at r={}, k={}", m, k1)
+                })?;
+                let bi = i.checked_mul(n_us).ok_or_else(|| {
+                    format!("matmul: col offset overflow at k={}, n={}", k1, n)
+                })?;
+                sum += a.data[ai + i] * b.data[bi + c];
             }
             data[r * n_us + c] = sum;
         }
@@ -596,16 +602,16 @@ pub fn softmax(input: &Tensor, axis_attr: Option<i64>) -> Result<Tensor, String>
             sum += val;
         }
 
-            if sum == 0.0 {
-                let uniform = 1.0 / axis_dim as f32;
-                for j in 0..axis_dim {
-                    data[start + j] = uniform;
-                }
-            } else {
-                for j in 0..axis_dim {
-                    data[start + j] = exps[j] / sum;
-                }
+        if !sum.is_normal() {
+            let uniform = 1.0 / axis_dim as f32;
+            for j in 0..axis_dim {
+                data[start + j] = uniform;
             }
+        } else {
+            for j in 0..axis_dim {
+                data[start + j] = exps[j] / sum;
+            }
+        }
     }
 
     Ok(Tensor::new(input.shape.clone(), data))

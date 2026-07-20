@@ -110,6 +110,25 @@ function FraudPage() {
   const update = <K extends keyof Tx>(k: K, v: Tx[K]) => setTx((t) => ({ ...t, [k]: v }));
 
   const run = async () => {
+    const numericAmount = Number(tx.amount);
+    const numericOrigBefore = Number(tx.origBefore);
+    const numericOrigAfter = Number(tx.origAfter);
+    const numericDestBefore = Number(tx.destBefore);
+    const numericDestAfter = Number(tx.destAfter);
+    if (
+      !Number.isFinite(numericAmount) || numericAmount < 0 ||
+      !Number.isFinite(numericOrigBefore) || numericOrigBefore < 0 ||
+      !Number.isFinite(numericOrigAfter) || numericOrigAfter < 0 ||
+      !Number.isFinite(numericDestBefore) || numericDestBefore < 0 ||
+      !Number.isFinite(numericDestAfter) || numericDestAfter < 0
+    ) {
+      alert("All monetary values must be non-negative numbers.");
+      return;
+    }
+    if (numericAmount > 1e9) {
+      alert("Amount seems unreasonably large — please enter a realistic value.");
+      return;
+    }
     setStatus("running");
     setResult(null);
     const start = performance.now();
@@ -204,7 +223,7 @@ function FraudPage() {
                   className="c-input"
                   type="number"
                   min="0"
-                  step="0.01"
+                  step="1"
                   value={tx.amount}
                   onChange={(e) => update("amount", Number(e.target.value))}
                   autoComplete="off"
@@ -217,7 +236,7 @@ function FraudPage() {
                     className="c-input"
                     type="number"
                     min="0"
-                    step="0.01"
+                    step="1"
                     value={tx.origBefore}
                     onChange={(e) => update("origBefore", Number(e.target.value))}
                     autoComplete="off"
@@ -229,7 +248,7 @@ function FraudPage() {
                     className="c-input"
                     type="number"
                     min="0"
-                    step="0.01"
+                    step="1"
                     value={tx.origAfter}
                     onChange={(e) => update("origAfter", Number(e.target.value))}
                     autoComplete="off"
@@ -243,7 +262,7 @@ function FraudPage() {
                     className="c-input"
                     type="number"
                     min="0"
-                    step="0.01"
+                    step="1"
                     value={tx.destBefore}
                     onChange={(e) => update("destBefore", Number(e.target.value))}
                     autoComplete="off"
@@ -255,7 +274,7 @@ function FraudPage() {
                     className="c-input"
                     type="number"
                     min="0"
-                    step="0.01"
+                    step="1"
                     value={tx.destAfter}
                     onChange={(e) => update("destAfter", Number(e.target.value))}
                     autoComplete="off"

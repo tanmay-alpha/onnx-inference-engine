@@ -34,6 +34,8 @@
 #include "crucible/ops/norm.hpp"
 #include "crucible/ops/pooling.hpp"
 
+#include <climits>
+#include <cmath>
 #include <cstdint>
 #include <queue>
 #include <stdexcept>
@@ -134,7 +136,13 @@ int attr_int(const std::unordered_map<std::string, float>& attrs,
 float attr_float(const std::unordered_map<std::string, float>& attrs,
                  const std::string& name, float fallback) {
     auto it = attrs.find(name);
-    return (it == attrs.end()) ? fallback : it->second;
+    if (it == attrs.end()) return fallback;
+    if (!std::isfinite(it->second)) {
+        throw std::invalid_argument(
+            "ONNX attribute '" + name + "' is not finite (got " +
+            std::to_string(it->second) + ")");
+    }
+    return it->second;
 }
 
 // Convert `model.attributes` (the `Attribute` union from onnx_parser.hpp)
@@ -194,7 +202,13 @@ Tensor concat_axis0(const std::vector<Tensor>& parts) {
     // Output shape: same as input, axis 0 = sum of axes 0.
     std::vector<int64_t> out_shape = ref_shape;
     int64_t axis0_sum = 0;
-    for (const auto& p : parts) axis0_sum += p.shape()[0];
+    for (const auto& p : parts) {
+        if (axis0_sum > INT64_MAX - p.shape()[0]) {
+            throw std::overflow_error(
+                "Concat: axis-0 dimension sum overflows int64");
+        }
+        axis0_sum += p.shape()[0];
+    }
     out_shape[0] = axis0_sum;
 
     Tensor out(out_shape, 0.0f);
@@ -522,6 +536,10 @@ Tensor run_inference(const Model& model,
                 // We materialise the new shape, then reshape.
                 int64_t keep = 1;
                 for (int i = 0; i < axis && i < static_cast<int>(X.shape().size()); ++i) {
+                    if (keep > INT64_MAX / X.shape()[i]) {
+                        throw std::overflow_error(
+                            "Flatten: leading dimension product overflows int64");
+                    }
                     keep *= X.shape()[i];
                 }
                 std::vector<int64_t> new_shape;
@@ -613,6 +631,14 @@ Tensor run_inference(const Model& model,
             const Tensor& X = require_tensor(tensor_map, ins[0]);
             Tensor Y = X;  // share the underlying buffer — passthrough
             for (const auto& o : outs) tensor_map[o] = Y;
+        }
+        // --- Known-but-unimplemented ops with explicit messages -------
+        else if (op == "Clip" || op == "Shape" || op == "Gather" ||
+                 op == "GatherElements" || op == "Unsqueeze" ||
+                 op == "Squeeze" || op == "Resize") {
+            throw std::runtime_error(
+                "run_inference: op '" + op + "' on node '" + node.name +
+                "' is recognized but not yet supported by Crucible");
         }
         // --- Unknown -------------------------------------------------
         else {

@@ -34,6 +34,7 @@ Security posture (after Issue #13 review)
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -48,7 +49,8 @@ from typing import Annotated, List, Optional
 
 import numpy as np
 import onnx
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
 from server import converter, validator
 from server.schemas import (
@@ -70,6 +72,10 @@ ENGINE_NAME = "crucible-cpp"
 def _engine_name() -> str:
     """Return the active engine identifier based on backend."""
     return ENGINE_NAME if BACKEND == "cpp" else "crucible-fallback"
+
+# Hard timeout on inference requests. A hung C++ process or runaway
+# model would otherwise hold a connection open forever.
+INFERENCE_TIMEOUT_SEC = 60
 
 # Max upload size — 200 MB. MobileNetV2 is ~14 MB; ResNet50 is ~100 MB;
 # anything beyond that is almost certainly an attack or a misuse.
@@ -226,7 +232,8 @@ def _infer_numpy_fallback(model_path: Path,
 def _infer_cpp(model_path: Path,
                input_array: np.ndarray) -> tuple[np.ndarray, float]:
     """Real path through the C++ engine via crucible_py."""
-    assert crucible_py is not None
+    if crucible_py is None:
+        raise RuntimeError("C++ backend (crucible_py) is not available")
     t0 = time.perf_counter()
     model = crucible_py.load_model(str(model_path))
     out = crucible_py.run(model, input_array)
@@ -264,18 +271,55 @@ app = FastAPI(
     version=SERVER_VERSION,
 )
 
+# CORS: allow the Crucible frontend (and any authorised consumer)
+# to call the API from a browser. Restrict origins in production
+# via the CRUCIBLE_CORS_ORIGINS env var (comma-separated).
+_cors_origins = os.environ.get(
+    "CRUCIBLE_CORS_ORIGINS",
+    "http://localhost:3000,http://localhost:5173",
+).split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.middleware("http")
-async def auth_middleware(request, call_next):
-    """No-op kept for backwards compatibility.
+async def _middleware(request: Request, call_next):
+    """Body-size guard + request timeout + auth header logging.
 
-    Auth is now enforced via the `require_api_key` dependency
-    declared on each protected route. We keep this middleware
-    hook (currently a pass-through) so future cross-cutting
-    concerns — request id stamping, body-size pre-checks —
-    have a documented home.
+    Merged into one middleware so the connection is closed as early
+    as possible and we only pay the function-call overhead once.
     """
-    return await call_next(request)
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > _MAX_BODY_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Request body exceeds {_MAX_BODY_BYTES} bytes",
+                )
+        except ValueError:
+            pass
+    try:
+        response = await asyncio.wait_for(
+            call_next(request), timeout=INFERENCE_TIMEOUT_SEC
+        )
+    except asyncio.TimeoutError:
+        _log.error(
+            "Request to %s timed out after %ds",
+            request.url.path, INFERENCE_TIMEOUT_SEC,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Inference timed out — model or input may be too large. "
+                f"Server limit is {INFERENCE_TIMEOUT_SEC}s."
+            ),
+        )
+    return response
 
 
 @app.get("/health", response_model=HealthResponse)

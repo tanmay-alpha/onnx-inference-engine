@@ -491,6 +491,15 @@ static Graph parse_graph(Cursor& c) {
                     }
                     g.weights[tp.name] = Tensor(tp.dims, tp.float_data);
                 } else if (tp.data_type == onnx_dtype::INT64) {
+                    int64_t expected_size = tp.dims.empty() ? 1LL : product_i64(tp.dims);
+                    if ((int64_t)tp.int64_data.size() != expected_size) {
+                        throw std::runtime_error(
+                            "ONNX: int64 initializer size mismatch for '" + tp.name +
+                            "' (dims=" + std::to_string(tp.dims.size()) +
+                            ", expected=" + std::to_string(expected_size) +
+                            ", int64_data=" + std::to_string(tp.int64_data.size()) +
+                            ", raw_data=" + std::to_string(tp.raw_data.size()) + ")");
+                    }
                     g.int_initializers[tp.name] = std::move(tp.int64_data);
                 } else {
                     // Unknown dtype — skip silently; we don't have a
