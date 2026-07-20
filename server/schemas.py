@@ -46,6 +46,9 @@ class ConvertResponse(_Base):
     The server saves the converted ONNX under /tmp/models/<uuid>.onnx
     and returns its id. Clients use that id in subsequent /infer and
     /validate calls.
+
+    Note: the filesystem path is intentionally omitted from the response
+    for security — the server may store models outside the web root.
     """
     onnx_model_id: str = Field(
         ..., description="UUID identifying the saved ONNX model"
@@ -78,11 +81,23 @@ class InferRequest(_Base):
     """
     model_id: str = Field(..., description="UUID returned by /convert")
     input: List[float] = Field(
-        ..., description="Flattened float32 input array, row-major"
+        ..., description="Flattened float32 input array, row-major. "
+                          "NaN and +/-Infinity are rejected."
     )
     input_shape: List[int] = Field(
         ..., description="Reshape target, e.g. [1, 3, 224, 224]"
     )
+
+    @field_validator("input")
+    @classmethod
+    def _validate_input_finite(cls, v: List[float]) -> List[float]:
+        """Reject NaN/Inf — they would propagate through the C++ engine
+        and produce undefined numerical results."""
+        for i, x in enumerate(v):
+            if math.isnan(x) or math.isinf(x):
+                raise ValueError(
+                    f"input[{i}] is not a finite number (NaN/Inf rejected)")
+        return v
 
     @field_validator("input_shape")
     @classmethod

@@ -522,14 +522,20 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor, String> {
         return Err(format!("matmul: inner dimension mismatch (A.cols={}, B.rows={})", k1, k2));
     }
 
-    let mut data = vec![0.0f32; (m * n) as usize];
-    for r in 0..m {
-        for c in 0..n {
+    let m_us = m as usize;
+    let n_us = n as usize;
+    let k1_us = k1 as usize;
+    let total = m_us.checked_mul(n_us).ok_or_else(|| {
+        format!("matmul: output shape {}x{} overflows usize", m, n)
+    })?;
+    let mut data = vec![0.0f32; total];
+    for r in 0..m_us {
+        for c in 0..n_us {
             let mut sum = 0.0f32;
-            for i in 0..k1 {
-                sum += a.data[(r * k1 + i) as usize] * b.data[(i * n + c) as usize];
+            for i in 0..k1_us {
+                sum += a.data[r * k1_us + i] * b.data[i * n_us + c];
             }
-            data[(r * n + c) as usize] = sum;
+            data[r * n_us + c] = sum;
         }
     }
     Ok(Tensor::new(vec![m, n], data))
@@ -911,7 +917,8 @@ mod tests {
 
     #[test]
     fn test_extreme_fraud_fuzzing() {
-        let bytes = std::fs::read("../web/public/models/fraud_detector.onnx")
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let bytes = std::fs::read(format!("{}/../web/public/models/fraud_detector.onnx", manifest_dir))
             .expect("Failed to read fraud_detector.onnx for extreme testing");
 
         let mut seed: u32 = 1337;

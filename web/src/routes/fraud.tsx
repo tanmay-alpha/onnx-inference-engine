@@ -97,6 +97,8 @@ function heuristicScore(tx: Tx): number {
   if (zeroedDest) s += 0.18;
   if (mismatch) s += 0.12;
   if (tx.type === "CASH_OUT") s += 0.08;
+  // Deterministic heuristic: same input always produces the same score.
+  // No Math.random() — repeated calls with identical transactions must agree.
   return Math.min(0.995, Math.max(0.005, s));
 }
 

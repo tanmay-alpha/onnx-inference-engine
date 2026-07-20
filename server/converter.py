@@ -45,6 +45,7 @@ Why dynamic_axes=False?
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from typing import List, Union
 
@@ -57,6 +58,30 @@ import torch.nn as nn
 # Module-level constants
 # ---------------------------------------------------------------------------
 CRUCIBLE_OPSET = 13  # See file header for why 13 specifically.
+
+# Models are persisted under this directory. The default matches the
+# config key in .env.example. This is the ONLY directory the converter
+# will write to; we validate that explicitly to prevent path traversal.
+_DEFAULT_MODEL_DIR = os.environ.get("CRUCIBLE_MODEL_DIR", "/tmp/models")
+
+
+def _resolve_safe_path(output_path: Union[str, Path]) -> Path:
+    """Resolve output_path and ensure it lives under the model directory.
+
+    Prevents path traversal attacks where a caller passes
+    "../../etc/passwd" or similar. Both the caller-supplied path and
+    the model directory are canonicalized with realpath before
+    comparison, so symlinks and relative segments are resolved.
+    """
+    base = Path(_DEFAULT_MODEL_DIR).resolve()
+    target = Path(output_path).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(
+            f"output_path must be inside {base}, got {target}"
+        ) from exc
+    return target
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +105,12 @@ def accept_onnx_upload(
         initializers / shape inference errors that we would
         otherwise discover at /infer time (and translate to a 500).
         Catching them at upload gives a 400 with a useful message.
+
+    Why a path-containment check?
+        output_path is a public argument. If a future caller
+        accepts user-controlled paths, ``../../etc/passwd`` style
+        inputs would otherwise escape the model directory. We
+        resolve both sides and assert containment.
     """
     if not onnx_bytes:
         raise ValueError("Empty upload — no bytes received")
@@ -94,6 +125,8 @@ def accept_onnx_upload(
     # duplication is the price of not parsing the ONNX again on
     # /infer.
 
+    safe_path = _resolve_safe_path(output_path)
+
     try:
         model_proto = onnx.load_from_string(onnx_bytes)
     except Exception as exc:
@@ -104,7 +137,7 @@ def accept_onnx_upload(
     except onnx.checker.ValidationError as exc:
         raise ValueError(f"Invalid ONNX (check failed): {exc}") from exc
 
-    Path(output_path).write_bytes(onnx_bytes)
+    safe_path.write_bytes(onnx_bytes)
     return model_proto
 
 
@@ -155,6 +188,9 @@ def convert_torch_module(
     if any(d <= 0 for d in input_shape):
         raise ValueError("input_shape dims must be positive")
 
+    safe_path = _resolve_safe_path(output_path)
+    safe_path.parent.mkdir(parents=True, exist_ok=True)
+
     model.eval()
 
     # Build a dummy input on CPU. We pin map_location="cpu" above so
@@ -166,7 +202,7 @@ def convert_torch_module(
     torch.onnx.export(
         model,
         (dummy,),
-        str(output_path),
+        str(safe_path),
         input_names=["input"],
         output_names=["output"],
         opset_version=CRUCIBLE_OPSET,
@@ -175,6 +211,6 @@ def convert_torch_module(
 
     # Reload to get the parsed ModelProto (and to surface any
     # export-time corruption via onnx.checker).
-    model_proto = onnx.load(str(output_path))
+    model_proto = onnx.load(str(safe_path))
     onnx.checker.check_model(model_proto)
     return model_proto

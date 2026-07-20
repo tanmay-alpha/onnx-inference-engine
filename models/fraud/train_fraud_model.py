@@ -73,7 +73,7 @@ graph = helper.make_graph(
      helper.make_node("Sigmoid",["z"],       ["prob"])],
     "fraud_detector",
     [helper.make_tensor_value_info("input",TensorProto.FLOAT,[None,7])],
-    [helper.make_tensor_value_info("prob", TensorProto.FLOAT, [None])],
+    [helper.make_tensor_value_info("prob", TensorProto.FLOAT, [None, 1])],
     [numpy_helper.from_array(W,"W"), numpy_helper.from_array(b,"b")],
 )
 m = helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])

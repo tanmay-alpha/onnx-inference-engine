@@ -1,3 +1,12 @@
+/**
+ * Render an HTML error page returned by the SSR pipeline when an
+ * unhandled exception escapes a route loader. Self-contained — no
+ * React, no JS framework, just a static page the browser can render.
+ *
+ * No inline event handlers (no `onclick="..."`) — those break under
+ * strict Content-Security-Policy headers. Instead, attach the handler
+ * after DOMContentLoaded via a small inline <script>.
+ */
 export function renderErrorPage(): string {
   return `<!doctype html>
 <html lang="en">
@@ -21,10 +30,18 @@ export function renderErrorPage(): string {
       <h1>This page didn't load</h1>
       <p>Something went wrong on our end. You can try refreshing or head back home.</p>
       <div class="actions">
-        <button class="primary" onclick="location.reload()">Try again</button>
+        <button id="retry-btn" class="primary" type="button">Try again</button>
         <a class="secondary" href="/">Go home</a>
       </div>
     </div>
+    <script>
+      // Attach the click handler after DOMContentLoaded so that strict
+      // CSP (script-src 'self') doesn't break this page.
+      document.addEventListener('DOMContentLoaded', function () {
+        var btn = document.getElementById('retry-btn');
+        if (btn) btn.addEventListener('click', function () { location.reload(); });
+      });
+    </script>
   </body>
 </html>`;
 }
