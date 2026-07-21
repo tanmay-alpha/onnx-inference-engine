@@ -110,24 +110,13 @@ function FraudPage() {
   const update = <K extends keyof Tx>(k: K, v: Tx[K]) => setTx((t) => ({ ...t, [k]: v }));
 
   const run = async () => {
-    const numericAmount = Number(tx.amount);
-    const numericOrigBefore = Number(tx.origBefore);
-    const numericOrigAfter = Number(tx.origAfter);
-    const numericDestBefore = Number(tx.destBefore);
-    const numericDestAfter = Number(tx.destAfter);
-    if (
-      !Number.isFinite(numericAmount) || numericAmount < 0 ||
-      !Number.isFinite(numericOrigBefore) || numericOrigBefore < 0 ||
-      !Number.isFinite(numericOrigAfter) || numericOrigAfter < 0 ||
-      !Number.isFinite(numericDestBefore) || numericDestBefore < 0 ||
-      !Number.isFinite(numericDestAfter) || numericDestAfter < 0
-    ) {
-      alert("All monetary values must be non-negative numbers.");
-      return;
-    }
-    if (numericAmount > 1e9) {
-      alert("Amount seems unreasonably large — please enter a realistic value.");
-      return;
+    const vals = [tx.amount, tx.origBefore, tx.origAfter, tx.destBefore, tx.destAfter];
+    const labels = ['Amount', 'Origin balance before', 'Origin balance after', 'Dest balance before', 'Dest balance after'];
+    for (let i = 0; i < vals.length; i++) {
+        if (!Number.isFinite(vals[i]) || vals[i] < 0) {
+            alert(labels[i] + ' must be a non-negative number.');
+            return;
+        }
     }
     setStatus("running");
     setResult(null);
