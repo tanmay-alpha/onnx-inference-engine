@@ -4,7 +4,7 @@
 
 ### *Raw models. Forged into production.*
 
-**A from-scratch ONNX inference engine in C++17.**  
+**A from-scratch ONNX inference engine in C++17 & WebAssembly.**  
 Load any `.onnx` model, run CPU inference, benchmark against ONNX Runtime and PyTorch — or ship privacy-preserving inference to the browser with WebAssembly.
 
 [![CI — C++ Engine](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-engine.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-engine.yml)
@@ -15,439 +15,194 @@ Load any `.onnx` model, run CPU inference, benchmark against ONNX Runtime and Py
 [![C++17](https://img.shields.io/badge/C++-17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org/)
 [![Rust](https://img.shields.io/badge/Rust-1.78+-000000?logo=rust&logoColor=white)](https://rustup.rs/)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://python.org/)
-[![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)](https://nextjs.org/)
+[![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev/)
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-WASM-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
+[![SQLite/PostgreSQL](https://img.shields.io/badge/Database-SQLite%2FPostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 
 </div>
 
 ---
 
-[🔴 **Live Demo — Fraud detection in browser**](http://localhost:3000/fraud)
+[🌐 **Live Production App — crucible-ivory-three.vercel.app**](https://crucible-ivory-three.vercel.app/)
 &nbsp;|&nbsp;
-[📊 **Benchmark — 3-engine comparison**](http://localhost:3000/benchmark)
+[🔴 **Fraud Demo**](https://crucible-ivory-three.vercel.app/fraud)
 &nbsp;|&nbsp;
-[📖 **Docs — Supported operators**](http://localhost:3000/docs)
+[📊 **Benchmark Engine**](https://crucible-ivory-three.vercel.app/benchmark)
 &nbsp;|&nbsp;
-[🧪 **Playground — WASM inference console**](http://localhost:3000/playground)
+[📖 **Operator Docs**](https://crucible-ivory-three.vercel.app/docs)
+&nbsp;|&nbsp;
+[🧪 **WASM Playground**](https://crucible-ivory-three.vercel.app/playground)
 
 ---
 
-## What is Crucible?
+## ⚡ What is Crucible?
 
-Crucible is a from-scratch ONNX inference engine. It loads `.onnx` models, parses the compute graph, and runs inference on CPU — every layer written from scratch: the tensor class, the ONNX protobuf parser, each operator, and the graph executor.
+Crucible is a high-performance, multi-language **ONNX inference runtime built from first principles**. It parses `.onnx` compute graphs, performs topological graph execution, and evaluates tensor operations on CPU — with zero heavy external runtime dependencies. Every layer was written from scratch: the row-major float32 Tensor data structures, the protobuf ONNX graph decoder, individual operator kernels, and the execution engine.
 
 The project spans **five languages** and **four deployment targets**:
 
-| Component | Language | Role |
-|-----------|----------|------|
-| `engine/` | C++17 + CMake | Core engine — tensors, operators, graph executor |
-| `server/` | Python + FastAPI | HTTP inference server with ONNX model management |
-| `cli/` | Rust + Clap | CLI binary that links against the C++ engine via FFI |
-| `wasm/` | Rust + wasm-pack | Pure-Rust WASM module — runs inference in the browser |
-| `web/` | TypeScript + Next.js 15 | Frontend — playground, fraud detection, benchmarks, docs |
+| Component | Language / Framework | Key Responsibilities |
+|-----------|----------------------|----------------------|
+| `engine/` | **C++17 + CMake + Eigen** | Core inference engine — tensors, protobuf graph parser, ops, Kahn's algorithm executor, pybind11 bindings |
+| `server/` | **Python 3.11 + FastAPI** | RESTful inference API, ONNX model management, security auth middleware, dual SQLite/PostgreSQL persistence |
+| `cli/` | **Rust + Clap** | High-performance CLI tool interacting with the compiled C++ core engine via C-FFI bindings |
+| `wasm/` | **Rust + wasm-pack** | Pure-Rust WebAssembly runtime compiled for zero-latency, privacy-preserving in-browser inference |
+| `web/` | **React 19 + Vite 8 + TanStack Start** | Modern web dashboard — interactive WASM playground, live fraud detector, benchmark charts, operator docs |
 
 ---
 
-## Repository Layout
+## 🏗️ Repository Layout
 
 ```
 crucible/
-├── engine/                     # C++17 core engine (CMake)
-│   ├── CMakeLists.txt          # Root build file
-│   ├── CMakePresets.json       # debug / release presets
-│   ├── include/crucible/       # Public headers
-│   │   ├── tensor.hpp          # Multi-dim float32 tensor (row-major)
-│   │   ├── onnx_parser.hpp     # Protobuf-based ONNX graph parser
-│   │   ├── executor.hpp        # Topological-sort graph executor
-│   │   ├── c_api.h             # extern "C" FFI boundary (for Rust CLI)
-│   │   └── ops/                # Operator implementations
-│   │       ├── linear.hpp      # MatMul, Gemm
-│   │       ├── activations.hpp # ReLU, Sigmoid, Softmax, GELU, Clip
-│   │       ├── conv2d.hpp      # Conv2D (with depthwise/grouped support)
-│   │       ├── pooling.hpp     # MaxPool, AvgPool, GlobalAvgPool
-│   │       └── norm.hpp        # BatchNorm, LayerNorm
-│   ├── src/                    # Implementations matching include/ layout
-│   ├── tests/                  # Google Test unit tests (per-operator + executor)
-│   ├── benchmarks/             # Google Benchmark (matmul, conv2d)
-│   └── bindings/python/        # pybind11 bindings → crucible_py.so
+├── engine/                     # Core C++17 inference engine (CMake)
+│   ├── CMakeLists.txt          # Root build configuration
+│   ├── CMakePresets.json       # Debug & Release presets
+│   ├── include/crucible/       # Public engine headers
+│   │   ├── tensor.hpp          # Row-major float32 Tensor class
+│   │   ├── onnx_parser.hpp     # Protobuf ONNX compute graph decoder
+│   │   ├── executor.hpp        # Topological-sort (Kahn's BFS) graph executor
+│   │   ├── c_api.h             # C-FFI export boundary (for Rust CLI bridge)
+│   │   └── ops/                # Operator kernels (Conv2D, MatMul, Gemm, ReLU, Softmax, etc.)
+│   ├── src/                    # C++ source code matching include layout
+│   ├── tests/                  # Google Test suite (per-operator + graph tests)
+│   ├── benchmarks/             # Google Benchmark suite (MatMul, Conv2D)
+│   └── bindings/python/        # pybind11 C++ extension module (`crucible_py.so`)
 │
-├── cli/                        # Rust CLI — FFI bridge to libcrucible.so
+├── server/                     # FastAPI inference server & persistence
+│   ├── main.py                 # FastAPI application, authentication middleware, REST routes
+│   ├── database.py             # Thread-safe dual-engine persistence (SQLite / Supabase PostgreSQL)
+│   ├── schemas.py              # Pydantic v2 data validation schemas
+│   ├── converter.py            # ONNX upload validator & PyTorch conversion helper
+│   ├── validator.py            # ONNX graph operator extractor & compatibility checker
+│   ├── tests/                  # pytest server suite (21/21 passing tests)
+│   └── requirements.txt        # Server dependencies
+│
+├── cli/                        # Rust CLI binary (FFI bridge to C++ engine)
 │   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs             # Clap CLI (run, bench, info commands)
-│       ├── runner.rs           # Library loading, model lifecycle, inference
-│       └── formatter.rs        # Text + JSON output formatting
+│   └── src/                    # Clap CLI commands (`run`, `bench`, `info`)
 │
-├── server/                     # Python FastAPI inference server
-│   ├── app/
-│   │   ├── main.py             # Routes: /convert, /infer, /validate, /operators, /health
-│   │   ├── schemas.py          # Pydantic v2 request/response models
-│   │   ├── converter.py        # ONNX upload validation + PyTorch→ONNX (in-process)
-│   │   └── validator.py        # Op-type extraction and supported-ops check
-│   ├── tests/
-│   │   └── test_api.py         # End-to-end HTTP tests
-│   └── requirements.txt
-│
-├── wasm/                       # Pure-Rust WASM module (reimplements op subset)
+├── wasm/                       # Pure-Rust WebAssembly module
 │   ├── Cargo.toml
-│   └── src/lib.rs              # MatMul, ReLU, Sigmoid, Softmax + ONNX parser
+│   └── src/lib.rs              # In-browser WASM inference engine for fraud detection
 │
-├── web/                        # Next.js 15 + shadcn/ui frontend
-│   ├── src/app/                # App Router pages
-│   │   ├── page.tsx            # Landing page
-│   │   ├── benchmark/page.tsx  # 3-engine latency + footprint charts
-│   │   ├── docs/page.tsx       # Supported operators reference
-│   │   ├── fraud/page.tsx      # Privacy-preserving fraud detection (WASM)
-│   │   └── playground/page.tsx # Interactive ONNX inference console
-│   ├── src/components/         # Shared UI (Layout, Nav, Metric cards)
-│   └── src/lib/                # WASM loader, API client, error page
+├── web/                        # Vite 8 + TanStack Start frontend app
+│   ├── src/routes/             # React 19 pages (`index`, `fraud`, `playground`, `benchmark`, `docs`)
+│   ├── src/lib/                # API client (`api.ts`), WASM wrapper (`crucible-wasm.ts`)
+│   └── scripts/postbuild.js    # Vercel Output API v3 copy automation
 │
-├── models/                     # ONNX models + training scripts
-│   ├── fraud/                  # Synthetic fraud dataset + LogisticRegression model
-│   │   ├── train_fraud_model.py
-│   │   ├── fraud_detector.onnx  # Generated ONNX model
-│   │   └── model_config.json   # Feature means, stds, threshold, AUC
-│   └── generate_fixtures.py    # Generates test fixture ONNX files for C++ tests
-│
-├── benchmarks/                 # Python benchmark harness (3-engine comparison)
-│   ├── bench_crucible.py       # Benchmarks via Rust CLI
-│   ├── bench_onnxruntime.py    # Benchmarks via onnxruntime Python
-│   ├── bench_pytorch.py        # Benchmarks via PyTorch
-│   └── run_all.py              # Orchestrator — runs all, merges results
-│
-├── scripts/                    # Build and utility scripts
-│   └── build-wasm.sh           # wasm-pack build invocation
-│
-├── docs/                       # Documentation assets (screenshots, diagrams)
-│
-├── .github/workflows/          # CI/CD — 4 pipelines
-│   ├── ci-engine.yml           # CMake + CTest + Google Benchmark
-│   ├── ci-rust.yml             # cargo test + clippy (WASM + CLI)
-│   ├── ci-server.yml           # pytest + FastAPI test client
-│   └── ci-web.yml              # TypeScript type-check + ESLint
-│
-├── CONTEXT.md                  # Project context, conventions, MCP config
-├── ENGINEERING_PLAN.md         # 20-issue implementation plan
-├── PROJECT_EXPLAINER.md        # Detailed architecture writeup
-├── README.md                   # ← you are here
-├── WRITEUP.md                  # Technical writeup for submission
-└── LICENSE                     # MIT
+├── models/                     # Synthetic fraud detection ONNX models & fixture generators
+├── benchmarks/                 # Python benchmarking harness (Crucible vs. ONNX Runtime vs. PyTorch)
+├── scripts/                    # Helper build scripts (`build-wasm.sh`)
+├── Dockerfile                  # Multi-stage container build (Debian builder + slim runtime)
+├── render.yaml                 # Render Blueprint configuration (Docker API + Static Web)
+└── vercel.json                 # Vercel deployment configuration
 ```
 
 ---
 
-## Quick Start
+## 🚀 Quick Start Guide
 
-### Prerequisites
+### 1. Prerequisites
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| CMake | 3.20+ | C++ engine build |
-| GCC / Clang | C++17 capable | C++ compilation |
-| Rust | 1.78+ | CLI + WASM crates |
-| Python | 3.10+ | Server + benchmark scripts |
-| Node.js | 18+ | Web frontend |
-| wasm-pack | latest | WASM compilation |
-| Git | 2.30+ | Submodule support |
+- **C++ Compiler**: GCC 10+ or Clang 12+ (C++17 compliant)
+- **CMake**: 3.20+ & Ninja / Make
+- **Python**: 3.11+
+- **Rust**: 1.78+ & `wasm-pack`
+- **Node.js**: 20+ & `npm`
 
-### Clone with submodules
+### 2. Clone Repository with Submodules
 
 ```bash
 git clone --recursive https://github.com/tanmay-alpha/Crucible.git
 cd Crucible
 
-# If you already cloned without --recursive:
+# If cloned without --recursive:
 git submodule update --init --recursive
 ```
 
-### Build everything
+### 3. Build & Run Components
 
+#### A. C++ Core Engine
 ```bash
-# 1. C++ engine (debug)
-cmake --preset debug -S engine
-cmake --build engine/build/debug --parallel
+# Configure & build C++ engine in Release mode
+cmake --preset release -S engine -B build/release
+cmake --build build/release --parallel
 
-# 2. Python bindings
-pip install -r server/requirements.txt --break-system-packages
-pip install -e engine/bindings/python --break-system-packages
+# Run Google Test suite
+ctest --test-dir build/release --output-on-failure
+```
 
-# 3. Rust CLI
-cd cli && cargo build --release && cd ..
+#### B. Python FastAPI Inference Server
+```bash
+# Install dependencies
+pip install -r server/requirements.txt
 
-# 4. WASM module
+# Run server on port 8000 (starts SQLite db automatically)
+python -m uvicorn server.main:app --reload --port 8000
+```
+
+#### C. Rust WebAssembly Engine
+```bash
+# Compile WASM module to web/public/wasm/
 bash scripts/build-wasm.sh
-
-# 5. Web frontend
-cd web && npm install && npm run build && cd ..
 ```
 
-### Run
-
+#### D. Web Dashboard (Vite + React 19)
 ```bash
-# FastAPI server (serves /convert, /infer, /validate, /operators, /health)
-cd server && uvicorn app.main:app --reload --port 8000
-
-# Rust CLI — run inference on an ONNX model
-cd cli && cargo run -- run --model ../models/fraud/fraud_detector.onnx
-
-# Next.js web frontend
-cd web && npm run dev
-# → http://localhost:3000
+cd web
+npm install
+npm run dev
+# → Open http://localhost:3000
 ```
 
----
-
-## The Engine in Detail
-
-### Tensor
-
-The core data structure is a multi-dimensional float32 tensor with row-major (C-order) contiguous storage. Every tensor owns its data — no shared pointers, no reference counting.
-
-```cpp
-// Create a 2×3 tensor filled with zeros
-crucible::Tensor t({2, 3});
-
-// Element access with bounds checking
-float val = t.at({0, 1});   // row 0, col 1
-
-// Reshape (total element count must match)
-auto flat = t.reshape({6});
-
-// Flatten to 1-D
-auto one_d = t.flatten();
-```
-
-### ONNX Parser
-
-The parser reads the ONNX protobuf format (`ModelProto`), extracts the compute graph (`GraphProto`), and builds an internal representation of nodes, initializers, inputs, and outputs. It validates the model using `onnx.checker.check_model()`.
-
-### Operators
-
-Each operator is a standalone function taking `Tensor` inputs and returning a new `Tensor`:
-
-- **Linear:** `matmul`, `gemm`
-- **Activations:** `relu`, `sigmoid`, `softmax`, `gelu`, `clip`
-- **Normalization:** `batch_norm`, `layer_norm`
-- **Convolution:** `conv2d` (supports depthwise separable, i.e., `groups == in_channels`)
-- **Pooling:** `max_pool`, `avg_pool`, `global_avg_pool`
-- **Combinators:** `add`, `concat`, `identity`, `dropout`
-
-### Graph Executor
-
-The executor performs a topological sort (Kahn's BFS) of the compute graph, then walks it in dependency order, materialising each node's output tensor and passing it to the next node. The first model output is returned as the inference result.
-
----
-
-## Architecture: Five Languages, One Engine
-
-```
- ┌─────────────────────────────────────────────────────────────┐
- │                    Web Frontend (Next.js 15)                 │
- │  Playground │ Fraud Detection │ Benchmark │ Docs             │
- └────────────────────────┬────────────────────────────────────┘
-                          │
-              ┌───────────┴───────────────┐
-              ▼                           ▼
-   ┌──────────────────┐       ┌──────────────────┐
-   │  WASM Module     │       │  FastAPI Server  │
-   │  (Pure Rust)     │       │  (Python)        │
-   │  MatMul, ReLU,   │       │  /convert        │
-   │  Sigmoid, Softmax│       │  /infer          │
-   │  + ONNX parser   │       │  /validate       │
-   │  3.1 MB binary   │       │  /operators      │
-   │  Runs entirely   │       │  /health         │
-   │  client-side     │       └────────┬─────────┘
-   └──────────────────┘                │
-          ▲              ┌──────────────┴──────────────┐
-          │              ▼                             ▼
-          │     ┌──────────────────┐       ┌──────────────────┐
-          │     │  Rust CLI        │       │  Python Bindings  │
-          │     │  (clap + FFI)    │       │  (pybind11)       │
-          │     │  run, bench,     │       │  crucible_py.so   │
-          │     │  info commands   │       │  load_model(),    │
-          │     └────────┬─────────┘       │  run_inference()  │
-          │              │                 └────────┬─────────┘
-          │              │                          │
-          │              │  extern "C" FFI boundary │
-          │              │                          │
-          └──────────────┴──────────────────────────┘
-                         ▼
-               ┌──────────────────────┐
-               │  C++17 Engine        │
-               │  (CMake + Eigen)     │
-               │                      │
-               │  Tensor              │
-               │  ONNX Parser         │
-               │  Operators (MatMul,  │
-               │  Conv2D, ReLU, etc.) │
-               │  Graph Executor      │
-               │  C API (c_api.h)     │
-               └──────────────────────┘
-```
-
-### Privacy-preserving fraud detection
-
-The fraud detection page runs a LogisticRegression ONNX model **entirely in the browser** via WASM. Transaction data never leaves the device. The model is trained on a synthetic dataset and classifies transactions as FRAUD or LEGITIMATE based on seven features:
-
-- Transaction amount
-- Origin account balance (before / after)
-- Destination account balance (before / after)
-- Transaction type (CASH_OUT, TRANSFER, OTHER)
-
----
-
-## Benchmark Results
-
-Three-engine head-to-head comparison on MobileNetV2 (ImageNet classification):
-
-| Runtime | Mean Latency | Median | P95 | P99 | Binary Size | Browser |
-|----------|-------------|--------|-----|-----|-------------|---------|
-| **Crucible Native (C++/Eigen)** | 445.9 ms | 463.4 ms | 482.3 ms | 498.8 ms | 1.4 MB | No |
-| **ONNX Runtime 1.27** | 1.69 ms | 1.68 ms | 1.83 ms | 1.86 ms | 51.2 MB | No |
-| **PyTorch 2.3** | 0.54 ms | 0.52 ms | 0.71 ms | 0.83 ms | 756 MB | No |
-| **Crucible WASM** | — | — | — | — | 3.1 MB | **Yes** |
-
-> The C++ engine is currently in early scaffold state — the operator implementations and executor are being built incrementally. Native numbers will improve as more operators are implemented. The WASM module provides a working inference path in the browser today.
-
----
-
-## CI/CD — Four Pipelines
-
-| Pipeline | Trigger | What it does |
-|----------|---------|-------------|
-| **ci-engine** | Push to `engine/**` | CMake configure + build + CTest + Google Benchmark |
-| **ci-rust** | Push to `cli/**`, `wasm/**` | `cargo test` + `cargo clippy -D warnings` on both crates |
-| **ci-server** | Push to `server/**` | `pytest` with FastAPI test client |
-| **ci-web** | Push to `web/**` | TypeScript type-check + ESLint |
-
-All pipelines use GitHub Actions with `actions/cache@v4` for Cargo registry, pip cache, and CMake build directories.
-
----
-
-## Development
-
-### Commit message format
-
-```
-feat(scope): short description
-fix(scope): short description
-test(scope): short description
-chore(scope): short description
-ci: short description
-docs: short description
-```
-
-Valid scopes: `engine`, `ops`, `executor`, `bindings`, `server`, `cli`, `wasm`, `web`, `bench`, `models`, `scripts`.
-
-### Code style
-
-- **C++:** C++17, `#pragma once`, row-major tensors, no raw pointers in engine core
-- **Python:** Pydantic v2, type annotations, `ruff` formatting
-- **Rust:** Edition 2021, `cargo clippy -D warnings`, `extern "C"` FFI boundary with no C++ exceptions crossing
-- **TypeScript:** Strict mode, Next.js 15 App Router, WASM loaded via dynamic import with lazy init
-
-### Running tests
-
+#### E. Python Server Test Suite
 ```bash
-# C++ engine tests
-cd engine/build/debug && ctest --output-on-failure
-
-# Python server tests
-cd server && pytest -v
-
-# Rust WASM tests
-cd wasm && cargo test
-
-# Rust CLI tests (type-check only, requires libcrucible.so)
-cd cli && cargo test
+python -m pytest server -v
 ```
 
 ---
 
-## Tech Stack
+## 🗄️ Database & REST API Architecture
 
-| Layer | Technology |
-|-------|-----------|
-| Engine | C++17, CMake, Google Test, Google Benchmark, Eigen 3 |
-| Bindings | pybind11, NumPy |
-| Server | FastAPI, Pydantic v2, Uvicorn, ONNX |
-| CLI | Rust, Clap, Serde |
-| WASM | Rust, wasm-bindgen, wasm-pack |
-| Frontend | Next.js 15, TypeScript, shadcn/ui, Recharts, Lucide icons |
-| CI | GitHub Actions |
-| Deployment | Vercel (frontend), Render (backend) |
+Crucible features a persistent REST API with a thread-safe dual-engine database layer ([server/database.py](file:///C:/Users/TANMAY/OneDrive/Desktop/Crucible/server/database.py)):
 
----
+- **Local Development**: Automatically initializes local SQLite database (`crucible.db`) with WAL mode.
+- **Production / Cloud**: Seamlessly switches to **Supabase PostgreSQL** or **Render Managed PostgreSQL** when `DATABASE_URL` is set in environment variables.
 
-## Key Design Decisions
+### Main REST API Endpoints
 
-1. **WASM is pure Rust — C++ does NOT compile to WASM.** The `wasm/` module reimplements MatMul, ReLU, Sigmoid, and Softmax in pure Rust. It does not call `libcrucible`.
-
-2. **Row-major layout.** PyTorch, NumPy, and ONNX Runtime all default to row-major. Matching this minimises friction when adding Python bindings.
-
-3. **No raw pointers in engine core.** All tensor data lives in `std::vector<float>`. The FFI boundary (`c_api.h`) uses `extern "C"` with no C++ exceptions crossing — errors are returned as integer codes.
-
-4. **Kahn's BFS topological sort.** The graph executor uses a linear-time BFS for topological ordering. No JIT compilation — the interpreter walks the graph on every inference call.
-
-5. **Tensor is copy-on-write by value.** Every `Tensor` owns its data. The cost is a memcpy on assignment; the win is predictable performance and no lifetime bugs.
-
-6. **Privacy-first architecture.** The fraud detection demo runs inference entirely in the browser via WASM. No transaction data is sent to any server.
+| Endpoint | Method | Auth Required | Description |
+| :--- | :---: | :---: | :--- |
+| `/health` | `GET` | No | Liveness probe returning server status and active engine |
+| `/operators` | `GET` | No | Catalogue of supported ONNX operators |
+| `/convert` | `POST` | Yes (`X-API-Key`) | Upload `.onnx` model, validate ops, and register model ID |
+| `/infer` | `POST` | Yes (`X-API-Key`) | Execute tensor inference & record execution metrics to DB |
+| `/validate` | `POST` | Yes (`X-API-Key`) | Validate model file or registered `model_id` |
+| `/models` | `GET` | No | Retrieve list of all registered models from database |
+| `/models/{id}` | `DELETE` | Yes (`X-API-Key`) | Remove model record from database and storage |
+| `/inference/logs` | `GET` | No | Fetch recent inference execution log history |
+| `/fraud/log` | `POST` | No | Record fraud check outcome to database |
+| `/fraud/history` | `GET` | No | Fetch recent fraud transaction evaluation records |
+| `/benchmarks` | `GET` / `POST` | No | Retrieve and submit performance benchmark results |
 
 ---
 
-## Environment Variables
+## ☁️ Production Deployment
 
-```bash
-# FastAPI server
-CRUCIBLE_MODEL_DIR=/tmp/models
-CRUCIBLE_ENGINE_PATH=/usr/local/lib/libcrucible.so
-CRUCIBLE_API_KEY=change-me-in-production
-CRUCIBLE_MAX_MODEL_SIZE_MB=100
+### Vercel (Web Frontend)
+The frontend builds using Nitro with Vercel Output API v3 preset (`web/scripts/postbuild.js`), making SSR functions and static assets natively hostable on Vercel.
 
-# Next.js frontend
-NEXT_PUBLIC_API_URL=http://localhost:8000
-
-# Python bindings
-PYTHONPATH=./engine/build/release/bindings/python
-```
+### Render & Supabase PostgreSQL (Full Stack)
+The project includes a production-ready `render.yaml` Blueprint for Render deployment:
+- **`crucible-api`**: Multi-stage Docker deployment (`Dockerfile`) running C++ engine & FastAPI on Render Web Service.
+- **`crucible-web`**: Static Publish deployment serving Vite/TanStack build outputs.
+- **`DATABASE_URL`**: Pointing to Supabase PostgreSQL for permanent zero-cost persistence.
 
 ---
 
-## Known Limitations
+## 📜 License
 
-- The C++ engine is in active development. Operator coverage is expanding incrementally. MobileNetV2 end-to-end inference requires all operators (Conv2D, BatchNorm, GlobalAvgPool, Gemm, etc.) to be implemented.
-- The WASM module reimplements a subset of operators in pure Rust. It does not have feature parity with the C++ engine.
-- The `/convert` endpoint accepts pre-exported `.onnx` files only. PyTorch-to-ONNX conversion exists in-process but is not exposed over HTTP for security reasons (pickle deserialization = RCE).
-- Benchmark numbers reflect the current state of implementation and will improve as the engine matures.
-
----
-
-## Roadmap
-
-| Milestone | Status | Description |
-|-----------|--------|-------------|
-| Tensor class + indexing | Done | Shape, data, `at()`, `reshape()`, `flatten()` |
-| ONNX protobuf parser | Done | Load + validate `.onnx` files |
-| Core operators | In progress | MatMul, Gemm, activations, Conv2D, pooling, normalization |
-| Graph executor | Scaffolded | Topological sort + node dispatch (needs operators to be functional) |
-| Python bindings | Scaffolded | pybind11 bridge — needs C++ engine to compile |
-| FastAPI server | Done | `/convert`, `/infer`, `/validate`, `/operators`, `/health` |
-| Rust CLI | Done | FFI bridge, `run`/`bench`/`info` commands |
-| WASM module | Done | Pure-Rust inference in browser |
-| Web frontend | Done | Playground, fraud detection, benchmarks, docs |
-| CI/CD | Done | 4 GitHub Actions pipelines |
-| Demo | Done | Fraud detection + benchmark dashboard |
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE) for details.
-
----
-
-## Credits
-
-Built by [Tanmay](https://github.com/tanmay-alpha) (VIT Bhopal, CS batch 2028).  
-Eigen (MPL2), ONNX (MIT), pybind11 (BSD), Google Test/ Benchmark (BSD), shadcn/ui (MIT), Recharts (MIT), Lucide (ISC).
+Crucible is open-source software licensed under the [MIT License](LICENSE).
