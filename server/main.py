@@ -287,19 +287,14 @@ app.add_middleware(
 )
 
 @app.middleware("http")
-async def _middleware(request: Request, call_next):
-    """Body-size guard + request timeout + auth header logging.
-
-    Merged into one middleware so the connection is closed as early
-    as possible and we only pay the function-call overhead once.
-    """
+async def _combined_middleware(request: Request, call_next):
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
-            if int(content_length) > _MAX_BODY_BYTES:
+            if int(content_length) > 10 * 1024 * 1024:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"Request body exceeds {_MAX_BODY_BYTES} bytes",
+                    detail="Request body exceeds 10 MB",
                 )
         except ValueError:
             pass
@@ -308,16 +303,9 @@ async def _middleware(request: Request, call_next):
             call_next(request), timeout=INFERENCE_TIMEOUT_SEC
         )
     except asyncio.TimeoutError:
-        _log.error(
-            "Request to %s timed out after %ds",
-            request.url.path, INFERENCE_TIMEOUT_SEC,
-        )
         raise HTTPException(
             status_code=504,
-            detail=(
-                "Inference timed out — model or input may be too large. "
-                f"Server limit is {INFERENCE_TIMEOUT_SEC}s."
-            ),
+            detail="Inference timed out — model or input may be too large. Server limit is 60s.",
         )
     return response
 
