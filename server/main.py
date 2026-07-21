@@ -52,12 +52,22 @@ import onnx
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from server import converter, validator
+from server import converter, database, validator
 from server.schemas import (
+    BenchmarkItem,
+    BenchmarkListResponse,
+    BenchmarkRequest,
     ConvertResponse,
+    FraudHistoryResponse,
+    FraudTxItem,
+    FraudTxRequest,
     HealthResponse,
     InferRequest,
     InferResponse,
+    InferenceLogItem,
+    InferenceLogListResponse,
+    ModelItem,
+    ModelListResponse,
     OperatorsResponse,
     ValidateResponse,
 )
@@ -92,7 +102,15 @@ MAX_INPUT_ELEMENTS = 50_000_000
 # container's health check fails. /operators is a capability
 # catalogue; leaking it tells an attacker nothing they couldn't
 # guess from the docs.
-PUBLIC_PATHS = frozenset({"/health", "/operators", "/docs", "/openapi.json"})
+PUBLIC_PATHS = frozenset({
+    "/health",
+    "/operators",
+    "/models",
+    "/fraud/history",
+    "/benchmarks",
+    "/docs",
+    "/openapi.json",
+})
 
 
 def _model_dir() -> Path:
@@ -186,23 +204,44 @@ except ImportError:
 _MODEL_REGISTRY: dict[str, Path] = {}
 
 
-def _register_model(onnx_path: Path) -> str:
-    """Store a model under the resolved model dir and return its uuid."""
+def _register_model(
+    onnx_path: Path,
+    input_shape: Optional[List[int]] = None,
+    operators: Optional[List[str]] = None,
+    all_supported: bool = True,
+) -> str:
+    """Store a model under the resolved model dir and persist to SQLite."""
     model_id = uuid.uuid4().hex
     target = _model_dir() / f"{model_id}.onnx"
     import shutil
+
     shutil.move(str(onnx_path), str(target))
     _MODEL_REGISTRY[model_id] = target
+    file_size = target.stat().st_size if target.is_file() else 0
+    database.save_model(
+        model_id=model_id,
+        name=target.name,
+        file_path=target,
+        file_size_bytes=file_size,
+        input_shape=input_shape or [1],
+        operators=operators or [],
+        all_supported=all_supported,
+    )
     return model_id
 
 
 def _lookup_model(model_id: str) -> Path:
-    if model_id not in _MODEL_REGISTRY:
-        raise HTTPException(
-            status_code=404,
-            detail=f"model_id {model_id!r} not found. Did you POST /convert first?",
-        )
-    return _MODEL_REGISTRY[model_id]
+    if model_id in _MODEL_REGISTRY:
+        return _MODEL_REGISTRY[model_id]
+    rec = database.get_model(model_id)
+    if rec:
+        p = Path(rec["file_path"])
+        _MODEL_REGISTRY[model_id] = p
+        return p
+    raise HTTPException(
+        status_code=404,
+        detail=f"model_id {model_id!r} not found. Did you POST /convert first?",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +444,12 @@ async def convert(
     ops = validator.extract_op_types(model_proto)
     supported, unsupported = validator.partition_ops(ops)
 
-    model_id = _register_model(tmp_path)
+    model_id = _register_model(
+        tmp_path,
+        input_shape=shape_list,
+        operators=ops,
+        all_supported=not unsupported,
+    )
 
     return ConvertResponse(
         onnx_model_id=model_id,
@@ -475,12 +519,108 @@ def infer(req: InferRequest) -> InferResponse:
     except Exception as exc:  # noqa: BLE001 — translator
         raise _internal_error(exc, trace_id) from exc
 
+    database.log_inference(
+        model_id=req.model_id,
+        input_shape=req.input_shape,
+        output_shape=list(out_arr.shape),
+        inference_time_ms=elapsed_ms,
+        engine=_engine_name(),
+    )
+
     return InferResponse(
         output=out_arr.reshape(-1).tolist(),
         output_shape=list(out_arr.shape),
         inference_time_ms=elapsed_ms,
         engine=_engine_name(),
     )
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    """Initialize database on startup."""
+    database.init_db()
+
+
+@app.get("/models", response_model=ModelListResponse)
+def list_models() -> ModelListResponse:
+    """Get all registered models from database."""
+    models = database.list_models()
+    return ModelListResponse(models=models, count=len(models))
+
+
+@app.get("/models/{model_id}", response_model=ModelItem)
+def get_model(model_id: str) -> ModelItem:
+    """Get metadata for a single model."""
+    item = database.get_model(model_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    return ModelItem(**item)
+
+
+@app.delete("/models/{model_id}")
+def delete_model(model_id: str) -> dict[str, str]:
+    """Delete a registered model from database and disk."""
+    rec = database.get_model(model_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    file_p = Path(rec["file_path"])
+    if file_p.is_file():
+        file_p.unlink(missing_ok=True)
+    _MODEL_REGISTRY.pop(model_id, None)
+    database.delete_model(model_id)
+    return {"status": "deleted", "model_id": model_id}
+
+
+@app.get("/inference/logs", response_model=InferenceLogListResponse)
+def get_inference_logs(limit: int = 50) -> InferenceLogListResponse:
+    """Get recent inference execution logs."""
+    logs = database.get_inference_logs(limit=limit)
+    return InferenceLogListResponse(logs=logs, count=len(logs))
+
+
+@app.post("/fraud/log", response_model=FraudTxItem)
+def log_fraud_transaction(req: FraudTxRequest) -> FraudTxItem:
+    """Record a fraud transaction evaluation into the database."""
+    item = database.log_fraud_tx(
+        tx_type=req.tx_type,
+        amount=req.amount,
+        orig_before=req.orig_before,
+        orig_after=req.orig_after,
+        dest_before=req.dest_before,
+        dest_after=req.dest_after,
+        probability=req.probability,
+        verdict=req.verdict,
+        execution_mode=req.execution_mode,
+        latency_ms=req.latency_ms,
+    )
+    return FraudTxItem(**item)
+
+
+@app.get("/fraud/history", response_model=FraudHistoryResponse)
+def get_fraud_history(limit: int = 50) -> FraudHistoryResponse:
+    """Retrieve fraud transaction check history."""
+    history = database.get_fraud_history(limit=limit)
+    return FraudHistoryResponse(history=history, count=len(history))
+
+
+@app.post("/benchmarks", response_model=BenchmarkItem)
+def log_benchmark(req: BenchmarkRequest) -> BenchmarkItem:
+    """Log a benchmark evaluation record."""
+    item = database.log_benchmark(
+        model_name=req.model_name,
+        engine=req.engine,
+        latency_ms=req.latency_ms,
+        memory_mb=req.memory_mb,
+    )
+    return BenchmarkItem(**item)
+
+
+@app.get("/benchmarks", response_model=BenchmarkListResponse)
+def get_benchmarks(limit: int = 50) -> BenchmarkListResponse:
+    """Retrieve recorded benchmarks."""
+    benches = database.get_benchmarks(limit=limit)
+    return BenchmarkListResponse(benchmarks=benches, count=len(benches))
+
 
 
 @app.post("/validate", response_model=ValidateResponse,

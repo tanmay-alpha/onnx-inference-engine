@@ -287,3 +287,137 @@ export function getSupportedOps(): SupportedOp[] {
     },
   ];
 }
+
+// ---------------------------------------------------------------------------
+// Server & Database Persistence API Helpers
+// ---------------------------------------------------------------------------
+const API_BASE =
+  typeof window !== "undefined"
+    ? import.meta.env.VITE_API_URL || "http://localhost:8000"
+    : "http://localhost:8000";
+
+export interface RegisteredModel {
+  id: string;
+  name: string;
+  file_size_bytes: number;
+  input_shape: number[];
+  operators: string[];
+  all_supported: boolean;
+  created_at: string;
+}
+
+export interface FraudHistoryRecord {
+  id: string;
+  tx_type: string;
+  amount: number;
+  orig_before: number;
+  orig_after: number;
+  dest_before: number;
+  dest_after: number;
+  probability: number;
+  verdict: string;
+  execution_mode: string;
+  latency_ms: number;
+  created_at: string;
+}
+
+export interface BenchmarkRecord {
+  id: string;
+  model_name: string;
+  engine: string;
+  latency_ms: number;
+  memory_mb: number;
+  created_at: string;
+}
+
+export async function fetchModelsFromDB(): Promise<RegisteredModel[]> {
+  try {
+    const res = await fetch(`${API_BASE}/models`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.models || [];
+  } catch (err) {
+    console.warn("Could not fetch models from server database:", err);
+    return [];
+  }
+}
+
+export async function deleteModelFromDB(modelId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/models/${modelId}`, { method: "DELETE" });
+    return res.ok;
+  } catch (err) {
+    console.warn(`Could not delete model ${modelId}:`, err);
+    return false;
+  }
+}
+
+export async function logFraudTxToDB(payload: {
+  tx_type: string;
+  amount: number;
+  orig_before: number;
+  orig_after: number;
+  dest_before: number;
+  dest_after: number;
+  probability: number;
+  verdict: string;
+  execution_mode?: string;
+  latency_ms?: number;
+}): Promise<FraudHistoryRecord | null> {
+  try {
+    const res = await fetch(`${API_BASE}/fraud/log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn("Could not log fraud check to server database:", err);
+    return null;
+  }
+}
+
+export async function fetchFraudHistoryFromDB(): Promise<FraudHistoryRecord[]> {
+  try {
+    const res = await fetch(`${API_BASE}/fraud/history`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.history || [];
+  } catch (err) {
+    console.warn("Could not fetch fraud history from server database:", err);
+    return [];
+  }
+}
+
+export async function fetchBenchmarksFromDB(): Promise<BenchmarkRecord[]> {
+  try {
+    const res = await fetch(`${API_BASE}/benchmarks`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.benchmarks || [];
+  } catch (err) {
+    console.warn("Could not fetch benchmarks from server database:", err);
+    return [];
+  }
+}
+
+export async function logBenchmarkToDB(payload: {
+  model_name: string;
+  engine: string;
+  latency_ms: number;
+  memory_mb?: number;
+}): Promise<BenchmarkRecord | null> {
+  try {
+    const res = await fetch(`${API_BASE}/benchmarks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn("Could not log benchmark to server database:", err);
+    return null;
+  }
+}
