@@ -111,12 +111,18 @@ function FraudPage() {
 
   const run = async () => {
     const vals = [tx.amount, tx.origBefore, tx.origAfter, tx.destBefore, tx.destAfter];
-    const labels = ['Amount', 'Origin balance before', 'Origin balance after', 'Dest balance before', 'Dest balance after'];
+    const labels = [
+      "Amount",
+      "Origin balance before",
+      "Origin balance after",
+      "Dest balance before",
+      "Dest balance after",
+    ];
     for (let i = 0; i < vals.length; i++) {
-        if (!Number.isFinite(vals[i]) || vals[i] < 0) {
-            alert(labels[i] + ' must be a non-negative number.');
-            return;
-        }
+      if (!Number.isFinite(vals[i]) || vals[i] < 0) {
+        alert(labels[i] + " must be a non-negative number.");
+        return;
+      }
     }
     setStatus("running");
     setResult(null);
