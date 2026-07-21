@@ -203,3 +203,76 @@ class ErrorResponse(_Base):
 ConvertRequest = ConvertResponse
 PredictRequest = InferRequest
 PredictResponse = InferResponse
+
+
+# ---------------------------------------------------------------------------
+# Database Resource Models
+# ---------------------------------------------------------------------------
+class ModelItem(_Base):
+    id: str = Field(..., description="UUID identifying the saved ONNX model")
+    name: str = Field(..., description="Original or display name of the model")
+    file_size_bytes: int = Field(..., description="Model file size in bytes")
+    input_shape: List[int] = Field(..., description="Declared input tensor shape")
+    operators: List[str] = Field(..., description="Operators used in model")
+    all_supported: bool = Field(..., description="Whether all ops are supported")
+    created_at: str = Field(..., description="ISO timestamp when registered")
+
+
+class ModelListResponse(_Base):
+    models: List[ModelItem] = Field(..., description="List of registered models")
+    count: int = Field(..., description="Number of registered models")
+
+
+class InferenceLogItem(_Base):
+    id: str = Field(..., description="Log UUID")
+    model_id: str = Field(..., description="Associated model UUID")
+    input_shape: List[int] = Field(..., description="Input shape used")
+    output_shape: List[int] = Field(..., description="Output shape produced")
+    inference_time_ms: float = Field(..., description="Execution time in ms")
+    engine: str = Field(..., description="Engine used")
+    created_at: str = Field(..., description="ISO timestamp")
+
+
+class InferenceLogListResponse(_Base):
+    logs: List[InferenceLogItem] = Field(..., description="Recent inference logs")
+    count: int = Field(..., description="Log count")
+
+
+class FraudTxRequest(_Base):
+    tx_type: str = Field(..., description="Transaction type, e.g. TRANSFER, CASH_OUT")
+    amount: float = Field(..., description="Transaction amount")
+    orig_before: float = Field(..., description="Origin balance before transaction")
+    orig_after: float = Field(..., description="Origin balance after transaction")
+    dest_before: float = Field(..., description="Destination balance before transaction")
+    dest_after: float = Field(..., description="Destination balance after transaction")
+    probability: float = Field(..., description="Predicted fraud probability (0 to 1)")
+    verdict: str = Field(..., description="Risk verdict, e.g. Low risk, Elevated risk, High risk")
+    execution_mode: str = Field(default="wasm", description="Execution mode, e.g. wasm, server")
+    latency_ms: float = Field(default=0.0, description="Inference latency in ms")
+
+
+class FraudTxItem(FraudTxRequest):
+    id: str = Field(..., description="Transaction log UUID")
+    created_at: str = Field(..., description="ISO timestamp")
+
+
+class FraudHistoryResponse(_Base):
+    history: List[FraudTxItem] = Field(..., description="Fraud transaction history")
+    count: int = Field(..., description="Count of transaction records")
+
+
+class BenchmarkRequest(_Base):
+    model_name: str = Field(..., description="Model name evaluated")
+    engine: str = Field(..., description="Engine evaluated (e.g. crucible-wasm, onnxruntime)")
+    latency_ms: float = Field(..., description="Mean latency in ms")
+    memory_mb: float = Field(default=0.0, description="Peak memory in MB")
+
+
+class BenchmarkItem(BenchmarkRequest):
+    id: str = Field(..., description="Benchmark record UUID")
+    created_at: str = Field(..., description="ISO timestamp")
+
+
+class BenchmarkListResponse(_Base):
+    benchmarks: List[BenchmarkItem] = Field(..., description="List of benchmark records")
+    count: int = Field(..., description="Benchmark count")

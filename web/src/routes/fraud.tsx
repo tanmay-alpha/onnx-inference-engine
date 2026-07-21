@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Shield, Lock, AlertTriangle, Inbox } from "lucide-react";
 import { CrucibleLayout } from "../components/crucible/Layout";
 import { runFraudDetection } from "../lib/crucible-wasm";
+import { logFraudTxToDB } from "../lib/api";
 
 export const Route = createFileRoute("/fraud")({
   head: () => ({
@@ -138,18 +139,45 @@ function FraudPage() {
         newBalanceDest: tx.destAfter,
       });
       const latency = Number((performance.now() - start).toFixed(2));
+      const prob = wasmResult.probability;
+      const verd = verdict(prob).label;
       setResult({
-        fraud: wasmResult.probability >= 0.5,
-        probability: wasmResult.probability,
+        fraud: prob >= 0.5,
+        probability: prob,
         latencyMs: latency,
         modelBytes: 220,
+      });
+      logFraudTxToDB({
+        tx_type: tx.type,
+        amount: tx.amount,
+        orig_before: tx.origBefore,
+        orig_after: tx.origAfter,
+        dest_before: tx.destBefore,
+        dest_after: tx.destAfter,
+        probability: prob,
+        verdict: verd,
+        execution_mode: "wasm",
+        latency_ms: latency,
       });
     } catch (err) {
       // WASM unavailable — use heuristic fallback
       console.warn("WASM inference failed, using heuristic fallback:", err);
       const p = heuristicScore(tx);
       const latency = Number((performance.now() - start).toFixed(2));
+      const verd = verdict(p).label;
       setResult({ fraud: p >= 0.5, probability: p, latencyMs: latency, modelBytes: 0 });
+      logFraudTxToDB({
+        tx_type: tx.type,
+        amount: tx.amount,
+        orig_before: tx.origBefore,
+        orig_after: tx.origAfter,
+        dest_before: tx.destBefore,
+        dest_after: tx.destAfter,
+        probability: p,
+        verdict: verd,
+        execution_mode: "heuristic-fallback",
+        latency_ms: latency,
+      });
     }
     setStatus("done");
   };

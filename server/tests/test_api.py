@@ -497,4 +497,88 @@ def test_extreme_api_load(
             headers=auth_headers,
         )
         assert vr.status_code == 200
-        assert vr.json()["valid"] is True
+        assert vr.json()["valid"] is True
+
+
+# ---------------------------------------------------------------------------
+# Database & CRUD Endpoints
+# ---------------------------------------------------------------------------
+def test_database_models_and_logs(client: TestClient, auth_headers: dict, tmp_model_dir: Path, onnx_bytes: bytes) -> None:
+    cr = client.post(
+        "/convert",
+        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
+        data={"input_shape": "[1, 3, 32, 32]"},
+        headers=auth_headers,
+    )
+    model_id = cr.json()["onnx_model_id"]
+
+    mr = client.get("/models")
+    assert mr.status_code == 200
+    m_body = mr.json()
+    assert m_body["count"] >= 1
+    assert any(m["id"] == model_id for m in m_body["models"])
+
+    gr = client.get(f"/models/{model_id}")
+    assert gr.status_code == 200
+    assert gr.json()["id"] == model_id
+
+    # Infer to generate a log
+    ir = client.post(
+        "/infer",
+        json={
+            "model_id": model_id,
+            "input": [1.0] * 3072,
+            "input_shape": [1, 3, 32, 32],
+        },
+        headers=auth_headers,
+    )
+    assert ir.status_code == 200
+
+    lr = client.get("/inference/logs")
+    assert lr.status_code == 200
+    assert lr.json()["count"] >= 1
+
+    dr = client.delete(f"/models/{model_id}")
+    assert dr.status_code == 200
+    assert dr.json()["status"] == "deleted"
+
+
+def test_fraud_and_benchmark_logging(client: TestClient) -> None:
+    fr = client.post(
+        "/fraud/log",
+        json={
+            "tx_type": "TRANSFER",
+            "amount": 50000.0,
+            "orig_before": 100000.0,
+            "orig_after": 50000.0,
+            "dest_before": 0.0,
+            "dest_after": 50000.0,
+            "probability": 0.12,
+            "verdict": "Low risk",
+            "execution_mode": "wasm",
+            "latency_ms": 1.25,
+        },
+    )
+    assert fr.status_code == 200
+    assert fr.json()["verdict"] == "Low risk"
+
+    fh = client.get("/fraud/history")
+    assert fh.status_code == 200
+    assert fh.json()["count"] >= 1
+
+    br = client.post(
+        "/benchmarks",
+        json={
+            "model_name": "fraud_detector.onnx",
+            "engine": "crucible-wasm",
+            "latency_ms": 1.15,
+            "memory_mb": 3.2,
+        },
+    )
+    assert br.status_code == 200
+    assert br.json()["engine"] == "crucible-wasm"
+
+    bl = client.get("/benchmarks")
+    assert bl.status_code == 200
+    assert bl.json()["count"] >= 1
+
