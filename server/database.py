@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator, List, Optional
@@ -29,6 +33,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -69,7 +74,7 @@ class ApiKey(Base):
     __tablename__ = "api_keys"
 
     id = Column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
-    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     key_hash = Column(String(64), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
@@ -96,7 +101,7 @@ class ModelRecord(Base):
     output_schema = Column(Text, nullable=True)
     metadata_json = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     last_used = Column(DateTime, nullable=True)
@@ -108,11 +113,14 @@ class ModelRecord(Base):
 
 class InferenceLog(Base):
     __tablename__ = "inference_logs"
+    __table_args__ = (
+        Index("idx_inference_logs_model_id_created_at", "model_id", "created_at"),
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
     model_id = Column(String(36), ForeignKey("models.id", ondelete="CASCADE"), nullable=False, index=True)
-    api_key_id = Column(String(36), ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True)
-    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    api_key_id = Column(String(36), ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     input_shape = Column(Text, nullable=True)
     output_shape = Column(Text, nullable=True)
     latency_ms = Column(Float, nullable=False)
@@ -137,7 +145,7 @@ class FraudCase(Base):
     risk_level = Column(String(20), nullable=False, default="low", index=True)
     features = Column(Text, nullable=True)
     reviewed = Column(Boolean, default=False, nullable=False)
-    reviewed_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     review_notes = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
     reviewed_at = Column(DateTime, nullable=True)
@@ -161,17 +169,19 @@ class Benchmark(Base):
 # Database URL
 # ---------------------------------------------------------------------------
 def _get_database_url() -> str:
-    """Resolve the database URL from environment.
+    """Resolve the database URL from environment settings.
 
     Priority: CRUCIBLE_DB_PATH (test fixture) > DATABASE_URL > default.
     """
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        db_path = os.environ.get("CRUCIBLE_DB_PATH")
-        if db_path:
-            url = f"sqlite+aiosqlite:///{db_path}"
-    if not url:
-        url = "sqlite+aiosqlite:///./crucible.db"
+    from server.config import get_settings
+    settings = get_settings()
+
+    db_path = os.environ.get("CRUCIBLE_DB_PATH")
+    if db_path:
+        url = f"sqlite+aiosqlite:///{db_path}"
+    else:
+        url = settings.DATABASE_URL
+
     # Allow plain "postgresql://" from tools that don't add the async driver
     if url.startswith("postgresql://") and "+asyncpg" not in url:
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -185,11 +195,30 @@ _engine = None
 _async_session_factory = None
 
 
+def _prep_name_func():
+    return f"__asyncpg_stmt_{uuid.uuid4().hex}__"
+
+
 def get_engine():
     """Lazy-create the async engine."""
     global _engine
     if _engine is None:
-        _engine = create_async_engine(_get_database_url(), echo=False, future=True)
+        from server.config import get_settings
+        settings = get_settings()
+        url = _get_database_url()
+        connect_args = {}
+        pool_kwargs = {}
+        if "postgresql" in url:
+            from sqlalchemy.pool import NullPool
+            pool_kwargs["poolclass"] = NullPool
+            connect_args = {
+                "statement_cache_size": settings.DB_STATEMENT_CACHE_SIZE,
+                "prepared_statement_cache_size": settings.DB_STATEMENT_CACHE_SIZE,
+                "prepared_statement_name_func": _prep_name_func,
+            }
+        _engine = create_async_engine(
+            url, echo=False, future=True, connect_args=connect_args, **pool_kwargs
+        )
     return _engine
 
 
@@ -279,6 +308,20 @@ def save_model(
     return model_id
 
 
+def _parse_shape(val: Optional[str]) -> List[int]:
+    if not val:
+        return []
+    try:
+        parsed = json.loads(val)
+        if isinstance(parsed, dict):
+            return parsed.get("shape", [])
+        if isinstance(parsed, list):
+            return [int(x) for x in parsed]
+    except Exception:
+        pass
+    return []
+
+
 def get_model(model_id: str) -> Optional[dict]:
     """Return a model record as a dict, or None."""
     from sqlalchemy import select
@@ -299,8 +342,8 @@ def get_model(model_id: str) -> Optional[dict]:
             "file_path": rec.file_path,
             "file_size_bytes": rec.file_size,
             "version": rec.version,
-            "input_shape": json.loads(rec.input_schema) if rec.input_schema else [],
-            "output_shape": json.loads(rec.output_schema) if rec.output_schema else None,
+            "input_shape": _parse_shape(rec.input_schema),
+            "output_shape": _parse_shape(rec.output_schema),
             "is_active": rec.is_active,
             "created_by": rec.created_by,
             "created_at": rec.created_at.isoformat() if rec.created_at else "",
@@ -328,8 +371,8 @@ def list_models() -> List[dict]:
                 "name": r.name,
                 "file_path": r.file_path,
                 "file_size_bytes": r.file_size,
-                "input_shape": json.loads(r.input_schema) if r.input_schema else [],
-                "output_shape": json.loads(r.output_schema) if r.output_schema else None,
+                "input_shape": _parse_shape(r.input_schema),
+                "output_shape": _parse_shape(r.output_schema),
                 "is_active": r.is_active,
                 "created_at": r.created_at.isoformat() if r.created_at else "",
                 "last_used": r.last_used.isoformat() if r.last_used else None,
