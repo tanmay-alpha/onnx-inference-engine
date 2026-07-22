@@ -18,6 +18,7 @@ python-multipart==0.0.32  # for multipart/form-data parsing
 
 # Validation
 pydantic==2.8.2
+pydantic-settings==2.3.4
 
 # Database — async ORM + migrations
 sqlalchemy[asyncio]==2.0.36
