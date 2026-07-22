@@ -115,7 +115,10 @@ def send_webhook(webhook: dict, event_type: str, payload: dict) -> bool:
         "X-Crucible-Delivery": envelope["id"],
     }
 
-    max_retries = 3
+    from server.config import get_settings
+    settings = get_settings()
+
+    max_retries = settings.WEBHOOK_MAX_RETRIES
     delays = [1, 2, 4]  # exponential backoff
 
     for attempt in range(max_retries):
@@ -124,7 +127,7 @@ def send_webhook(webhook: dict, event_type: str, payload: dict) -> bool:
                 webhook["url"],
                 json=json.loads(payload_json),
                 headers=headers,
-                timeout=10,
+                timeout=settings.WEBHOOK_TIMEOUT_SEC,
             )
 
             if resp.status_code < 400:
@@ -150,7 +153,7 @@ def send_webhook(webhook: dict, event_type: str, payload: dict) -> bool:
 
     # All retries failed
     webhook["failure_count"] = webhook.get("failure_count", 0) + 1
-    if webhook["failure_count"] >= webhook.get("max_failures", 5):
+    if webhook["failure_count"] >= webhook.get("max_failures", settings.WEBHOOK_MAX_FAILURES):
         webhook["is_active"] = False
 
     record_error("webhook_delivery")
