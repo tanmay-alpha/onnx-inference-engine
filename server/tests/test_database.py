@@ -56,6 +56,7 @@ class TestModelCRUD:
         assert rec["all_supported"] is True
 
     def test_list_models(self):
+        initial_count = len(list_models())
         for i in range(3):
             save_model(
                 model_id=uuid.uuid4().hex,
@@ -67,7 +68,7 @@ class TestModelCRUD:
                 all_supported=True,
             )
         models = list_models()
-        assert len(models) == 3
+        assert len(models) == initial_count + 3
 
     def test_delete_model(self):
         model_id = uuid.uuid4().hex
