@@ -78,14 +78,24 @@ function StatCard({
         }}
       >
         <span style={{ color: "var(--forge)" }}>{icon}</span>
-        <span className="c-muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".12em" }}>
+        <span
+          className="c-muted"
+          style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".12em" }}
+        >
           {label}
         </span>
       </div>
-      <div className="mono" style={{ fontSize: 28, fontWeight: 600, color: "var(--ink)", letterSpacing: "-.02em" }}>
+      <div
+        className="mono"
+        style={{ fontSize: 28, fontWeight: 600, color: "var(--ink)", letterSpacing: "-.02em" }}
+      >
         {value}
       </div>
-      {sub && <div className="c-muted" style={{ fontSize: 12, marginTop: 4 }}>{sub}</div>}
+      {sub && (
+        <div className="c-muted" style={{ fontSize: 12, marginTop: 4 }}>
+          {sub}
+        </div>
+      )}
     </div>
   );
 }
@@ -128,16 +138,25 @@ function DashboardPage() {
   const totalInferences = analytics?.inference.data.reduce((s, d) => s + d.count, 0) || 0;
   const totalFraud = fraudHistory.length;
   const fraudCount = fraudHistory.filter((f) => f.probability >= 0.5).length;
-  const avgLatency =
-    analytics?.inference.data.length
-      ? analytics.inference.data.reduce((s, d) => s + d.avg_latency_ms, 0) / analytics.inference.data.length
-      : 0;
+  const avgLatency = analytics?.inference.data.length
+    ? analytics.inference.data.reduce((s, d) => s + d.avg_latency_ms, 0) /
+      analytics.inference.data.length
+    : 0;
 
   return (
     <CrucibleLayout>
       <section className="c-container" style={{ paddingTop: 48, paddingBottom: 56 }}>
         {/* Header */}
-        <div style={{ marginBottom: 32, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16 }}>
+        <div
+          style={{
+            marginBottom: 32,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 16,
+          }}
+        >
           <div>
             <div className="c-eyebrow">PLATFORM OVERVIEW</div>
             <h1 className="c-h2" style={{ fontSize: 36 }}>
@@ -148,7 +167,9 @@ function DashboardPage() {
             </p>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <label className="c-muted" style={{ fontSize: 12 }}>Period:</label>
+            <label className="c-muted" style={{ fontSize: 12 }}>
+              Period:
+            </label>
             {[7, 14, 30].map((d) => (
               <button
                 key={d}
@@ -159,7 +180,11 @@ function DashboardPage() {
                 {d}d
               </button>
             ))}
-            <Link to="/" className="c-btn c-btn-secondary" style={{ padding: "6px 14px", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Link
+              to="/"
+              className="c-btn c-btn-secondary"
+              style={{ padding: "6px 14px", display: "inline-flex", alignItems: "center", gap: 6 }}
+            >
               <ArrowLeft size={14} /> Home
             </Link>
           </div>
@@ -168,7 +193,9 @@ function DashboardPage() {
         {loading && (
           <div style={{ textAlign: "center", padding: 40 }}>
             <div className="c-loading-bar" />
-            <p className="c-muted" style={{ marginTop: 12 }}>Loading analytics...</p>
+            <p className="c-muted" style={{ marginTop: 12 }}>
+              Loading analytics...
+            </p>
           </div>
         )}
 
@@ -211,9 +238,19 @@ function DashboardPage() {
 
             {/* Inference timeline */}
             <div className="c-card" style={{ marginBottom: 24 }}>
-              <h3 className="c-h3" style={{ marginBottom: 16 }}>Inference Volume</h3>
+              <h3 className="c-h3" style={{ marginBottom: 16 }}>
+                Inference Volume
+              </h3>
               {analytics?.inference.data.length ? (
-                <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 160, overflowX: "auto" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-end",
+                    gap: 4,
+                    height: 160,
+                    overflowX: "auto",
+                  }}
+                >
                   {analytics.inference.data.map((d) => (
                     <div
                       key={d.date}
@@ -236,21 +273,36 @@ function DashboardPage() {
                         }}
                       />
                       <span className="mono" style={{ fontSize: 9, color: "var(--ink-muted)" }}>
-                        {new Date(d.date).toLocaleDateString("en", { day: "numeric", month: "short" })}
+                        {new Date(d.date).toLocaleDateString("en", {
+                          day: "numeric",
+                          month: "short",
+                        })}
                       </span>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="c-muted">No inference data available for this period. Run some inferences to see stats.</p>
+                <p className="c-muted">
+                  No inference data available for this period. Run some inferences to see stats.
+                </p>
               )}
             </div>
 
             {/* Fraud stats */}
             <div className="c-card" style={{ marginBottom: 24 }}>
-              <h3 className="c-h3" style={{ marginBottom: 16 }}>Fraud Detection Trends</h3>
+              <h3 className="c-h3" style={{ marginBottom: 16 }}>
+                Fraud Detection Trends
+              </h3>
               {fraudHistory.length ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 300, overflowY: "auto" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                    maxHeight: 300,
+                    overflowY: "auto",
+                  }}
+                >
                   {fraudHistory.slice(0, 20).map((f) => (
                     <div
                       key={f.id}
@@ -266,15 +318,24 @@ function DashboardPage() {
                         <span className="mono" style={{ fontSize: 12, color: "var(--ink-muted)" }}>
                           {new Date(f.created_at).toLocaleString()}
                         </span>
-                        <span className="c-muted" style={{ fontSize: 12, marginLeft: 8 }}>{f.tx_type}</span>
+                        <span className="c-muted" style={{ fontSize: 12, marginLeft: 8 }}>
+                          {f.tx_type}
+                        </span>
                       </div>
                       <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-                        <span className="mono" style={{ fontSize: 13 }}>₹{fmtNum(f.amount)}</span>
+                        <span className="mono" style={{ fontSize: 13 }}>
+                          ₹{fmtNum(f.amount)}
+                        </span>
                         <span
                           className="mono"
                           style={{
                             fontSize: 13,
-                            color: f.probability >= 0.5 ? "var(--risk)" : f.probability >= 0.35 ? "var(--warn)" : "var(--ok)",
+                            color:
+                              f.probability >= 0.5
+                                ? "var(--risk)"
+                                : f.probability >= 0.35
+                                  ? "var(--warn)"
+                                  : "var(--ok)",
                           }}
                         >
                           {(f.probability * 100).toFixed(1)}%
@@ -284,31 +345,103 @@ function DashboardPage() {
                   ))}
                 </div>
               ) : (
-                <p className="c-muted">No fraud detection history available. Run fraud checks to see trends.</p>
+                <p className="c-muted">
+                  No fraud detection history available. Run fraud checks to see trends.
+                </p>
               )}
             </div>
 
             {/* Model usage */}
             {analytics?.models?.length ? (
               <div className="c-card">
-                <h3 className="c-h3" style={{ marginBottom: 16 }}>Model Usage</h3>
+                <h3 className="c-h3" style={{ marginBottom: 16 }}>
+                  Model Usage
+                </h3>
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
                     <thead>
                       <tr style={{ borderBottom: "2px solid var(--rule)" }}>
-                        <th style={{ textAlign: "left", padding: "8px 12px", fontSize: 11, textTransform: "uppercase", letterSpacing: ".1em", color: "var(--ink-muted)" }}>Model</th>
-                        <th style={{ textAlign: "right", padding: "8px 12px", fontSize: 11, textTransform: "uppercase", letterSpacing: ".1em", color: "var(--ink-muted)" }}>Usage</th>
-                        <th style={{ textAlign: "right", padding: "8px 12px", fontSize: 11, textTransform: "uppercase", letterSpacing: ".1em", color: "var(--ink-muted)" }}>Inferences</th>
-                        <th style={{ textAlign: "right", padding: "8px 12px", fontSize: 11, textTransform: "uppercase", letterSpacing: ".1em", color: "var(--ink-muted)" }}>Avg Latency</th>
+                        <th
+                          style={{
+                            textAlign: "left",
+                            padding: "8px 12px",
+                            fontSize: 11,
+                            textTransform: "uppercase",
+                            letterSpacing: ".1em",
+                            color: "var(--ink-muted)",
+                          }}
+                        >
+                          Model
+                        </th>
+                        <th
+                          style={{
+                            textAlign: "right",
+                            padding: "8px 12px",
+                            fontSize: 11,
+                            textTransform: "uppercase",
+                            letterSpacing: ".1em",
+                            color: "var(--ink-muted)",
+                          }}
+                        >
+                          Usage
+                        </th>
+                        <th
+                          style={{
+                            textAlign: "right",
+                            padding: "8px 12px",
+                            fontSize: 11,
+                            textTransform: "uppercase",
+                            letterSpacing: ".1em",
+                            color: "var(--ink-muted)",
+                          }}
+                        >
+                          Inferences
+                        </th>
+                        <th
+                          style={{
+                            textAlign: "right",
+                            padding: "8px 12px",
+                            fontSize: 11,
+                            textTransform: "uppercase",
+                            letterSpacing: ".1em",
+                            color: "var(--ink-muted)",
+                          }}
+                        >
+                          Avg Latency
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
                       {analytics.models.map((m) => (
                         <tr key={m.id} style={{ borderBottom: "1px solid var(--rule)" }}>
                           <td style={{ padding: "10px 12px" }}>{m.name}</td>
-                          <td style={{ textAlign: "right", padding: "10px 12px", fontVariantNumeric: "tabular-nums" }}>{fmtNum(m.usage_count)}</td>
-                          <td style={{ textAlign: "right", padding: "10px 12px", fontVariantNumeric: "tabular-nums" }}>{fmtNum(m.inference_count)}</td>
-                          <td style={{ textAlign: "right", padding: "10px 12px", fontVariantNumeric: "tabular-nums" }}>{m.avg_latency_ms.toFixed(2)}ms</td>
+                          <td
+                            style={{
+                              textAlign: "right",
+                              padding: "10px 12px",
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {fmtNum(m.usage_count)}
+                          </td>
+                          <td
+                            style={{
+                              textAlign: "right",
+                              padding: "10px 12px",
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {fmtNum(m.inference_count)}
+                          </td>
+                          <td
+                            style={{
+                              textAlign: "right",
+                              padding: "10px 12px",
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {m.avg_latency_ms.toFixed(2)}ms
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -317,7 +450,9 @@ function DashboardPage() {
               </div>
             ) : (
               <div className="c-card" style={{ textAlign: "center", padding: 40 }}>
-                <p className="c-muted">No model usage data yet. Upload and run models to see analytics.</p>
+                <p className="c-muted">
+                  No model usage data yet. Upload and run models to see analytics.
+                </p>
                 <Link to="/playground" className="c-btn c-btn-primary" style={{ marginTop: 16 }}>
                   Go to Playground
                 </Link>

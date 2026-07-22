@@ -69,4 +69,7 @@ jobs:
       # The 4 pybind11 binding tests skip automatically when crucible_py is
       # absent — that is the expected behaviour and does NOT fail the job.
       - name: Run pytest
-        run: python -m pytest server -v --tb=short
+        env:
+          CRUCIBLE_API_KEY: crucible-development-api-key
+          DATABASE_URL: sqlite+aiosqlite:///:memory:
+        run: python -m pytest server/tests -v --tb=short
