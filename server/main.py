@@ -101,12 +101,13 @@ from server.schemas import (
     ValidateResponse,
 )
 
+from server.config import get_settings
 
-# ---------------------------------------------------------------------------
-# Module-level configuration
-# ---------------------------------------------------------------------------
-SERVER_VERSION = "1.0.0"
+settings = get_settings()
+
+SERVER_VERSION = settings.APP_VERSION
 ENGINE_NAME = "crucible-cpp"
+
 
 def _engine_name() -> str:
     """Return the active engine identifier based on backend."""
@@ -114,17 +115,13 @@ def _engine_name() -> str:
 
 # Hard timeout on inference requests. A hung C++ process or runaway
 # model would otherwise hold a connection open forever.
-INFERENCE_TIMEOUT_SEC = 60
+INFERENCE_TIMEOUT_SEC = settings.INFERENCE_TIMEOUT_SEC
 
-# Max upload size — 200 MB. MobileNetV2 is ~14 MB; ResNet50 is ~100 MB;
-# anything beyond that is almost certainly an attack or a misuse.
-MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+# Max upload size — configurable via MAX_UPLOAD_BYTES
+MAX_UPLOAD_BYTES = settings.MAX_UPLOAD_BYTES
 
-# Cap on the product of input_shape dims. 50M float32 elements is
-# 200 MB — large enough for an ImageNet input (3*224*224 = 150K)
-# with headroom, small enough that a hostile request cannot OOM
-# the server. Pydantic v2 validators run before we touch numpy.
-MAX_INPUT_ELEMENTS = 50_000_000
+# Cap on the product of input_shape dims. Configurable via MAX_INPUT_ELEMENTS
+MAX_INPUT_ELEMENTS = settings.MAX_INPUT_ELEMENTS
 
 # Endpoints that bypass auth. /health is a liveness probe that
 # orchestrators poll — it must not require credentials or the
@@ -144,7 +141,7 @@ PUBLIC_PATHS = frozenset({
 
 def _model_dir() -> Path:
     """Resolve the model dir on every call."""
-    d = Path(os.environ.get("CRUCIBLE_MODEL_DIR", "/tmp/models"))
+    d = Path(os.environ.get("CRUCIBLE_MODEL_DIR", settings.CRUCIBLE_MODEL_DIR))
     try:
         d.mkdir(parents=True, exist_ok=True)
     except PermissionError:
@@ -334,21 +331,17 @@ def _new_trace_id() -> str:
 # App
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="Crucible Inference Server",
-    description="REST API around the Crucible ONNX engine",
+    title=settings.APP_NAME,
+    description="REST API for the ONNX Inference Engine",
     version=SERVER_VERSION,
 )
 
 # CORS: allow the Crucible frontend (and any authorised consumer)
 # to call the API from a browser. Restrict origins in production
 # via the CRUCIBLE_CORS_ORIGINS env var (comma-separated).
-_cors_origins = os.environ.get(
-    "CRUCIBLE_CORS_ORIGINS",
-    "http://localhost:3000,http://localhost:5173",
-).split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -359,21 +352,22 @@ async def _combined_middleware(request: Request, call_next):
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
-            if int(content_length) > 10 * 1024 * 1024:
+            if int(content_length) > settings.MAX_REQUEST_BODY_BYTES:
+                limit_mb = settings.MAX_REQUEST_BODY_BYTES // (1024 * 1024)
                 raise HTTPException(
                     status_code=413,
-                    detail="Request body exceeds 10 MB",
+                    detail=f"Request body exceeds maximum limit of {limit_mb} MB",
                 )
         except ValueError:
             pass
     try:
         response = await asyncio.wait_for(
-            call_next(request), timeout=INFERENCE_TIMEOUT_SEC
+            call_next(request), timeout=settings.INFERENCE_TIMEOUT_SEC
         )
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=504,
-            detail="Inference timed out — model or input may be too large. Server limit is 60s.",
+            detail=f"Inference timed out — model or input may be too large. Server limit is {settings.INFERENCE_TIMEOUT_SEC}s.",
         )
     return response
 
