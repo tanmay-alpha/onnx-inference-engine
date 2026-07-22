@@ -1,16 +1,16 @@
 <div align="center">
 
-# 🔥 Crucible
+# ⚡ ONNX Inference Engine
 
 ### *Raw models. Forged into production.*
 
 **A from-scratch ONNX inference engine in C++17 & WebAssembly.**  
 Load any `.onnx` model, run CPU inference, benchmark against ONNX Runtime and PyTorch — or ship privacy-preserving inference to the browser with WebAssembly.
 
-[![CI — C++ Engine](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-engine.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-engine.yml)
-[![CI — Rust](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-rust.yml)
-[![CI — Server](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-server.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-server.yml)
-[![CI — Web](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-web.yml/badge.svg)](https://github.com/tanmay-alpha/Crucible/actions/workflows/ci-web.yml)
+[![CI — C++ Engine](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-engine.yml/badge.svg)](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-engine.yml)
+[![CI — Rust](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-rust.yml)
+[![CI — Server](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-server.yml/badge.svg)](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-server.yml)
+[![CI — Web](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-web.yml/badge.svg)](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-web.yml)
 
 [![C++17](https://img.shields.io/badge/C++-17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org/)
 [![Rust](https://img.shields.io/badge/Rust-1.78+-000000?logo=rust&logoColor=white)](https://rustup.rs/)
@@ -37,9 +37,9 @@ Load any `.onnx` model, run CPU inference, benchmark against ONNX Runtime and Py
 
 ---
 
-## ⚡ What is Crucible?
+## ⚡ What is ONNX Inference Engine?
 
-Crucible is a high-performance, multi-language **ONNX inference runtime built from first principles**. It parses `.onnx` compute graphs, performs topological graph execution, and evaluates tensor operations on CPU — with zero heavy external runtime dependencies. Every layer was written from scratch: the row-major float32 Tensor data structures, the protobuf ONNX graph decoder, individual operator kernels, and the execution engine.
+ONNX Inference Engine is a high-performance, multi-language **ONNX inference runtime built from first principles**. It parses `.onnx` compute graphs, performs topological graph execution, and evaluates tensor operations on CPU — with zero heavy external runtime dependencies. Every layer was written from scratch: the row-major float32 Tensor data structures, the protobuf ONNX graph decoder, individual operator kernels, and the execution engine.
 
 The project spans **five languages** and **four deployment targets**:
 
@@ -56,7 +56,7 @@ The project spans **five languages** and **four deployment targets**:
 ## 🏗️ Repository Layout
 
 ```
-crucible/
+onnx-inference-engine/
 ├── engine/                     # Core C++17 inference engine (CMake)
 │   ├── CMakeLists.txt          # Root build configuration
 │   ├── CMakePresets.json       # Debug & Release presets
@@ -116,8 +116,8 @@ crucible/
 ### 2. Clone Repository with Submodules
 
 ```bash
-git clone --recursive https://github.com/tanmay-alpha/Crucible.git
-cd Crucible
+git clone --recursive https://github.com/tanmay-alpha/onnx-inference-engine.git
+cd onnx-inference-engine
 
 # If cloned without --recursive:
 git submodule update --init --recursive
