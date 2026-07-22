@@ -1,0 +1,132 @@
+version: "3.9"
+
+services:
+  # ─── PostgreSQL Database ─────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: crucible-postgres
+    environment:
+      POSTGRES_USER: crucible
+      POSTGRES_PASSWORD: crucible_dev_password
+      POSTGRES_DB: crucible
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crucible -d crucible"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crucible-net
+    restart: unless-stopped
+
+  # ─── Redis (caching + rate limiting) ──────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: crucible-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - crucible-net
+    restart: unless-stopped
+
+  # ─── Crucible API Server ──────────────────────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: crucible-server
+    environment:
+      DATABASE_URL: postgresql+asyncpg://crucible:crucible_dev_password@postgres:5432/crucible
+      REDIS_URL: redis://redis:6379/0
+      CRUCIBLE_MODEL_DIR: /crucible/models
+      CRUCIBLE_API_KEY: change-me-in-production
+      CRUCIBLE_SECRET_KEY: change-me-in-production-use-a-real-secret-min-32-chars
+      INFERENCE_TIMEOUT_SEC: 60
+      MAX_UPLOAD_BYTES: 209715200
+      CRUCIBLE_LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/crucible/models
+      - ./data:/crucible/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - crucible-net
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo 'Waiting for PostgreSQL...' &&
+        python3 -c 'import asyncpg; import asyncio; asyncio.run(asyncpg.connect(database=\"crucible\", user=\"crucible\", password=\"crucible_dev_password\", host=\"postgres\"))' &&
+        echo 'Running migrations...' &&
+        cd server && alembic upgrade head &&
+        echo 'Starting server...' &&
+        uvicorn server.main:app --host 0.0.0.0 --port 8000 --workers 2
+      "
+
+  # ─── Web Frontend ─────────────────────────────────────────────────────────
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: crucible-web
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000
+    depends_on:
+      - server
+    networks:
+      - crucible-net
+    restart: unless-stopped
+
+  # ─── Prometheus (metrics) ──────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: crucible-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - crucible-net
+    restart: unless-stopped
+
+  # ─── Grafana (metrics dashboard) ──────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: crucible-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - crucible-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  crucible-net:
+    driver: bridge

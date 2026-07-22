@@ -239,14 +239,14 @@ class InferenceLogListResponse(_Base):
 
 
 class FraudTxRequest(_Base):
-    tx_type: str = Field(..., description="Transaction type, e.g. TRANSFER, CASH_OUT")
-    amount: float = Field(..., description="Transaction amount")
-    orig_before: float = Field(..., description="Origin balance before transaction")
-    orig_after: float = Field(..., description="Origin balance after transaction")
-    dest_before: float = Field(..., description="Destination balance before transaction")
-    dest_after: float = Field(..., description="Destination balance after transaction")
-    probability: float = Field(..., description="Predicted fraud probability (0 to 1)")
-    verdict: str = Field(..., description="Risk verdict, e.g. Low risk, Elevated risk, High risk")
+    tx_type: str = Field(default="", description="Transaction type, e.g. TRANSFER, CASH_OUT")
+    amount: float = Field(default=0.0, description="Transaction amount")
+    orig_before: float = Field(default=0.0, description="Origin balance before transaction")
+    orig_after: float = Field(default=0.0, description="Origin balance after transaction")
+    dest_before: float = Field(default=0.0, description="Destination balance before transaction")
+    dest_after: float = Field(default=0.0, description="Destination balance after transaction")
+    probability: float = Field(default=0.0, description="Predicted fraud probability (0 to 1)")
+    verdict: str = Field(default="", description="Risk verdict, e.g. Low risk, Elevated risk, High risk")
     execution_mode: str = Field(default="wasm", description="Execution mode, e.g. wasm, server")
     latency_ms: float = Field(default=0.0, description="Inference latency in ms")
 
