@@ -21,18 +21,17 @@ from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from server.config import get_settings
+
+settings = get_settings()
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-SECRET_KEY = os.environ.get(
-    "CRUCIBLE_SECRET_KEY",
-    "dev-secret-key-change-in-production-please-use-a-real-secret",
-)
+SECRET_KEY = settings.CRUCIBLE_SECRET_KEY
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("CRUCIBLE_TOKEN_EXPIRE_MINUTES", "60"))
-API_KEY_PREFIX = "cr_"
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.CRUCIBLE_TOKEN_EXPIRE_MINUTES
+API_KEY_PREFIX = settings.CRUCIBLE_API_KEY_PREFIX
 
 # ---------------------------------------------------------------------------
 # Password hashing
