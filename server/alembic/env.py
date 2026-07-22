@@ -7,9 +7,14 @@ from alembic import context
 
 import os
 import sys
+from dotenv import load_dotenv
 
-# Add the server directory to the path so imports work
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
+# Add project root directory to path so 'from server.xxx' imports work
+root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, root_dir)
 
 from server.database import Base
 from server.models import User, ApiKey, ModelRecord, InferenceLog, FraudCase, Benchmark  # noqa: F401
@@ -50,10 +55,25 @@ def do_run_migrations(connection: Connection | AsyncConnection) -> None:
         context.run_migrations()
 
 
+def _prep_name_func():
+    import uuid
+    return f"__asyncpg_stmt_{uuid.uuid4().hex}__"
+
+
 async def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
     url = get_db_url()
-    connectable = create_async_engine(url)
+    connect_args = {}
+    pool_kwargs = {}
+    if "postgresql" in url:
+        from sqlalchemy.pool import NullPool
+        pool_kwargs["poolclass"] = NullPool
+        connect_args = {
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+            "prepared_statement_name_func": _prep_name_func,
+        }
+    connectable = create_async_engine(url, connect_args=connect_args, **pool_kwargs)
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
