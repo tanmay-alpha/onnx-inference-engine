@@ -248,10 +248,11 @@ def main() -> None:
     parser.add_argument("--synthetic", action="store_true", help="Use synthetic data")
     args = parser.parse_args()
 
-    data_path = args.data or os.environ.get("CRUCIBLE_TRAIN_DATA", "data/raw/creditcard.csv")
-    output_path = args.output or os.environ.get(
-        "CRUCIBLE_MODEL_OUTPUT", "models/fraud_model.onnx"
-    )
+    from server.config import get_settings
+    settings = get_settings()
+
+    data_path = args.data or settings.CRUCIBLE_TRAIN_DATA
+    output_path = args.output or settings.CRUCIBLE_MODEL_OUTPUT
 
     # Load data
     if args.synthetic:
