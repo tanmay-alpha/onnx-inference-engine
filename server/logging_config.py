@@ -11,8 +11,11 @@ import sys
 
 import structlog
 
-LOG_LEVEL = os.environ.get("CRUCIBLE_LOG_LEVEL", "INFO")
-LOG_FORMAT = os.environ.get("CRUCIBLE_LOG_FORMAT", "json")  # "json" or "console"
+from server.config import get_settings
+
+settings = get_settings()
+LOG_LEVEL = settings.CRUCIBLE_LOG_LEVEL
+LOG_FORMAT = settings.CRUCIBLE_LOG_FORMAT
 
 
 def setup_logging() -> None:
