@@ -124,6 +124,7 @@ class InferenceLog(Base):
     input_shape = Column(Text, nullable=True)
     output_shape = Column(Text, nullable=True)
     latency_ms = Column(Float, nullable=False)
+    engine = Column(String(100), nullable=False, default="unknown", index=True)
     status = Column(String(20), nullable=False, default="success", index=True)
     error_message = Column(Text, nullable=True)
     ip_address = Column(String(45), nullable=True)
@@ -422,6 +423,7 @@ def log_inference(model_id: str, input_shape, output_shape,
             input_shape=str(input_shape) if input_shape else None,
             output_shape=str(output_shape) if output_shape else None,
             latency_ms=inference_time_ms,
+            engine=engine,
             status=status,
             error_message=error_message or None,
         ))
@@ -462,7 +464,7 @@ def get_inference_logs(model_id: Optional[str] = None, limit: int = 50) -> List[
                 "input_shape": json.loads(r.input_shape) if r.input_shape else [],
                 "output_shape": json.loads(r.output_shape) if r.output_shape else [],
                 "inference_time_ms": r.latency_ms,
-                "engine": "crucible-wasm",
+                "engine": r.engine,
                 "status": r.status,
                 "error_message": r.error_message,
                 "created_at": r.created_at.isoformat() if r.created_at else None,

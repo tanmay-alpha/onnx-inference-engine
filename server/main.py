@@ -35,6 +35,7 @@ Security posture (after Issue #13 review)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import json
 import logging
@@ -43,6 +44,7 @@ import os
 import secrets
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import uuid
 from pathlib import Path
@@ -330,10 +332,18 @@ def _new_trace_id() -> str:
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
+@asynccontextmanager
+async def _lifespan(app_instance: FastAPI):
+    """Application lifespan — initialize database on startup."""
+    database.init_db()
+    yield
+
+
 app = FastAPI(
     title=settings.APP_NAME,
     description="REST API for the ONNX Inference Engine",
     version=SERVER_VERSION,
+    lifespan=_lifespan,
 )
 
 # CORS: allow the Crucible frontend (and any authorised consumer)
@@ -747,7 +757,7 @@ async def analytics_models(
 ) -> dict:
     """Get model usage statistics."""
     from server.database import get_session_factory
-    from sqlalchemy import select, func
+    from sqlalchemy import select, func, Integer
 
     session_factory = get_session_factory()
     async with session_factory() as session:
@@ -969,13 +979,6 @@ def infer(req: InferRequest) -> InferResponse:
         engine=_engine_name(),
     )
 
-
-@app.on_event("startup")
-def _on_startup() -> None:
-    """Initialize database on startup."""
-    database.init_db()
-
-
 @app.get("/models", response_model=ModelListResponse)
 def list_models() -> ModelListResponse:
     """Get all registered models from database."""
@@ -1127,3 +1130,9 @@ async def validate(
         operators=result.operators,
         unsupported=result.unsupported,
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("server.main:app", host="0.0.0.0", port=port, reload=False)

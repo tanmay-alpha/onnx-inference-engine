@@ -134,4 +134,4 @@ EXPOSE 8000
 # deployment and the orchestrator already handles authentication
 # (CRUCIBLE_API_KEY) and TLS termination. Local dev runs should
 # use `uvicorn server.main:app` on the default 127.0.0.1:8000.
-CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn server.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

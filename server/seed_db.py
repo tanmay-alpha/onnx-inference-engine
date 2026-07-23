@@ -51,8 +51,8 @@ async def seed_database():
             full_name="Crucible Admin",
             is_active=True,
             is_admin=True,
-            created_at=datetime.utcnow() - timedelta(days=60),
-            last_login=datetime.utcnow() - timedelta(hours=2),
+            created_at=datetime.now(timezone.utc) - timedelta(days=60),
+            last_login=datetime.now(timezone.utc) - timedelta(hours=2),
         )
         users.append(admin_user)
 
@@ -74,8 +74,8 @@ async def seed_database():
                 full_name=full_name,
                 is_active=(email != "inactive@test.com"),
                 is_admin=is_admin,
-                created_at=datetime.utcnow() - timedelta(days=random.randint(10, 50)),
-                last_login=datetime.utcnow() - timedelta(hours=random.randint(1, 48)),
+                created_at=datetime.now(timezone.utc) - timedelta(days=random.randint(10, 50)),
+                last_login=datetime.now(timezone.utc) - timedelta(hours=random.randint(1, 48)),
             )
             users.append(u)
 
@@ -98,9 +98,9 @@ async def seed_database():
                 name=key_names[i],
                 is_active=is_act,
                 rate_limit=1000 if u.is_admin else random.choice([60, 120, 300]),
-                last_used=datetime.utcnow() - timedelta(minutes=random.randint(5, 500)),
-                created_at=datetime.utcnow() - timedelta(days=30),
-                expires_at=datetime.utcnow() + timedelta(days=90) if is_act else datetime.utcnow() - timedelta(days=1),
+                last_used=datetime.now(timezone.utc) - timedelta(minutes=random.randint(5, 500)),
+                created_at=datetime.now(timezone.utc) - timedelta(days=30),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=90) if is_act else datetime.now(timezone.utc) - timedelta(days=1),
             )
             api_keys.append(key)
 
@@ -177,7 +177,7 @@ async def seed_database():
                 metadata_json=json.dumps({"author": "Crucible Team", "accuracy": 0.984}),
                 is_active=True,
                 created_by=admin_user.id,
-                created_at=datetime.utcnow() - timedelta(days=random.randint(5, 20)),
+                created_at=datetime.now(timezone.utc) - timedelta(days=random.randint(5, 20)),
                 usage_count=random.randint(150, 1200),
                 operators_supported=m_data["operators_supported"],
             )
@@ -206,7 +206,7 @@ async def seed_database():
             k = random.choice(api_keys)
             u = random.choice(users)
             
-            created_time = datetime.utcnow() - timedelta(hours=random.randint(0, 168), minutes=random.randint(0, 59))
+            created_time = datetime.now(timezone.utc) - timedelta(hours=random.randint(0, 168), minutes=random.randint(0, 59))
             
             log = InferenceLog(
                 id=uuid.uuid4().hex,
@@ -265,8 +265,8 @@ async def seed_database():
                 reviewed=is_rev,
                 reviewed_by=rev_by,
                 review_notes=notes,
-                created_at=datetime.utcnow() - timedelta(hours=random.randint(1, 120)),
-                reviewed_at=datetime.utcnow() - timedelta(hours=random.randint(0, 48)) if is_rev else None,
+                created_at=datetime.now(timezone.utc) - timedelta(hours=random.randint(1, 120)),
+                reviewed_at=datetime.now(timezone.utc) - timedelta(hours=random.randint(0, 48)) if is_rev else None,
             )
             fraud_cases.append(fc)
 
@@ -292,7 +292,7 @@ async def seed_database():
                         latency_ms=lat,
                         memory_mb=mem,
                         device="CPU (x86_64)" if eng != "crucible-wasm" else "Browser (WASM/V8)",
-                        created_at=datetime.utcnow() - timedelta(days=random.randint(1, 14)),
+                        created_at=datetime.now(timezone.utc) - timedelta(days=random.randint(1, 14)),
                     )
                     benchmarks.append(b)
 

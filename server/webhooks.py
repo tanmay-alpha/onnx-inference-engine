@@ -125,7 +125,7 @@ def send_webhook(webhook: dict, event_type: str, payload: dict) -> bool:
         try:
             resp = requests.post(
                 webhook["url"],
-                json=json.loads(payload_json),
+                data=payload_json,
                 headers=headers,
                 timeout=settings.WEBHOOK_TIMEOUT_SEC,
             )

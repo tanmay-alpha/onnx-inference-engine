@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Data
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Models (mounted at runtime)
+models/
+*.onnx
+*.pt
+*.pth
+
+# Misc
+node_modules/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/

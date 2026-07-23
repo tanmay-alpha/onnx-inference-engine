@@ -167,10 +167,21 @@ python -m pytest server -v
 
 ## 🗄️ Database & REST API Architecture
 
-Crucible features a persistent REST API with a thread-safe dual-engine database layer ([server/database.py](file:///C:/Users/TANMAY/OneDrive/Desktop/Crucible/server/database.py)):
+Crucible features a persistent REST API with a thread-safe dual-engine database layer ([server/database.py](file:///C:/Users/TANMAY/OneDrive/Desktop/onnx-inference-engine/server/database.py)):
 
 - **Local Development**: Automatically initializes local SQLite database (`crucible.db`) with WAL mode.
-- **Production / Cloud**: Seamlessly switches to **Supabase PostgreSQL** or **Render Managed PostgreSQL** when `DATABASE_URL` is set in environment variables.
+- **Production**: Seamlessly switches to **Supabase PostgreSQL** when `DATABASE_URL` is set in environment variables.
+
+### Supabase Setup
+
+1. Create a new project at [supabase.com](https://supabase.com)
+2. Run the schema from `server/alembic/versions/001_initial_schema.sql` in the SQL Editor
+3. Get your connection string from **Settings → Database → Connection string → URI**
+4. Set `DATABASE_URL` in your `.env`:
+   ```
+   DATABASE_URL=postgresql+asyncpg://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres
+   ```
+5. Run migrations: `alembic upgrade head`
 
 ### Main REST API Endpoints
 
@@ -199,7 +210,7 @@ The frontend builds using Nitro with Vercel Output API v3 preset (`web/scripts/p
 The project includes a production-ready `render.yaml` Blueprint for Render deployment:
 - **`crucible-api`**: Multi-stage Docker deployment (`Dockerfile`) running C++ engine & FastAPI on Render Web Service.
 - **`crucible-web`**: Static Publish deployment serving Vite/TanStack build outputs.
-- **`DATABASE_URL`**: Pointing to Supabase PostgreSQL for permanent zero-cost persistence.
+`DATABASE_URL`: Pointing to Supabase PostgreSQL for production persistence.
 
 ---
 

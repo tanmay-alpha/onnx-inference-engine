@@ -40,3 +40,10 @@ npm run build
 ## Deployment
 
 The app compiles using Nitro with `NITRO_PRESET=vercel` into `.vercel/output`, copied to root postbuild via `scripts/postbuild.js` for native serverless SSR on Vercel.
+
+### Environment Variables for Vercel Dashboard
+
+When deploying to Vercel, set the following environment variable in your project settings:
+
+- `VITE_API_URL`: Backend API URL (e.g. `https://crucible-inference-engine.onrender.com` or Render service URL).
+

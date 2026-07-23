@@ -196,11 +196,9 @@ def export_to_onnx(
         from skl2onnx.common.data_types import FloatTensorType
         from sklearn.pipeline import Pipeline
     except ImportError:
-        print("skl2onnx not installed. Installing requirements.txt...")
-        os.system(f"{sys.executable} -m pip install skl2onnx")
-        from skl2onnx import to_onnx
-        from skl2onnx.common.data_types import FloatTensorType
-        from sklearn.pipeline import Pipeline
+        print("ERROR: skl2onnx is not installed.")
+        print("Install it with: pip install skl2onnx")
+        raise
 
     pipeline = Pipeline([
         ("scaler", scaler),
