@@ -1,0 +1,26 @@
+# Hyperparameters and configuration for the fraud detection model.
+# See models/fraud/README.md for context on each parameter.
+
+# Data splitting
+test_size: 0.2
+random_state: 42
+
+# Model selection — "gradient_boosting" (LightGBM, preferred) or "xgboost"
+model_type: "gradient_boosting"
+
+# Gradient boosting hyperparameters
+n_estimators: 200
+max_depth: 5
+learning_rate: 0.1
+
+# Class imbalance handling
+use_smote: false
+
+# Output configuration
+output_dir: "./"
+
+# ONNX export settings
+onnx_opset: 13
+
+# Evaluation thresholds
+classification_threshold: 0.5

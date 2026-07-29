@@ -36,8 +36,6 @@ class Settings(BaseSettings):
     HOST: str = Field(default="0.0.0.0", description="Bind host IP")
     PORT: int = Field(default=8000, description="Server port")
     DEBUG: bool = Field(default=False, description="Enable debug mode")
-    PYTHONUNBUFFERED: int = Field(default=1, description="Python stdout buffering")
-    TZ: str = Field(default="UTC", description="Server timezone")
 
     # ---------------------------------------------------------------------------
     # Database
@@ -46,10 +44,23 @@ class Settings(BaseSettings):
         default="sqlite+aiosqlite:///./crucible.db",
         description="Async SQLAlchemy database connection URL",
     )
-    DB_POOL_SIZE: int = Field(default=5, description="SQLAlchemy pool size")
-    DB_MAX_OVERFLOW: int = Field(default=10, description="SQLAlchemy max pool overflow")
-    DB_POOL_TIMEOUT: int = Field(default=30, description="SQLAlchemy pool checkout timeout (sec)")
     DB_STATEMENT_CACHE_SIZE: int = Field(default=0, description="Asyncpg prepared statement cache size (0 for PgBouncer)")
+
+    # ---------------------------------------------------------------------------
+    # Supabase
+    # ---------------------------------------------------------------------------
+    SUPABASE_URL: str = Field(
+        default="",
+        description="Supabase project URL (e.g. https://xxx.supabase.co)",
+    )
+    SUPABASE_SERVICE_ROLE_KEY: str = Field(
+        default="",
+        description="Supabase service-role key for server-side operations (bypasses RLS)",
+    )
+    SUPABASE_STORAGE_BUCKET: str = Field(
+        default="models",
+        description="Supabase Storage bucket for ONNX model files",
+    )
 
     # ---------------------------------------------------------------------------
     # Authentication & Security
@@ -74,7 +85,6 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------------------------
     # Frontend & CORS
     # ---------------------------------------------------------------------------
-    NEXT_PUBLIC_API_URL: str = Field(default="http://localhost:8000", description="Public API URL for web frontend")
     CRUCIBLE_CORS_ORIGINS: str = Field(
         default="http://localhost:3000,http://localhost:5173",
         description="Comma-separated list of allowed CORS origins",
@@ -135,6 +145,14 @@ class Settings(BaseSettings):
                 )
             if self.CRUCIBLE_API_KEY == "crucible-development-api-key":
                 raise ValueError("CRUCIBLE_API_KEY must be changed from development default in production!")
+            if self.POSTGRES_PASSWORD == "crucible_dev_password":
+                raise ValueError("POSTGRES_PASSWORD must be changed from development default in production!")
+            if self.GRAFANA_PASSWORD == "admin":
+                raise ValueError("GRAFANA_PASSWORD must be changed from development default in production!")
+            if not self.SUPABASE_URL:
+                raise ValueError("SUPABASE_URL must be set in production!")
+            if not self.SUPABASE_SERVICE_ROLE_KEY:
+                raise ValueError("SUPABASE_SERVICE_ROLE_KEY must be set in production!")
 
 
 @lru_cache()

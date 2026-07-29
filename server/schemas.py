@@ -199,12 +199,6 @@ class ErrorResponse(_Base):
     )
 
 
-# Backward compatibility aliases for test suites
-ConvertRequest = ConvertResponse
-PredictRequest = InferRequest
-PredictResponse = InferResponse
-
-
 # ---------------------------------------------------------------------------
 # Database Resource Models
 # ---------------------------------------------------------------------------

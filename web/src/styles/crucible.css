@@ -185,9 +185,117 @@ a {
     border-color 0.12s,
     color 0.12s;
 }
-.c-nav-source:hover {
+.c-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.c-nav-cta {
+  background: var(--trace) !important;
+  color: #fff !important;
+  border-radius: 2px;
+  border-color: var(--trace) !important;
+  padding: 6px 12px !important;
+  font-size: 12px !important;
+  font-weight: 600;
+}
+.c-nav-cta:hover {
+  background: var(--forge-deep) !important;
+  color: #fff !important;
+}
+.c-nav-link-label {
+  display: none;
+}
+.c-user-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 2px;
+  background: var(--forge-tint);
+  border: 1px solid #ebc6a3;
+  color: var(--forge-deep);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.c-mobile-toggle {
+  display: none;
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 5px 7px;
+  cursor: pointer;
   color: var(--ink);
-  border-color: var(--ink);
+}
+.c-mobile-nav {
+  display: none;
+  flex-direction: column;
+  border-top: 1px solid var(--rule);
+  padding: 8px 0;
+  background: var(--paper-bg);
+}
+.c-mobile-nav-link {
+  display: block;
+  padding: 11px 28px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink-muted);
+  border-bottom: 1px solid var(--rule);
+  transition: color 0.12s;
+}
+.c-mobile-nav-link:hover,
+.c-mobile-nav-link.active {
+  color: var(--ink);
+}
+.c-mobile-cta {
+  background: var(--trace);
+  color: #fff;
+  font-weight: 600;
+}
+@media (max-width: 860px) {
+  .c-nav {
+    display: none;
+  }
+  .c-nav-source .c-nav-link-label,
+  .c-nav-source span {
+    display: none;
+  }
+  .c-nav-actions {
+    gap: 6px;
+  }
+  .c-mobile-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .c-nav-cta .c-nav-link-label {
+    display: inline;
+  }
+  .c-user-badge {
+    max-width: 70px;
+  }
+  .c-nav-source {
+    padding: 6px 8px !important;
+  }
+}
+@media (min-width: 861px) {
+  .c-mobile-nav {
+    display: none !important;
+  }
+}
+@media (max-width: 480px) {
+  .c-header-inner {
+    padding: 10px 14px;
+  }
+  .c-user-badge {
+    max-width: 50px;
+    font-size: 10px;
+    padding: 2px 7px;
+  }
 }
 
 /* ---------- Bezel signature ---------- */

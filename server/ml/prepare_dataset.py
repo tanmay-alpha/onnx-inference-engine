@@ -17,7 +17,6 @@ Environment variables:
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
@@ -32,7 +31,7 @@ from sklearn.preprocessing import StandardScaler
 
 def download_kaggle_dataset(
     dataset: str = "mlg-ulb/creditcardfraud",
-    data_dir: Path = None,
+    data_dir: Path = Path("data/raw"),
 ) -> Path:
     """Download Kaggle dataset using the Kaggle API.
 

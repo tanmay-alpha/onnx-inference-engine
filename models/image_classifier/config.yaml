@@ -1,0 +1,24 @@
+# Configuration for the image classification ONNX pipeline.
+
+# Model selection — "mobilenet_v2" (lighter, faster) or "resnet18" (higher accuracy)
+model: "mobilenet_v2"
+
+# Input tensor shape: [batch, channels, height, width]
+input_size: [1, 3, 224, 224]
+
+# Number of output classes (ImageNet by default)
+num_classes: 1000
+
+# ONNX opset version for export
+onnx_opset: 13
+
+# PyTorch pretrained weights
+pretrained: true
+
+# Input normalization (ImageNet statistics)
+normalization:
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+# Output settings
+output_dir: "./"
