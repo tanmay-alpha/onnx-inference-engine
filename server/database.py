@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.pool import NullPool
 
 Base = declarative_base()
 
@@ -210,8 +211,11 @@ def get_engine():
         connect_args = {}
         pool_kwargs = {}
         if "postgresql" in url:
-            from sqlalchemy.pool import NullPool
-            pool_kwargs["poolclass"] = NullPool
+            # Supabase / production PostgreSQL pool settings
+            pool_kwargs["pool_size"] = 5
+            pool_kwargs["max_overflow"] = 10
+            pool_kwargs["pool_timeout"] = 30
+            pool_kwargs["pool_recycle"] = 1800
             connect_args = {
                 "statement_cache_size": settings.DB_STATEMENT_CACHE_SIZE,
                 "prepared_statement_cache_size": settings.DB_STATEMENT_CACHE_SIZE,
@@ -618,3 +622,90 @@ def get_benchmarks(limit: int = 50) -> List[dict]:
             }
             for r in rows
         ]
+
+
+# ---------------------------------------------------------------------------
+# Supabase Client & Storage helpers
+# ---------------------------------------------------------------------------
+
+_supabase_client = None
+
+
+def get_supabase_client():
+    """Return a lazy-initialized Supabase client instance.
+
+    Uses SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY from settings.
+    The service-role key is used for server-side operations (bypasses RLS).
+    """
+    global _supabase_client
+    if _supabase_client is None:
+        from server.config import get_settings
+        settings = get_settings()
+        try:
+            from supabase import create_client
+        except ImportError:
+            raise ImportError(
+                "The 'supabase' package is required for Supabase integration. "
+                "Install it with: pip install supabase"
+            )
+        _supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+    return _supabase_client
+
+
+def upload_model_to_storage(bucket: str, path: str, file_bytes: bytes) -> str:
+    """Upload a model file to Supabase Storage and return the public URL.
+
+    Args:
+        bucket:    Supabase Storage bucket name.
+        path:      Destination path within the bucket (e.g. "fraud_model.onnx").
+        file_bytes: Raw file content to upload.
+
+    Returns:
+        Public URL of the uploaded file.
+    """
+    client = get_supabase_client()
+    try:
+        response = client.storage.from_(bucket).upload(
+            path,
+            file_bytes,
+            file_options={"content-type": "application/octet-stream", "upsert": "true"},
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to upload '{path}' to Supabase Storage bucket '{bucket}': {exc}") from exc
+
+    # Retrieve the public URL
+    try:
+        url_result = client.storage.from_(bucket).get_public_url(path)
+        public_url = url_result if isinstance(url_result, str) else url_result.get("publicUrl", "")
+    except Exception as exc:
+        raise RuntimeError(f"Failed to get public URL for '{path}': {exc}") from exc
+
+    if not public_url:
+        raise RuntimeError(f"Supabase returned an empty public URL for '{path}'")
+    return public_url
+
+
+def get_model_from_storage(bucket: str, path: str) -> bytes:
+    """Download a model file from Supabase Storage.
+
+    Args:
+        bucket: Supabase Storage bucket name.
+        path:   Path to the file within the bucket.
+
+    Returns:
+        Raw file bytes.
+    """
+    client = get_supabase_client()
+    try:
+        response = client.storage.from_(bucket).download(path)
+        if isinstance(response, bytes):
+            return response
+        # Newer SDK versions return a StorageFileAPI object with .read()
+        if hasattr(response, "read"):
+            return response.read()
+        # Fallback: already bytes-like
+        return bytes(response)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to download '{path}' from Supabase Storage bucket '{bucket}': {exc}"
+        ) from exc

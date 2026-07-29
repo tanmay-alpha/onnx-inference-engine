@@ -57,11 +57,6 @@ export interface SupportedOp {
   wasmSupported: boolean;
 }
 
-/**
- * Returns the ImageNet benchmarks for Crucible, ONNX Runtime, and PyTorch.
- * Tries to read from benchmarks/results/benchmark_results.json, and falls back
- * to high-fidelity static metrics if the local C++ run is missing or unbuilt.
- */
 export function getBenchmarkResults(): BenchmarkData {
   if (typeof window === "undefined") {
     try {
@@ -69,14 +64,9 @@ export function getBenchmarkResults(): BenchmarkData {
       if (fs.existsSync(filePath)) {
         const content = fs.readFileSync(filePath, "utf-8");
         const data = JSON.parse(content) as BenchmarkData;
-
-        // If crucible ran in fallback mode (latency near zero or uncompiled),
-        // we enrich the statistics with the true compiled C++ release numbers
-        // to make the dashboard UI informative.
         const hasRealCppData = data.results.some(
           (r) => r.engine === "crucible" && r.stats.mean_ms > 0.1,
         );
-
         if (hasRealCppData) {
           return data;
         }
@@ -89,7 +79,6 @@ export function getBenchmarkResults(): BenchmarkData {
     }
   }
 
-  // Realistic C++ Release Mode benchmark results on CPU
   return {
     meta: {
       generated_at_unix: 1782330514,
@@ -161,10 +150,6 @@ export function getBenchmarkResults(): BenchmarkData {
   };
 }
 
-/**
- * Returns latency measurements (ms) for the three engines across model sizes
- * (representing parameter complexity scaling).
- */
 export function getChartData(): ChartDataPoint[] {
   return [
     { size: "Tiny (1M)", crucible: 1.2, onnxruntime: 0.8, pytorch: 1.5 },
@@ -175,9 +160,6 @@ export function getChartData(): ChartDataPoint[] {
   ];
 }
 
-/**
- * Returns metadata detailing the 13 supported ONNX operators inside Crucible.
- */
 export function getSupportedOps(): SupportedOp[] {
   return [
     {
@@ -288,13 +270,51 @@ export function getSupportedOps(): SupportedOp[] {
   ];
 }
 
-// ---------------------------------------------------------------------------
-// Server & Database Persistence API Helpers
-// ---------------------------------------------------------------------------
+// =====================================================================
+// Server & Database API Helpers
+// =====================================================================
 const API_BASE =
   typeof window !== "undefined"
-    ? import.meta.env.VITE_API_URL || "http://localhost:8000"
+    ? (import.meta.env.VITE_API_URL as string) || "http://localhost:8000"
     : "http://localhost:8000";
+
+// ---- Token storage helpers ----
+export function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("crucible_token");
+}
+
+export function setToken(token: string | null): void {
+  if (typeof window === "undefined") return;
+  if (token) {
+    localStorage.setItem("crucible_token", token);
+  } else {
+    localStorage.removeItem("crucible_token");
+  }
+}
+
+export function setUserEmail(email: string | null): void {
+  if (typeof window === "undefined") return;
+  if (email) {
+    localStorage.setItem("crucible_user", email);
+  } else {
+    localStorage.removeItem("crucible_user");
+  }
+}
+
+export function getAuthHeaders(): Record<string, string> {
+  const token = getToken();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) {
+    headers["X-API-Key"] = token;
+  }
+  return headers;
+}
+
+export function logout(): void {
+  setToken(null);
+  setUserEmail(null);
+}
 
 export interface RegisteredModel {
   id: string;
@@ -304,6 +324,43 @@ export interface RegisteredModel {
   operators: string[];
   all_supported: boolean;
   created_at: string;
+  usage_count?: number;
+  inference_count?: number;
+  avg_latency_ms?: number;
+  last_used?: string | null;
+}
+
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  expires_at: string | null;
+  is_active: boolean;
+  last_used: string | null;
+}
+
+export interface ApiKeyCreated {
+  id: string;
+  key: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  expires_at: string | null;
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  full_name: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface AuthToken {
+  access_token: string;
+  token_type: string;
+  user: AuthUser;
 }
 
 export interface FraudHistoryRecord {
@@ -330,7 +387,165 @@ export interface BenchmarkRecord {
   created_at: string;
 }
 
-export async function fetchModelsFromDB(): Promise<RegisteredModel[]> {
+export interface AnalyticsData {
+  inference: {
+    period_days: number;
+    data: {
+      date: string;
+      count: number;
+      avg_latency_ms: number;
+      min_latency_ms: number;
+      max_latency_ms: number;
+    }[];
+  };
+  fraud: {
+    period_days: number;
+    data: {
+      date: string;
+      total: number;
+      fraud_count: number;
+      avg_probability: number;
+    }[];
+  };
+  models: {
+    id: string;
+    name: string;
+    usage_count: number;
+    inference_count: number;
+    avg_latency_ms: number;
+    last_used: string | null;
+  }[];
+}
+
+// ---- Auth functions ----
+
+export async function register(
+  email: string,
+  password: string,
+  fullName: string,
+): Promise<AuthUser> {
+  const res = await fetch(`${API_BASE}/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, full_name: fullName }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Registration failed" }));
+    throw new Error(err.detail || "Registration failed");
+  }
+  const data = await res.json();
+  return data;
+}
+
+export async function login(email: string, password: string): Promise<AuthToken> {
+  const res = await fetch(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Login failed" }));
+    throw new Error(err.detail || "Invalid email or password");
+  }
+  const data = await res.json();
+  const token = data.access_token;
+  setToken(token);
+  // Fetch user info after login so the UI has the email
+  let user: AuthUser | null = null;
+  try {
+    const meRes = await fetch(`${API_BASE}/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (meRes.ok) user = await meRes.json();
+  } catch {
+    /* non-fatal */
+  }
+  if (user) setUserEmail(user.email);
+  return {
+    access_token: token,
+    token_type: data.token_type,
+    user: user || { id: "", email, full_name: null, is_active: true, created_at: "" },
+  };
+}
+
+export async function getCurrentUser(): Promise<AuthUser | null> {
+  const token = getToken();
+  if (!token) return null;
+  try {
+    const res = await fetch(`${API_BASE}/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      logout();
+      return null;
+    }
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+// ---- API Key functions ----
+
+export async function createApiKey(name: string, expiresInDays?: number): Promise<ApiKeyCreated> {
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+
+  const res = await fetch(`${API_BASE}/auth/api-key`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-Key": token,
+    },
+    body: JSON.stringify({
+      name,
+      expires_in_days: expiresInDays ?? null,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to create API key" }));
+    throw new Error(err.detail || "Failed to create API key");
+  }
+  return await res.json();
+}
+
+export async function listApiKeys(): Promise<ApiKeyInfo[]> {
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+
+  const res = await fetch(`${API_BASE}/auth/api-keys`, {
+    headers: {
+      "X-API-Key": token,
+    },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to list API keys" }));
+    throw new Error(err.detail || "Failed to list API keys");
+  }
+  const data = await res.json();
+  return data.api_keys || [];
+}
+
+export async function revokeApiKey(keyId: string): Promise<boolean> {
+  const token = getToken();
+  if (!token) throw new Error("Not authenticated");
+
+  const res = await fetch(`${API_BASE}/auth/api-key/${encodeURIComponent(keyId)}`, {
+    method: "DELETE",
+    headers: {
+      "X-API-Key": token,
+    },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to revoke API key" }));
+    throw new Error(err.detail || "Failed to revoke API key");
+  }
+  return true;
+}
+
+// ---- Model functions ----
+
+export async function fetchModels(): Promise<RegisteredModel[]> {
   try {
     const res = await fetch(`${API_BASE}/models`);
     if (!res.ok) return [];
@@ -342,17 +557,86 @@ export async function fetchModelsFromDB(): Promise<RegisteredModel[]> {
   }
 }
 
-export async function deleteModelFromDB(modelId: string): Promise<boolean> {
-  try {
-    const res = await fetch(`${API_BASE}/models/${modelId}`, { method: "DELETE" });
-    return res.ok;
-  } catch (err) {
-    console.warn(`Could not delete model ${modelId}:`, err);
-    return false;
+export async function uploadModel(file: File, inputShape: number[]): Promise<RegisteredModel> {
+  const token = getToken();
+  const apiKey = token ? token : "";
+  const form = new FormData();
+  form.append("model_file", file);
+  form.append("input_shape", JSON.stringify(inputShape));
+
+  const res = await fetch(`${API_BASE}/convert`, {
+    method: "POST",
+    headers: {
+      "X-API-Key": apiKey,
+    },
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Model upload failed" }));
+    throw new Error(err.detail || "Model upload failed");
   }
+  const data = await res.json();
+  return {
+    id: data.onnx_model_id,
+    name: file.name,
+    file_size_bytes: file.size,
+    input_shape: inputShape,
+    operators: data.operators_used || [],
+    all_supported: data.all_supported ?? false,
+    created_at: new Date().toISOString(),
+  };
 }
 
-export async function logFraudTxToDB(payload: {
+export async function deleteModel(modelId: string): Promise<boolean> {
+  const token = getToken();
+  const apiKey = token ? token : "";
+  const res = await fetch(`${API_BASE}/models/${encodeURIComponent(modelId)}`, {
+    method: "DELETE",
+    headers: {
+      "X-API-Key": apiKey,
+    },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Delete failed" }));
+    throw new Error(err.detail || "Delete failed");
+  }
+  return true;
+}
+
+// ---- Inference ----
+
+export async function runInference(
+  modelId: string,
+  inputData: number[],
+  inputShape: number[],
+): Promise<{ output: number[]; shape: number[]; latency_ms: number }> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) {
+    headers["X-API-Key"] = token;
+  }
+
+  const res = await fetch(`${API_BASE}/infer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model_id: modelId,
+      input: inputData,
+      input_shape: inputShape,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Inference failed" }));
+    throw new Error(err.detail || "Inference failed");
+  }
+  return await res.json();
+}
+
+// ---- Fraud logging ----
+
+export async function logFraudDetection(data: {
   tx_type: string;
   amount: number;
   orig_before: number;
@@ -367,8 +651,8 @@ export async function logFraudTxToDB(payload: {
   try {
     const res = await fetch(`${API_BASE}/fraud/log`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
     });
     if (!res.ok) return null;
     return await res.json();
@@ -378,7 +662,7 @@ export async function logFraudTxToDB(payload: {
   }
 }
 
-export async function fetchFraudHistoryFromDB(): Promise<FraudHistoryRecord[]> {
+export async function getFraudHistory(): Promise<FraudHistoryRecord[]> {
   try {
     const res = await fetch(`${API_BASE}/fraud/history`);
     if (!res.ok) return [];
@@ -390,7 +674,9 @@ export async function fetchFraudHistoryFromDB(): Promise<FraudHistoryRecord[]> {
   }
 }
 
-export async function fetchBenchmarksFromDB(): Promise<BenchmarkRecord[]> {
+// ---- Benchmarks ----
+
+export async function fetchBenchmarks(): Promise<BenchmarkRecord[]> {
   try {
     const res = await fetch(`${API_BASE}/benchmarks`);
     if (!res.ok) return [];
@@ -402,7 +688,7 @@ export async function fetchBenchmarksFromDB(): Promise<BenchmarkRecord[]> {
   }
 }
 
-export async function logBenchmarkToDB(payload: {
+export async function logBenchmark(payload: {
   model_name: string;
   engine: string;
   latency_ms: number;
@@ -411,7 +697,7 @@ export async function logBenchmarkToDB(payload: {
   try {
     const res = await fetch(`${API_BASE}/benchmarks`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
     if (!res.ok) return null;
@@ -421,3 +707,11 @@ export async function logBenchmarkToDB(payload: {
     return null;
   }
 }
+
+// Backward-compatible aliases used in existing pages
+export const fetchModelsFromDB = fetchModels;
+export const deleteModelFromDB = deleteModel;
+export const fetchFraudHistoryFromDB = getFraudHistory;
+export const fetchBenchmarksFromDB = fetchBenchmarks;
+export const logBenchmarkToDB = logBenchmark;
+export const logFraudTxToDB = logFraudDetection;

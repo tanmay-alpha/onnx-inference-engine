@@ -1,4 +1,4 @@
-"""Authentication module for Crucible Server.
+"""Authentication module for onnx-inference-engine.
 
 Provides:
   - Password hashing with bcrypt
@@ -9,15 +9,12 @@ Provides:
 from __future__ import annotations
 
 import hashlib
-import hmac
-import os
 import secrets
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
+from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
@@ -42,7 +39,6 @@ _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # OAuth2 / JWT
 # ---------------------------------------------------------------------------
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 # ---------------------------------------------------------------------------

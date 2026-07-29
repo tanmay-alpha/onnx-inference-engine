@@ -20,7 +20,6 @@ because the /convert endpoint needs it for the PyTorch exporter.
 """
 from __future__ import annotations
 
-import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
@@ -88,12 +87,6 @@ def list_supported_ops() -> List[str]:
     tests assert on the sorted form.
     """
     return sorted(SUPPORTED_OPS)
-
-
-def supported_ops_count() -> int:
-    """len(SUPPORTED_OPS). Convenience for callers that don't want
-    to import the frozenset directly."""
-    return len(SUPPORTED_OPS)
 
 
 def extract_op_types(model: onnx.ModelProto) -> List[str]:

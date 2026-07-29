@@ -16,7 +16,7 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, root_dir)
 
-from server.database import Base
+from server.database import Base, _prep_name_func
 from server.models import User, ApiKey, ModelRecord, InferenceLog, FraudCase, Benchmark  # noqa: F401
 config = context.config
 if config.config_file_name is not None:
@@ -53,11 +53,6 @@ def do_run_migrations(connection: Connection | AsyncConnection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
         context.run_migrations()
-
-
-def _prep_name_func():
-    import uuid
-    return f"__asyncpg_stmt_{uuid.uuid4().hex}__"
 
 
 async def run_migrations_online() -> None:

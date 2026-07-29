@@ -1,16 +1,20 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { Github, Linkedin } from "lucide-react";
+import { Github, Linkedin, Menu, X, LogOut, LogIn } from "lucide-react";
+import { useState } from "react";
+import { logout, getToken } from "../../lib/api";
 
 const GITHUB_URL = "https://github.com/tanmay-alpha/Crucible";
 const LINKEDIN_URL = "https://www.linkedin.com/in/tanmaymangal/";
 
-const NAV: { to: string; label: string }[] = [
+const NAV_ITEMS: { to: string; label: string; auth?: boolean }[] = [
   { to: "/", label: "Home" },
   { to: "/fraud", label: "Fraud Demo" },
   { to: "/playground", label: "Playground" },
+  { to: "/models", label: "Models" },
+  { to: "/dashboard", label: "Dashboard", auth: true },
+  { to: "/api-keys", label: "API Keys", auth: true },
   { to: "/benchmark", label: "Benchmark" },
-  { to: "/dashboard", label: "Dashboard" },
   { to: "/docs", label: "Docs" },
 ];
 
@@ -32,6 +36,18 @@ function LogoMark() {
 
 export function CrucibleLayout({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(() => !!localStorage.getItem("crucible_token"));
+  const [userEmail, setUserEmail] = useState(() => localStorage.getItem("crucible_user") || "");
+
+  const handleLogout = () => {
+    logout();
+    setIsLoggedIn(false);
+    setUserEmail("");
+    setMenuOpen(false);
+  };
+
+  const visibleNav = NAV_ITEMS.filter((n) => !n.auth || isLoggedIn);
 
   return (
     <div className="crucible">
@@ -42,7 +58,7 @@ export function CrucibleLayout({ children }: { children: ReactNode }) {
             CRUCIBLE
           </Link>
           <nav className="c-nav" aria-label="Primary">
-            {NAV.map((n) => {
+            {visibleNav.map((n) => {
               const active = n.to === "/" ? pathname === "/" : pathname.startsWith(n.to);
               return (
                 <Link
@@ -56,10 +72,83 @@ export function CrucibleLayout({ children }: { children: ReactNode }) {
               );
             })}
           </nav>
-          <a href={GITHUB_URL} className="c-nav-source" target="_blank" rel="noreferrer noopener">
-            <Github size={13} /> SOURCE
-          </a>
+
+          <div className="c-nav-actions">
+            {isLoggedIn ? (
+              <>
+                <span className="c-user-badge" title={userEmail}>
+                  {userEmail.split("@")[0]}
+                </span>
+                <button
+                  onClick={handleLogout}
+                  className="c-nav-link"
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                  aria-label="Log out"
+                >
+                  <LogOut size={13} />
+                  <span className="c-nav-link-label">Logout</span>
+                </button>
+              </>
+            ) : (
+              <Link to="/login" className="c-nav-link c-nav-cta">
+                <LogIn size={13} />
+                <span className="c-nav-link-label">Login</span>
+              </Link>
+            )}
+            <a href={GITHUB_URL} className="c-nav-source" target="_blank" rel="noreferrer noopener">
+              <Github size={13} /> <span className="c-nav-link-label">Source</span>
+            </a>
+            <button
+              className="c-mobile-toggle"
+              aria-label="Toggle navigation"
+              onClick={() => setMenuOpen(!menuOpen)}
+            >
+              {menuOpen ? <X size={22} /> : <Menu size={22} />}
+            </button>
+          </div>
         </div>
+
+        {menuOpen && (
+          <nav className="c-mobile-nav" aria-label="Mobile primary">
+            {visibleNav.map((n) => {
+              const active = n.to === "/" ? pathname === "/" : pathname.startsWith(n.to);
+              return (
+                <Link
+                  key={n.to}
+                  to={n.to}
+                  className={`c-mobile-nav-link${active ? " active" : ""}`}
+                  onClick={() => setMenuOpen(false)}
+                >
+                  {n.label}
+                </Link>
+              );
+            })}
+            {isLoggedIn && (
+              <button
+                onClick={handleLogout}
+                className="c-mobile-nav-link"
+                style={{
+                  textAlign: "left",
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  font: "inherit",
+                }}
+              >
+                Logout ({userEmail.split("@")[0]})
+              </button>
+            )}
+            {!isLoggedIn && (
+              <Link
+                to="/login"
+                className="c-mobile-nav-link c-mobile-cta"
+                onClick={() => setMenuOpen(false)}
+              >
+                Login
+              </Link>
+            )}
+          </nav>
+        )}
       </header>
       <main>{children}</main>
 

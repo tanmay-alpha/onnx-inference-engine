@@ -30,19 +30,33 @@ services:
       # Auth — MUST set these in production
       CRUCIBLE_API_KEY: ${CRUCIBLE_API_KEY}
       CRUCIBLE_SECRET_KEY: ${CRUCIBLE_SECRET_KEY}
+      # Supabase
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_STORAGE_BUCKET: ${SUPABASE_STORAGE_BUCKET:-models}
       # CORS — set to your frontend URL
       CRUCIBLE_CORS_ORIGINS: ${CRUCIBLE_CORS_ORIGINS:-http://localhost:3000}
       INFERENCE_TIMEOUT_SEC: 60
       MAX_UPLOAD_BYTES: 209715200
+      MAX_REQUEST_BODY_BYTES: 10485760
+      MAX_INPUT_ELEMENTS: 50000000
       CRUCIBLE_LOG_LEVEL: INFO
+      CRUCIBLE_LOG_FORMAT: console
     ports:
       - "8000:8000"
     volumes:
       - ./models:/app/models
       - ./data:/app/data
+      - supabase_storage:/app/supabase_storage
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     command: >
       sh -c "
@@ -73,7 +87,7 @@ services:
 
   # ─── Prometheus (metrics collection) ───────────────────────────────────────
   prometheus:
-    image: prom/prometheus:v2.49.0
+    image: prom/prometheus:v2.47.0
     container_name: onnx-inference-prometheus
     ports:
       - "9090:9090"
@@ -87,12 +101,12 @@ services:
 
   # ─── Grafana (metrics dashboard) ───────────────────────────────────────────
   grafana:
-    image: grafana/grafana:11.0.0
+    image: grafana/grafana:10.3.0
     container_name: onnx-inference-grafana
     ports:
       - "3001:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SERVER_ROOT_URL: ${GF_SERVER_ROOT_URL:-http://localhost:3001}
     volumes:
@@ -107,6 +121,8 @@ volumes:
   grafana_data:
     driver: local
   prometheus_data:
+    driver: local
+  supabase_storage:
     driver: local
 
 networks:

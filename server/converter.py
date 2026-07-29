@@ -58,12 +58,12 @@ import torch.nn as nn
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
-CRUCIBLE_OPSET = 13  # See file header for why 13 specifically.
+CRUCIBLE_OPSET = 13  # ONNX opset version for torch.onnx.export.
 
-# Models are persisted under this directory. The default matches the
-# config key in .env.example. This is the ONLY directory the converter
-# will write to; we validate that explicitly to prevent path traversal.
-_DEFAULT_MODEL_DIR = os.environ.get("CRUCIBLE_MODEL_DIR", "/tmp/models")
+
+def _get_model_dir() -> Path:
+    """Resolve the model directory from env, with fallback."""
+    return Path(os.environ.get("CRUCIBLE_MODEL_DIR", "/tmp/models")).resolve()
 
 
 def _resolve_safe_path(output_path: Union[str, Path]) -> Path:
