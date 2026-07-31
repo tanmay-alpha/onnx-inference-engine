@@ -72,5 +72,5 @@ jobs:
       - name: Run pytest
         env:
           CRUCIBLE_API_KEY: crucible-development-api-key
-          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          DATABASE_URL: "sqlite+aiosqlite:///./test_ci.db"
         run: python -m pytest server/tests -v --tb=short
