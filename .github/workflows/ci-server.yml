@@ -19,12 +19,12 @@ name: CI — Python Server (pytest)
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'server/**'
       - '.github/workflows/ci-server.yml'
   pull_request:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'server/**'
       - '.github/workflows/ci-server.yml'
@@ -62,6 +62,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu \
             torch==2.3.0
+          pip install pytest pytest-asyncio email-validator
           pip install -r server/requirements.txt
 
       # ── 5. Run tests ──────────────────────────────────────────────────────────
@@ -71,5 +72,5 @@ jobs:
       - name: Run pytest
         env:
           CRUCIBLE_API_KEY: crucible-development-api-key
-          DATABASE_URL: sqlite+aiosqlite:///:memory:
+          DATABASE_URL: "sqlite+aiosqlite:///./test_ci.db"
         run: python -m pytest server/tests -v --tb=short
