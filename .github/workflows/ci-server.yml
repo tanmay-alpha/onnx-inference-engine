@@ -19,12 +19,12 @@ name: CI — Python Server (pytest)
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'server/**'
       - '.github/workflows/ci-server.yml'
   pull_request:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'server/**'
       - '.github/workflows/ci-server.yml'

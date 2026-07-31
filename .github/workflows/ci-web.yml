@@ -20,12 +20,12 @@ name: CI — Web (TypeScript + ESLint)
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'web/**'
       - '.github/workflows/ci-web.yml'
   pull_request:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'web/**'
       - '.github/workflows/ci-web.yml'
