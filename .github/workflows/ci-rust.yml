@@ -21,13 +21,13 @@ name: CI — Rust (WASM + CLI)
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'cli/**'
       - 'wasm/**'
       - '.github/workflows/ci-rust.yml'
   pull_request:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'cli/**'
       - 'wasm/**'

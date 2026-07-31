@@ -15,12 +15,12 @@ name: CI — C++ Engine
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'engine/**'
       - '.github/workflows/ci-engine.yml'
   pull_request:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - 'engine/**'
       - '.github/workflows/ci-engine.yml'
