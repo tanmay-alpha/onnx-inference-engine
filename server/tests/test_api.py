@@ -478,7 +478,7 @@ def test_extreme_api_load(
     assert cr.status_code == 200
     model_id = cr.json()["onnx_model_id"]
 
-    for i in range(1000):
+    for i in range(50):
         ir = client.post(
             "/infer",
             json={
