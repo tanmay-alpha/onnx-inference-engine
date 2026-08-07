@@ -232,3 +232,29 @@ TEST(ActivationsTest, GeluSourceUnchanged) {
         EXPECT_FLOAT_EQ(input.data()[i], snapshot.data()[i]);
     }
 }
+
+TEST(ActivationsTest, TanhForward) {
+    Tensor input = make<float>({3}, {0.0f, 1.0f, -1.0f});
+    Tensor output = crucible::ops::tanh_forward(input, kNoAttrs);
+    EXPECT_FLOAT_EQ(output.at({0}), 0.0f);
+    EXPECT_NEAR(output.at({1}), std::tanh(1.0f), 1e-5f);
+    EXPECT_NEAR(output.at({2}), std::tanh(-1.0f), 1e-5f);
+}
+
+TEST(ActivationsTest, LeakyReluForward) {
+    Tensor input = make<float>({3}, {-2.0f, 0.0f, 2.0f});
+    std::unordered_map<std::string, float> attrs{{"alpha", 0.1f}};
+    Tensor output = crucible::ops::leaky_relu_forward(input, attrs);
+    EXPECT_FLOAT_EQ(output.at({0}), -0.2f);
+    EXPECT_FLOAT_EQ(output.at({1}), 0.0f);
+    EXPECT_FLOAT_EQ(output.at({2}), 2.0f);
+}
+
+TEST(ActivationsTest, EluForward) {
+    Tensor input = make<float>({3}, {-1.0f, 0.0f, 1.0f});
+    std::unordered_map<std::string, float> attrs{{"alpha", 1.0f}};
+    Tensor output = crucible::ops::elu_forward(input, attrs);
+    EXPECT_NEAR(output.at({0}), std::exp(-1.0f) - 1.0f, 1e-5f);
+    EXPECT_FLOAT_EQ(output.at({1}), 0.0f);
+    EXPECT_FLOAT_EQ(output.at({2}), 1.0f);
+}

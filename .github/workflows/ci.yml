@@ -1,0 +1,49 @@
+name: Crucible Engine CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test-python-and-verification:
+    name: Test Suite & System Verification (Python & C++ ABI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r server/requirements.txt
+          pip install pytest pytest-asyncio numpy onnx onnxruntime requests
+
+      - name: Run Server Pytest Suite
+        run: |
+          cd server
+          python -m pytest -v
+
+      - name: Run System Verification Script
+        run: |
+          python scripts/verify_system.py
+
+  test-rust-wasm:
+    name: Test Rust WebAssembly Crate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust WASM Tests
+        run: |
+          cd wasm
+          cargo test

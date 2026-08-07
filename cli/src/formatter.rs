@@ -178,3 +178,27 @@ unsafe fn read_c_str_array(ptr: *const *const c_char, num: i32) -> Vec<String> {
 pub fn flush() {
     let _ = std::io::stdout().flush();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_bench_json() {
+        let val = format_bench_json(10, 10.0, 9.5, 12.0, 13.0, 8.0, 14.0);
+        assert_eq!(val["runs"], 10);
+        assert_eq!(val["mean_ms"], 10.0);
+        assert_eq!(val["throughput_inf_per_sec"], 100.0);
+    }
+
+    #[test]
+    fn test_format_tensor_summary() {
+        let t = Tensor {
+            shape: vec![1, 3],
+            data: vec![1.0, 2.0, 3.0],
+        };
+        let s = format_tensor_summary(&t, 2);
+        assert!(s.contains("shape: [1, 3]"));
+        assert!(s.contains("first 2 of 3"));
+    }
+}

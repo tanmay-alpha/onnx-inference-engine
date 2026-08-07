@@ -205,4 +205,42 @@ Tensor gelu_forward(const Tensor& input,
     return out;
 }
 
+// ----------------------------------------------------------------------
+
+Tensor tanh_forward(const Tensor& input,
+                    const std::unordered_map<std::string, float>& /*attrs*/) {
+    Tensor out(input.shape(), 0.0f);
+    if (input.size() == 0) return out;
+    view1d(out) = view1d(input).unaryExpr([](float x) {
+        return std::tanh(x);
+    });
+    return out;
+}
+
+// ----------------------------------------------------------------------
+
+Tensor leaky_relu_forward(const Tensor& input,
+                          const std::unordered_map<std::string, float>& attrs) {
+    float alpha = get_attr(attrs, "alpha", 0.01f);
+    Tensor out(input.shape(), 0.0f);
+    if (input.size() == 0) return out;
+    view1d(out) = view1d(input).unaryExpr([alpha](float x) {
+        return x >= 0.0f ? x : alpha * x;
+    });
+    return out;
+}
+
+// ----------------------------------------------------------------------
+
+Tensor elu_forward(const Tensor& input,
+                   const std::unordered_map<std::string, float>& attrs) {
+    float alpha = get_attr(attrs, "alpha", 1.0f);
+    Tensor out(input.shape(), 0.0f);
+    if (input.size() == 0) return out;
+    view1d(out) = view1d(input).unaryExpr([alpha](float x) {
+        return x >= 0.0f ? x : alpha * (std::exp(x) - 1.0f);
+    });
+    return out;
+}
+
 }  // namespace crucible::ops
