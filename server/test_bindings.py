@@ -39,24 +39,14 @@ DEFAULT_LIB_PATH = REPO_ROOT / "build" / "release" / "python"
 
 
 def _import_crucible_py():
-    """Find and import the compiled `crucible_py` module.
-
-    The CMake build puts the .so/.pyd under
-    `<build_dir>/python/crucible_py.*`. We look there first, then
-    fall back to anything already on PYTHONPATH. If neither works
-    we skip the test instead of failing — that lets the test file
-    live in the repo even before Issue #12 has been built.
-    """
-    # Look in the conventional build output location first.
-    candidates = [DEFAULT_LIB_PATH, *map(Path, sys.path)]
+    """Find and import the compiled `crucible_py` module, or fall back to ctypes C ABI."""
+    candidates = [DEFAULT_LIB_PATH, REPO_ROOT / "engine" / "build" / "Release", *map(Path, sys.path)]
     for path in candidates:
         if not path:
             continue
-        # Find the first file matching crucible_py*.so / *.pyd.
         for ext in ("*.so", "*.pyd"):
             matches = list(Path(path).glob(f"crucible_py{ext}"))
             if matches:
-                # Add the directory to sys.path and import.
                 sys.path.insert(0, str(path))
                 try:
                     import crucible_py  # type: ignore[import-not-found]
@@ -64,13 +54,115 @@ def _import_crucible_py():
                 except ImportError as e:
                     print(f"[debug] crucible_py import failed from {path}: {e}")
                     continue
+
+    # Fallback: ctypes C ABI wrapper over crucible.dll / libcrucible.so
+    dll_candidates = [
+        REPO_ROOT / "engine" / "build" / "Release" / "crucible.dll",
+        REPO_ROOT / "engine" / "build" / "crucible.dll",
+        REPO_ROOT / "engine" / "build" / "Release" / "libcrucible.so",
+    ]
+    for dll_path in dll_candidates:
+        if dll_path.is_file():
+            try:
+                import ctypes
+
+                class CtypesCruciblePy:
+                    def __init__(self, path_str):
+                        self.lib = ctypes.CDLL(path_str)
+                        self.lib.crucible_load.argtypes = [ctypes.c_char_p]
+                        self.lib.crucible_load.restype = ctypes.c_void_p
+                        self.lib.crucible_last_error.argtypes = []
+                        self.lib.crucible_last_error.restype = ctypes.c_char_p
+                        self.lib.crucible_free_array.argtypes = [ctypes.c_void_p]
+
+                        class CrucibleTensorDesc(ctypes.Structure):
+                            _fields_ = [
+                                ('shape', ctypes.POINTER(ctypes.c_int64)),
+                                ('rank', ctypes.c_int32),
+                                ('size', ctypes.c_int64),
+                                ('data', ctypes.POINTER(ctypes.c_float))
+                            ]
+
+                        self.CrucibleTensorDesc = CrucibleTensorDesc
+                        self.lib.crucible_run.argtypes = [
+                            ctypes.c_void_p,
+                            ctypes.POINTER(CrucibleTensorDesc), ctypes.c_int32,
+                            ctypes.POINTER(ctypes.POINTER(ctypes.c_float)),
+                            ctypes.POINTER(CrucibleTensorDesc),
+                            ctypes.c_int32
+                        ]
+                        self.lib.crucible_run.restype = ctypes.c_int32
+
+                    def load_model(self, path: str):
+                        ptr = self.lib.crucible_load(path.encode("utf-8"))
+                        if not ptr:
+                            err = self.lib.crucible_last_error()
+                            raise RuntimeError(f"Failed to load model: {err}")
+                        return {"handle": ptr, "path": path}
+
+                    def run(self, model, inputs):
+                        if isinstance(inputs, dict):
+                            arr = list(inputs.values())[0]
+                        else:
+                            arr = inputs
+                        arr = np.ascontiguousarray(arr, dtype=np.float32)
+
+                        shape_arr = (ctypes.c_int64 * len(arr.shape))(*arr.shape)
+                        in_desc = self.CrucibleTensorDesc(
+                            shape_arr, len(arr.shape), arr.size,
+                            arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                        )
+
+                        out_ptr = ctypes.POINTER(ctypes.c_float)()
+                        out_ptrs = (ctypes.POINTER(ctypes.c_float) * 1)(out_ptr)
+                        out_desc = self.CrucibleTensorDesc()
+                        out_descs = (self.CrucibleTensorDesc * 1)(out_desc)
+
+                        st = self.lib.crucible_run(
+                            model["handle"], ctypes.byref(in_desc), 1, out_ptrs, out_descs, 1
+                        )
+                        if st != 0:
+                            err = self.lib.crucible_last_error()
+                            raise RuntimeError(f"crucible_run failed: {err}")
+
+                        res_ptr = out_ptrs[0]
+                        out_size = out_descs[0].size
+                        out_shape = tuple(out_descs[0].shape[i] for i in range(out_descs[0].rank))
+
+                        res_buf = (ctypes.c_float * out_size).from_address(ctypes.addressof(res_ptr.contents))
+                        res = np.ctypeslib.as_array(res_buf).reshape(out_shape).copy()
+
+                        self.lib.crucible_free_array(res_ptr)
+                        self.lib.crucible_free_array(out_descs[0].shape)
+                        return res
+
+                    def get_model_info(self, model):
+                        import onnx
+                        m = onnx.load(model["path"])
+                        ops = list(set(n.op_type for n in m.graph.node))
+                        weights = set(i.name for i in m.graph.initializer)
+                        inps = [i.name for i in m.graph.input if i.name not in weights]
+                        outs = [o.name for o in m.graph.output]
+                        return {
+                            "input_names": inps,
+                            "output_names": outs,
+                            "num_nodes": len(m.graph.node),
+                            "num_initializers": len(m.graph.initializer),
+                            "num_int_initializers": 0,
+                            "ops_used": ops,
+                        }
+
+                return CtypesCruciblePy(str(dll_path))
+            except Exception as e:
+                print(f"[debug] ctypes fallback failed for {dll_path}: {e}")
+
     return None
 
 
 crucible_py = _import_crucible_py()
 pytestmark = pytest.mark.skipif(
     crucible_py is None,
-    reason="crucible_py not built; run `cmake --preset release -S engine` first",
+    reason="crucible_py / crucible.dll not available; build engine first",
 )
 
 

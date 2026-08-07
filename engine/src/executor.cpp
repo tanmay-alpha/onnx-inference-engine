@@ -386,17 +386,16 @@ Tensor run_inference(const Model& model,
             const Tensor& X = require_tensor(tensor_map, ins[0]);
             const auto flat_attrs = flatten_attrs(node.attributes);
             Tensor Y = [&]{
-                if (op == "Relu")     return ops::relu_forward(X, flat_attrs);
-                if (op == "Sigmoid")  return ops::sigmoid_forward(X, flat_attrs);
-                if (op == "Softmax")  return ops::softmax_forward(X, flat_attrs);
-                if (op == "Gelu")     return ops::gelu_forward(X, flat_attrs);
-                // Tanh / LeakyRelu / Elu aren't in the dispatch table
-                // Issue #9 promises — but accepting them with a clear
-                // "not implemented" is friendlier than throwing on an
-                // unknown op_type.
+                if (op == "Relu")      return ops::relu_forward(X, flat_attrs);
+                if (op == "Sigmoid")   return ops::sigmoid_forward(X, flat_attrs);
+                if (op == "Softmax")   return ops::softmax_forward(X, flat_attrs);
+                if (op == "Gelu")      return ops::gelu_forward(X, flat_attrs);
+                if (op == "Tanh")      return ops::tanh_forward(X, flat_attrs);
+                if (op == "LeakyRelu") return ops::leaky_relu_forward(X, flat_attrs);
+                if (op == "Elu")       return ops::elu_forward(X, flat_attrs);
                 throw std::runtime_error(
                     "run_inference: operator '" + op +
-                    "' is on the dispatch list but not yet implemented");
+                    "' is not implemented");
             }();
             for (const auto& o : outs) tensor_map[o] = Y;
         }

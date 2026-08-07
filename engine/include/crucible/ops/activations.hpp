@@ -52,4 +52,18 @@ Tensor softmax_forward(const Tensor& input,
 Tensor gelu_forward(const Tensor& input,
                     const std::unordered_map<std::string, float>& attrs);
 
+// Tanh: y = tanh(x). Element-wise. No attributes.
+Tensor tanh_forward(const Tensor& input,
+                    const std::unordered_map<std::string, float>& attrs);
+
+// LeakyRelu: y = x >= 0 ? x : alpha * x. Element-wise.
+// Recognised attributes: alpha (default 0.01).
+Tensor leaky_relu_forward(const Tensor& input,
+                          const std::unordered_map<std::string, float>& attrs);
+
+// Elu: y = x >= 0 ? x : alpha * (exp(x) - 1). Element-wise.
+// Recognised attributes: alpha (default 1.0).
+Tensor elu_forward(const Tensor& input,
+                   const std::unordered_map<std::string, float>& attrs);
+
 }  // namespace crucible::ops

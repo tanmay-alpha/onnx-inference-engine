@@ -804,6 +804,16 @@ def health() -> HealthResponse:
     )
 
 
+@app.get("/ready", response_model=HealthResponse)
+def readiness() -> HealthResponse:
+    """Readiness probe. Checks engine & DB readiness before accepting traffic."""
+    return HealthResponse(
+        status="ready",
+        engine=_engine_name(),
+        version=SERVER_VERSION,
+    )
+
+
 @app.get("/operators", response_model=OperatorsResponse)
 def get_operators() -> OperatorsResponse:
     """Catalogue of op_type strings Crucible can dispatch."""

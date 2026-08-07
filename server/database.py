@@ -253,8 +253,15 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 def init_db() -> None:
     """Create all tables (development only — use Alembic in production)."""
+    from sqlalchemy import text
     engine = _get_sync_engine()
     Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE inference_logs ADD COLUMN engine VARCHAR(100) DEFAULT 'unknown'"))
+            conn.commit()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

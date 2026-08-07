@@ -74,9 +74,9 @@ def make_gemm():
     """Single Gemm node with alpha=2.0, beta=0.5, transB=1."""
     X_info = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3])
     Y_info = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 2])
-    B = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32)
+    B = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
     C = np.array([[0.1, -0.1]], dtype=np.float32)
-    B_init = helper.make_tensor("B", TensorProto.FLOAT, [3, 2], B.tobytes(), raw=True)
+    B_init = helper.make_tensor("B", TensorProto.FLOAT, [2, 3], B.tobytes(), raw=True)
     C_init = helper.make_tensor("C", TensorProto.FLOAT, [1, 2], C.tobytes(), raw=True)
 
     node = helper.make_node("Gemm", ["X", "B", "C"], ["Y"],
