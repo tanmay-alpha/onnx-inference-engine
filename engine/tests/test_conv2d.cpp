@@ -1,6 +1,6 @@
-// GoogleTest cases for crucible::ops::conv2d_forward (Issue #7: Conv2D).
+// GoogleTest cases for crucible::ops::conv2d_forward.
 //
-// The two AC tests required by the plan are:
+// The two core tests are:
 //   * ConvOutputShape     — shape correctness on the canonical
 //                            MobileNetV2 stem: (1,3,224,224) x (32,3,3,3)
 //                            stride=1 pad=0  →  (1,32,222,222).
@@ -9,7 +9,7 @@
 //
 // We hand-derive the 5x5 expected output (no PyTorch dependency at
 // build time, see EXPECTED_OUTPUT comment below) and assert tolerance
-// 1e-4 as required by the plan.
+// 1e-4.
 
 #include "crucible/ops/conv2d.hpp"
 #include "crucible/tensor.hpp"
@@ -33,7 +33,7 @@ Tensor make(const std::vector<int64_t>& shape, const std::vector<T>& data) {
 }  // namespace
 
 // -----------------------------------------------------------------------
-// Plan AC test #1 — output shape correctness
+// Output shape correctness
 // -----------------------------------------------------------------------
 
 TEST(Conv2D, ConvOutputShape) {
@@ -57,7 +57,7 @@ TEST(Conv2D, ConvOutputShape) {
 }
 
 // -----------------------------------------------------------------------
-// Plan AC test #2 — matches PyTorch to 1e-4
+// Matches PyTorch to 1e-4
 // -----------------------------------------------------------------------
 //
 // Hand-derived reference. We compute Y[i,j] = Σ_{kh,kw} X[i+kh, j+kw] *
@@ -113,7 +113,7 @@ TEST(Conv2D, ConvMatchesPyTorch) {
 }
 
 // -----------------------------------------------------------------------
-// Additional tests covering the rest of the Issue #7 contract
+// Additional tests: bias, stride, padding, groups and error cases
 // -----------------------------------------------------------------------
 
 TEST(Conv2D, WithBiasPerChannel) {

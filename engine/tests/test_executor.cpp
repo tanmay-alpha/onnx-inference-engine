@@ -1,7 +1,7 @@
 // GoogleTest cases for crucible::topological_sort and
-// crucible::run_inference (Issue #9: graph executor).
+// crucible::run_inference (graph executor).
 //
-// AC test required by the plan:
+// Core test:
 //   * RunsThreeNodeGraph — MatMul(A, B) → Relu → Softmax, with
 //                          A as a 1x2 input and B as a 2x4 weight
 //                          initializer of all 0.5. The expected
@@ -242,7 +242,7 @@ TEST(Executor, DanglingInputThrows) {
 }
 
 // -----------------------------------------------------------------------
-// Issue #10: end-to-end MobileNetV2.
+// End-to-end MobileNetV2.
 //
 // Loads the real mobilenet-v2-7.onnx from the model zoo, feeds a zero
 // tensor of shape (1, 3, 224, 224), and asserts that:
@@ -250,9 +250,9 @@ TEST(Executor, DanglingInputThrows) {
 //     ImageNet-1k classifier head)
 //   * it does so without crashing
 //
-// We don't assert the top-1 class index here — that needs a real
-// ImageNet image and is covered by the benchmarks/ scripts in
-// Issue #14. The AC for Issue #10 is "shape (1, 1000), no crash".
+// We don't assert the top-1 class index here; top-1 agreement with
+// ONNX Runtime is checked in engine/tests/python/test_parity.py. This
+// test only checks "shape (1, 1000), no crash".
 //
 // The test path is `../../models/mobilenet_v2.onnx` relative to the
 // test working directory, which is `engine/build/{preset}/`. Both

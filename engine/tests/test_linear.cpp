@@ -1,5 +1,5 @@
 // GoogleTest cases for crucible::ops::matmul and crucible::ops::gemm
-// (Issue #5: Linear operator).
+// (MatMul / Gemm).
 //
 // Both ops take crucibe::Tensor arguments and return a Tensor. Inputs and
 // outputs are float32 and stored row-major.
@@ -127,7 +127,7 @@ TEST(MatMul, ShapeMismatchThrows) {
 }
 
 TEST(MatMul, OneDimensionalNotSupported) {
-    // Issue #5 scope is 2D only — vector inputs should throw.
+    // ops::matmul is 2D only — vector inputs should throw.
     Tensor a = make<float>({4}, {1, 2, 3, 4});
     Tensor b = make<float>({4, 2}, {1, 0, 0, 1, 1, 0, 0, 1});
     EXPECT_THROW(matmul(a, b), std::invalid_argument);

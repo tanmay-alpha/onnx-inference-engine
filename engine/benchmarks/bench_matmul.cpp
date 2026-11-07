@@ -1,4 +1,4 @@
-// Google Benchmark — crucible::ops::matmul (Issue #11).
+// Google Benchmark — crucible::ops::matmul.
 //
 // Measures end-to-end throughput of our 2D matrix multiply across three
 // sizes that span the regime Crucible actually runs:

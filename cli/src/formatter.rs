@@ -1,9 +1,8 @@
 //! Output formatting for the four CLI commands.
 //!
 //! Two modes: text (human-readable) and JSON (machine-readable).
-//! JSON is selected with --json; the schemas are stable enough that
-//! downstream tools (CI dashboards, the Issue #18 chart) can consume
-//! them without a hand-rolled parser.
+//! JSON is selected with --json so scripts can consume the output
+//! without a hand-rolled parser.
 //!
 //! Why one file? Every command emits different shapes; grouping
 //! them by "thing being printed" (info, prediction, bench stats,

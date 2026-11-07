@@ -184,7 +184,7 @@ int64_t Tensor::compute_offset(const std::vector<int64_t>& indices) const {
 }
 
 // -----------------------------------------------------------------------------
-// Shape operations (Issue #3)
+// Shape operations
 // -----------------------------------------------------------------------------
 
 Tensor Tensor::reshape(std::vector<int64_t> new_shape) const {
@@ -200,7 +200,7 @@ Tensor Tensor::reshape(std::vector<int64_t> new_shape) const {
             " into shape with product " + std::to_string(new_total));
     }
 
-    // The data buffer is copied (no aliasing); the plan promises Tensor is
+    // The data buffer is copied (no aliasing); Tensor is
     // its own copy on every operation. Assign the members directly so the
     // buffer is allocated once, not zero-filled and then overwritten.
     Tensor out;

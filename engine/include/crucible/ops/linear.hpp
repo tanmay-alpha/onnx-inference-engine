@@ -1,4 +1,4 @@
-// Linear operators — Issue #5.
+// Linear operators.
 //
 // Implements:
 //   * matmul(A, B)       — plain 2D matrix multiplication (ONNX MatMul)

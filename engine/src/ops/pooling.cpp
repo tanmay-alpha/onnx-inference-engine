@@ -170,7 +170,7 @@ Tensor avgpool_forward(const Tensor& x,
 }
 
 // --------------------------------------------------------------------
-// GlobalAveragePool — Issue #10.
+// GlobalAveragePool.
 //
 // Reduces each (N, C) feature map to a single scalar by averaging the
 // full H*W plane. Output shape is (N, C, 1, 1); the unit spatial

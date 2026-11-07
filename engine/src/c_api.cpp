@@ -1,5 +1,5 @@
 // =============================================================================
-// Crucible C ABI implementation — Issue #15 (Rust CLI bridge).
+// Crucible C ABI implementation (used by the Rust CLI).
 //
 // The contract lives in engine/include/crucible/c_api.h. This file
 // is a thin `extern "C"` wrapper over the C++ engine: it owns the

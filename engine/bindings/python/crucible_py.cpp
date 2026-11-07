@@ -1,5 +1,5 @@
 // =============================================================================
-// Crucible — pybind11 module (Issue #12)
+// Crucible — pybind11 module
 //
 // Exposes three entry points to Python:
 //

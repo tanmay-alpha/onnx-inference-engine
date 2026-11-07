@@ -1,4 +1,4 @@
-// Normalization operator — Issue #8 (BatchNormalization only).
+// Normalization operator (BatchNormalization only).
 //
 // Implements the ONNX `BatchNormalization` operator in **inference
 // mode** (training_mode = 0), which is what Crucible needs to run
@@ -15,7 +15,7 @@
 // so the inner loop is one FMA per element — same shape as the conv
 // post-processing pass in conv2d.cpp. Training mode (computing the
 // mini-batch mean/variance and updating the running statistics) is
-// out of scope for Issue #8: training happens in PyTorch, Crucible
+// not implemented: training happens in PyTorch, Crucible
 // only runs the exported model.
 
 #pragma once

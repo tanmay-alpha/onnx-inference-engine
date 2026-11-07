@@ -1,4 +1,4 @@
-.PHONY: help install install-server install-web install-engine submodules test test-server test-web test-engine lint format clean db-upgrade db-migrate docker-up docker-down build-all
+.PHONY: help install install-server install-web install-engine submodules test test-server test-web test-engine lint format clean db-upgrade db-migrate docker-up docker-down build-all train-model
 
 # Engine build directory (Release, tests + Python bindings + shared lib).
 ENGINE_BUILD ?= build/release
@@ -43,9 +43,8 @@ help:
 	@echo "  make docker-down      Stop Docker Compose stack"
 	@echo "  make docker-build     Build all Docker images"
 	@echo ""
-	@echo "ML Pipeline:"
-	@echo "  make prepare-data     Prepare fraud detection dataset"
-	@echo "  make train-model      Train fraud detection model"
+	@echo "Fraud model:"
+	@echo "  make train-model      Retrain the fraud model into /tmp/fraud (compare with models/fraud/)"
 	@echo ""
 	@echo "WASM & CLI:"
 	@echo "  make wasm             Build the browser WASM runtime (wasm-pack) into web/public/wasm + wasm/pkg"
@@ -151,15 +150,10 @@ docker-build:
 docker-logs:
 	docker compose logs -f
 
-# ─── ML Pipeline ─────────────────────────────────────────────────────────────
-
-prepare-data:
-	cd server && python -m server.ml.prepare_dataset --synthetic --samples 50000
-	@echo "✓ Dataset prepared"
+# ─── Fraud model ─────────────────────────────────────────────────────────────
 
 train-model:
-	cd server && python -m server.ml.training --synthetic
-	@echo "✓ Model trained and exported"
+	python models/fraud/train_fraud_model.py --out-dir /tmp/fraud
 
 # ─── Build ───────────────────────────────────────────────────────────────────
 

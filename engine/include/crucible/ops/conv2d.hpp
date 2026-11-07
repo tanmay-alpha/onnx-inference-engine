@@ -21,8 +21,8 @@
 //   * Bias  B : (C_out,)               row-major float32 (optional)
 //   * Output Y: (N, C_out, out_h, out_w)
 //
-// Issue #7 scope: stride/pad on both spatial axes, groups == 1.
-// groups > 1 is parsed but not implemented (matches the plan AC).
+// Supported: stride/pad on both spatial axes and any groups that divide
+// C_in and C_out (including depthwise, groups == C_in).
 
 #pragma once
 
@@ -55,7 +55,7 @@ struct ConvParams {
 // Throws std::invalid_argument on:
 //   * rank != 4 for X or W
 //   * C_in mismatch (X.shape[1] != W.shape[1] * p.groups)
-//   * groups != 1 (out of scope for Issue #7)
+//   * groups <= 0, or C_in / C_out not divisible by groups
 //   * non-positive output spatial dim
 Tensor conv2d_forward(const Tensor& input,
                      const Tensor& weight,

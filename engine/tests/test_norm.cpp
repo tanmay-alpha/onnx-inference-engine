@@ -1,7 +1,7 @@
 // GoogleTest cases for crucible::ops::batchnorm_forward
-// (Issue #8: BatchNormalization inference mode).
+// (BatchNormalization inference mode).
 //
-// The AC test required by the plan:
+// Core test:
 //   * BatchNormNormalizes — when running_mean=0 and running_var=1,
 //                           the output should be close to the input
 //                           (only off by the scale/bias affine and
@@ -33,7 +33,7 @@ Tensor make(const std::vector<int64_t>& shape, const std::vector<T>& data) {
 }  // namespace
 
 // -----------------------------------------------------------------------
-// Plan AC test
+// Core test
 // -----------------------------------------------------------------------
 
 TEST(BatchNorm, BatchNormNormalizes) {

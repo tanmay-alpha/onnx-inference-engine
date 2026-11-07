@@ -8,14 +8,14 @@
 // Every Tensor is its own copy. The cost is a memcpy on operator=, the win
 // is predictable performance and no cache-line bouncing on shared mutation.
 //
-// Design choices (see ENGINEERING_PLAN.md §4):
+// Design choices:
 //   - Shape: std::vector<int64_t>. int64 to match ONNX's int64 dimensions
 //     without surprise truncation when models are large.
 //   - Storage: std::vector<float>. Heap-allocated only for non-empty tensors;
 //     an empty tensor has data() == nullptr.
 //   - Layout: row-major (C-order). PyTorch / NumPy / ONNX Runtime all default
-//     to row-major, so this minimises friction when we add the Python
-//     bindings in Issue #12.
+//     to row-major, so the Python bindings can hand buffers to NumPy
+//     without transposing.
 //   - Indexing: at({i, j, k}) computes offset = i * (D2*D3) + j * D3 + k.
 //     O(rank) per access. Real hot loops will use data() directly.
 //   - Bounds checks: at() throws std::out_of_range on bad indices. These
@@ -24,8 +24,7 @@
 //     a rounding error compared to the operator work.
 //   - reshape / flatten: return NEW tensors (no aliasing). Source untouched.
 //     Copying a 224*224*3 float buffer is 600 KB — cheap, and removes a
-//     whole class of lifetime bugs that would only surface in Issue #9
-//     (graph executor) and #10 (end-to-end inference).
+//     whole class of lifetime bugs in the graph executor.
 // =============================================================================
 
 #include <cstdint>
@@ -112,7 +111,7 @@ public:
     float&       at(const std::vector<int64_t>& indices);
     const float& at(const std::vector<int64_t>& indices) const;
 
-    // ---- Shape operations (Issue #3) ----------------------------------------
+    // ---- Shape operations ---------------------------------------------------
 
     /// Return a new tensor with the same data viewed under a different shape.
     /// Total element count must match. Throws std::invalid_argument otherwise

@@ -1,11 +1,11 @@
-// 2D pooling operators — Issue #8 + Issue #10.
+// 2D pooling operators.
 //
 // Implements the three pooling operators Crucible needs to run
 // MobileNetV2 and ResNet18 end-to-end:
 //
-//   * MaxPool          — sliding-window max                       (Issue #8)
-//   * AveragePool      — sliding-window arithmetic mean           (Issue #8)
-//   * GlobalAveragePool — per-channel mean over the full HW plane (Issue #10)
+//   * MaxPool          — sliding-window max
+//   * AveragePool      — sliding-window arithmetic mean
+//   * GlobalAveragePool — per-channel mean over the full HW plane
 //
 // The first two are NCHW in / NCHW out, with explicit kernel/stride/pad
 // on each spatial axis. GlobalAveragePool takes the rank-4 input and
@@ -13,11 +13,11 @@
 // "average each feature map to a single number" operator used in the
 // classifier head of every modern image-classification network.
 //
-// Issue #8 scope (per the prompt):
+// Scope:
 //   * rank-4 input (N, C, H, W)
-//   * explicit kernel/stride/pad integers (no auto_pad, no ceil_mode,
-//     no dilation — these belong to a later issue if we hit a model
-//     that needs them)
+//   * explicit kernel/stride/pad integers (no auto_pad other than
+//     NOTSET/VALID, no ceil_mode, no dilation; the executor rejects
+//     these with an error naming the node)
 //   * for AveragePool, count_include_pad selects the denominator:
 //     kH*kW (true, PyTorch default) or in-bounds count (false, ONNX default)
 //

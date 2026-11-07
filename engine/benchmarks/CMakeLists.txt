@@ -1,9 +1,8 @@
 # =============================================================================
 # Crucible — C++ micro-benchmarks (Google Benchmark)
 # =============================================================================
-# Issue #1: scaffold the benchmark target. Real benchmarks (bench_matmul
-# for Issue #11, bench_conv2d later) drop into this directory and CMake
-# picks them up automatically on next configure.
+# Google Benchmark target. Every bench_*.cpp in this directory
+# (bench_matmul, bench_conv2d) is picked up on the next configure.
 # =============================================================================
 
 set(CRUCIBLE_BENCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/google-benchmark)

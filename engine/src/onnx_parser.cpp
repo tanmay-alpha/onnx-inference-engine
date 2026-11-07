@@ -33,7 +33,7 @@
 namespace crucible {
 
 // ONNX TensorProto data_type values (from onnx.proto TensorProto).
-// We only care about FLOAT(1) and INT64(7) for Issue #4.
+// Only FLOAT(1) and INT64(7) initializers are decoded.
 namespace onnx_dtype {
 constexpr int32_t FLOAT  = 1;
 constexpr int32_t INT64  = 7;

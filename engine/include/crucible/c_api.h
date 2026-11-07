@@ -1,9 +1,9 @@
 /*
- * Crucible C ABI — Issue #15 (Rust CLI bridge).
+ * Crucible C ABI (used by the Rust CLI).
  *
  * This header is the contract between the Crucible C++ engine and any
- * non-C++ client (the Rust CLI in cli/, the upcoming WASM module in
- * wasm/, and any future Python/C#/Go bindings). Everything that crosses
+ * non-C++ client (today: the Rust CLI in cli/; the WASM runtime in wasm/
+ * is a separate Rust interpreter and does not use it). Everything that crosses
  * the boundary goes through this file.
  *
  * Design rules:
@@ -33,7 +33,7 @@
  *      two threads sharing a model and calling `crucible_run` would race
  *      on the error string. This is documented at the top of
  *      `crucible_load`. Multithreaded use needs a per-thread model or a
- *      future thread-safety layer (Issue #19 candidate).
+ *      thread-safety layer; neither exists today.
  *
  * Stable API guarantee: functions and structs in this header are
  * versioned. The implementation may gain new fields at the END of
@@ -118,8 +118,8 @@ typedef struct CrucibleModelInfo {
  *  message is then available via crucible_last_error().
  *
  *  NOT THREAD-SAFE: the returned model shares thread-local state with
- *  crucible_run / crucible_free. A future revision will add a
- *  per-handle error buffer; until then, drive one model per thread. */
+ *  crucible_run / crucible_free. There is no per-handle error buffer,
+ *  so drive one model per thread. */
 CRUCIBLE_API CrucibleModel* crucible_load(const char* path);
 
 /** Populate a model-info struct. The caller is responsible for sizing

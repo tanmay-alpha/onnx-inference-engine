@@ -1,4 +1,4 @@
-// Activation functions — Issue #6.
+// Activation functions.
 //
 // Implements four element-wise (or per-axis) non-linearities from the
 // ONNX spec:
@@ -41,7 +41,7 @@ Tensor softmax_forward(const Tensor& input,
                        const std::unordered_map<std::string, float>& attrs);
 
 // GELU using the tanh approximation (the form used by BERT, GPT-2,
-// and most modern transformer stacks). See ENGINEERING_PLAN.md §6.
+// and most modern transformer stacks).
 //
 // Recognised attributes:
 //   approximate — int; if non-zero, use tanh approximation (current

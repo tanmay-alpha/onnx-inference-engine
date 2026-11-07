@@ -152,12 +152,12 @@ function ArchitecturePage() {
             <p className="c-muted" style={{ marginTop: 8 }}>
               A shape like <span className="mono">[N, C, H, W]</span> is one contiguous{" "}
               <span className="mono">float32</span>
-              buffer. Strides for each axis are precomputed once —{" "}
+              buffer. The stride of each axis is the product of the dimensions after it —{" "}
               <span className="mono">stride[i] = shape[i+1] * stride[i+1]</span> — so an index like{" "}
-              <span className="mono">(n, c, h, w)</span> lowers to a single multiply-add. It matters
-              because every MatMul, every Conv, every bias broadcast is ultimately linear reads
-              through this buffer, and the tighter the memory story the more the SIMD lanes stay
-              full.
+              <span className="mono">(n, c, h, w)</span> maps to one offset. MatMul and Gemm view
+              the buffer in place through <span className="mono">Eigen::Map</span>; Conv first
+              unfolds receptive fields with im2col (1×1 stride-1 and depthwise convs skip that
+              step).
             </p>
             <pre className="c-code" style={{ marginTop: 12 }}>
               {`shape   = [1, 3, 224, 224]

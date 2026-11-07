@@ -84,7 +84,7 @@ set(CRUCIBLE_CORE_SOURCES
     src/ops/conv2d.cpp
     src/ops/pooling.cpp
     src/ops/norm.cpp
-    # Issue #15: C ABI for the Rust CLI / WASM bindings.
+    # C ABI for the Rust CLI.
     # Built into the static core so the symbols are always available;
     # also exported via the SHARED library below for the FFI consumers.
     src/c_api.cpp
@@ -97,7 +97,7 @@ add_library(crucible::core ALIAS crucible_core)
 # -----------------------------------------------------------------------------
 # Shared library: crucible (the artifact consumed by the Rust CLI)
 # -----------------------------------------------------------------------------
-# Issue #15: the Rust CLI links against the SHARED library at runtime
+# The Rust CLI links against the SHARED library at runtime
 # (libcrucible.so / libcrucible.dylib / crucible.dll). We mirror the
 # static core's sources into the shared target so the C ABI symbols
 # are visible in exactly one place. BUILD_SHARED_LIBS is OFF by
