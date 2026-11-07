@@ -1,21 +1,15 @@
-// 2D convolution operator — Issue #7.
+// 2D convolution operator.
 //
-// Implements the ONNX `Conv` operator (2D variant only) using the im2col
-// algorithm: every receptive field in the input is materialised as a row
-// of an expanded column matrix, the filters are unrolled into a wide
-// weight matrix, and the convolution collapses into a single large
-// matrix-matrix multiply.
+// Implements the ONNX `Conv` operator (2D variant only). The general path
+// uses im2col: every receptive field is laid out as a column of an
+// expanded matrix and the convolution becomes one GEMM per (image, group).
+// 1x1 stride-1 convolutions skip im2col, and depthwise convolutions use a
+// direct sliding-window loop (see conv2d.cpp).
 //
-// Why im2col?
-//   * It turns the conv into a single GEMM — which Eigen has a tuned,
-//     vectorised implementation for. Hand-rolled nested loops would be
-//     3–10x slower on x86_64 and would require re-implementing tiling
-//     and the FMA path.
-//   * It keeps the operator API trivial: one matrix multiply per
-//     output position, identical to Linear. The plan calls this out
-//     in Issue #7 ("Conv2D took me 3 days and 47 test iterations to
-//     get numerically correct to 1e-4 against PyTorch"). We don't
-//     reinvent the wheel — we reuse Eigen.
+// Why im2col + GEMM?
+//   * It reuses Eigen's blocked, vectorised GEMM instead of hand-tuning
+//     nested loops, at the cost of an im2col buffer of
+//     (C_in/groups * kH * kW) x (out_h * out_w) floats.
 //
 // Public API:
 //   struct ConvParams { int stride_h, stride_w, pad_h, pad_w, groups; };

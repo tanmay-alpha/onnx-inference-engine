@@ -3,19 +3,17 @@
 # =============================================================================
 # Build the core inference library, Python bindings, tests, and benchmarks.
 #
-# Quick start:
-#   cmake --preset debug   -S engine
-#   cmake --build          build/debug
-#   ctest --test-dir       build/debug --output-on-failure
-#
-# Issue #1: this file establishes the build system. Subsequent issues add
-# the Tensor class, ONNX parser, operators, and graph executor.
+# Quick start (from the repo root):
+#   cmake -S engine -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+#         -DCRUCIBLE_ENABLE_TESTS=ON -DCRUCIBLE_ENABLE_PYTHON_BINDINGS=ON
+#   cmake --build build/release
+#   ctest --test-dir build/release --output-on-failure
 # =============================================================================
 
 cmake_minimum_required(VERSION 3.25)
 project(crucible
     VERSION 0.1.0
-    DESCRIPTION "Zero-overhead ONNX inference engine"
+    DESCRIPTION "From-scratch ONNX inference engine (C++17, float32, CPU)"
     LANGUAGES CXX
 )
 

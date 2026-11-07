@@ -1,11 +1,10 @@
 # =============================================================================
 # Crucible — pybind11 Python bindings
 # =============================================================================
-# Issue #1: scaffold the CMake target. Real bindings (load_model, run,
-# get_model_info) land in Issue #12.
-#
-# After building, install the produced .so/.pyd onto PYTHONPATH:
-#   PYTHONPATH=./build/debug python -c "import crucible_py"
+# Builds the `crucible_py` extension (load_model, run, check_model,
+# supported_ops, get_model_info). The module is written to <build>/python
+# (<build>/python/<Config> with multi-config generators):
+#   PYTHONPATH=build/release/python python -c "import crucible_py"
 # =============================================================================
 
 # pybind11 is provided as a git submodule under engine/third_party/pybind11.
@@ -15,7 +14,7 @@ set(CRUCIBLE_PYBIND11_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pybind11
 if(NOT EXISTS "${CRUCIBLE_PYBIND11_DIR}/CMakeLists.txt")
     message(FATAL_ERROR
         "pybind11 submodule not initialised.\n"
-        "Run from repo root:  git submodule update --init --recursive"
+        "Run from repo root:  git submodule update --init --depth 1 engine/third_party/pybind11"
     )
 endif()
 
@@ -23,9 +22,6 @@ endif()
 set(PYBIND11_FINDPYTHON ON CACHE BOOL "" FORCE)
 add_subdirectory(${CRUCIBLE_PYBIND11_DIR} pybind11_build EXCLUDE_FROM_ALL)
 
-# Issue #12 will replace this stub with crucible_py.cpp containing the real
-# pybind11 module definition. For Issue #1 we expose an empty `_crucible_py`
-# so the build stays green.
 pybind11_add_module(crucible_py
     crucible_py.cpp
 )

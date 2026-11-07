@@ -1,8 +1,8 @@
 # =============================================================================
 # Crucible — C++ unit tests (GoogleTest)
 # =============================================================================
-# Issue #1: scaffold the testing target. Real tests arrive alongside each
-# module (test_tensor.cpp in Issue #2, test_onnx_parser.cpp in #4, etc.).
+# One executable (crucible_tests) built from every tests/test_*.cpp; each
+# GoogleTest case is registered with CTest via gtest_discover_tests.
 # =============================================================================
 
 set(CRUCIBLE_GTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/googletest)
@@ -10,7 +10,7 @@ set(CRUCIBLE_GTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/googletest)
 if(NOT EXISTS "${CRUCIBLE_GTEST_DIR}/CMakeLists.txt")
     message(FATAL_ERROR
         "googletest submodule not initialised.\n"
-        "Run from repo root:  git submodule update --init --recursive"
+        "Run from repo root:  git submodule update --init --depth 1 engine/third_party/googletest"
     )
 endif()
 
@@ -21,9 +21,7 @@ set(BUILD_GMOCK   OFF CACHE BOOL "" FORCE)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 add_subdirectory(${CRUCIBLE_GTEST_DIR} gtest_build EXCLUDE_FROM_ALL)
 
-# Discover all test_*.cpp files. Issue #1 contributes a single smoke test
-# (see test_smoke.cpp). Future issues drop in test_tensor.cpp etc. and they
-# will be picked up automatically on the next CMake configure.
+# Every test_*.cpp in this directory is picked up on the next configure.
 file(GLOB CRUCIBLE_TEST_SOURCES CONFIGURE_DEPENDS "test_*.cpp")
 
 add_executable(crucible_tests ${CRUCIBLE_TEST_SOURCES})

@@ -5,13 +5,11 @@
 // Eigen::RowMajor storage order, so layout matches the rest of the
 // engine (PyTorch / NumPy / ONNX Runtime).
 //
-// Why not write our own matmul?
-//   * Eigen gives us a 30-year-battle-tested BLAS integration on
-//     x86_64 (FMA + AVX2 path) and NEON on aarch64. Hand-written
-//     float32 matmul would be 2-5x slower for the same correctness.
-//   * The plan (Issue #5 AC) only requires 1e-5 numerical match
-//     against numpy, which Eigen's default product() provides
-//     out of the box.
+// Why Eigen instead of a hand-written matmul?
+//   * Eigen's GEMM is blocked and vectorised (SSE2 in the portable x86_64
+//     build; AVX/FMA only when built with -DCRUCIBLE_MARCH_NATIVE=ON).
+//     A naive triple loop is much slower and not worth maintaining here.
+//   * Results match ONNX Runtime to ~1e-5 (engine/tests/python/test_parity.py).
 //   * Eigen is header-only — no extra build steps, no .so to ship.
 //
 // The code is C++17, follows the same style as tensor.cpp (RAII,
