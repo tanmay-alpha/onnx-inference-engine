@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Only the submodules the build needs. google-benchmark is only used by
       # CRUCIBLE_ENABLE_BENCHMARKS (off here).
@@ -77,7 +77,7 @@ jobs:
 
       - name: Set up Python
         id: py
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: pip
@@ -93,7 +93,7 @@ jobs:
 
       - name: Cache ccache (Linux)
         if: runner.os == 'Linux'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ccache
           key: ccache-${{ runner.os }}-${{ hashFiles('engine/**/*.cpp', 'engine/**/*.h', 'engine/**/*.hpp', 'engine/**/CMakeLists.txt') }}
@@ -149,7 +149,7 @@ jobs:
 
       - name: Cache Cargo (Linux)
         if: runner.os == 'Linux'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry

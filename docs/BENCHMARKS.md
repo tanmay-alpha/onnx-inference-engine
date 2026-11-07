@@ -96,7 +96,7 @@ path has not been used for the published numbers.
 
 ## Results
 
-Run: `2026-11-07T19:03:55+00:00`, commit `d44218f-dirty`, 20 warmup + 200 timed iterations.
+Run: `2026-11-07T19:14:51+00:00`, commit `e6d815e`, 20 warmup + 200 timed iterations.
 Host: Intel(R) Core(TM) i7-14650HX, 24 logical CPUs, Debian GNU/Linux 12 (bookworm) (kernel 6.18.33.2-microsoft-standard-WSL2), Python 3.11.18, c++ (Debian 12.2.0-14+deb12u1) 12.2.0,
 onnxruntime 1.31.1, torch 2.14.1+cpu. Docker Desktop (WSL2 backend) container on a Windows 11 laptop.
 
@@ -104,15 +104,19 @@ onnxruntime 1.31.1, torch 2.14.1+cpu. Docker Desktop (WSL2 backend) container on
 
 | Model | crucible-native ms | ORT 1 thread ms | Crucible vs ORT-1t | ORT default ms | Crucible vs ORT default | crucible-native-avx2 ms (host-specific) | avx2 vs ORT-1t |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| resnet18 | 107.6 | 26.9 | **4.0× slower** | 5.9 | 18.2× slower | 44.1 | 1.6× slower |
-| mobilenet_v2 | 48.8 | 8.1 | **6.0× slower** | 2.2 | 22.0× slower | 33.9 | 4.2× slower |
+| resnet18 | 113.4 | 30.1 | **3.8× slower** | 7.3 | 15.5× slower | 46.4 | 1.5× slower |
+| mobilenet_v2 | 55.6 | 8.3 | **6.7× slower** | 2.4 | 23.4× slower | 38.1 | 4.6× slower |
 
 On the CNNs, Crucible is **slower than ONNX Runtime**. With one thread on
-both sides, it takes 4.0× as long as ORT on ResNet18 and
-6.0× as long on MobileNetV2. Against ORT's default thread pool the gap is
+both sides, it takes 3.8× as long as ORT on ResNet18 and
+6.7× as long on MobileNetV2. Against ORT's default thread pool the gap is
 much larger. Building with `-march=native` narrows the gap. That build is
 host-specific and is not what ships. Every Crucible output matches ORT within
 about 1e-5, with the same top-1 class.
+
+Ratios change from run to run. The previous run (commit `d44218f-dirty`)
+measured 4.0× and 6.0× against ORT with one thread, so expect these ratios to
+move by roughly ±10% between runs on this laptop.
 
 On the 7-feature fraud model, every runtime finishes in a few microseconds, so
 the numbers mostly measure per-call overhead. Crucible's per-call path is
@@ -126,30 +130,30 @@ Methodology section.
 
 | Model | Input | Runtime | Threads | Median ms | Mean ms | p95 ms | Min ms | Std ms | Throughput (inf/s) | Load ms | Max abs diff vs ORT | Top-1 match | median ÷ ORT-1t median | median ÷ ORT median |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|:-:|---:|---:|
-| resnet18 | 1×3×224×224 | onnxruntime-cpu | 12 | 5.925 | 6.232 | 7.644 | 5.094 | 0.7514 | 168.8 | 434.8 | — | — | 0.22 | 1.00 |
-| resnet18 | 1×3×224×224 | onnxruntime-cpu-1t | 1 | 26.92 | 27.24 | 29.82 | 25.04 | 1.753 | 37.1 | 424.5 | 0 | yes | 1.00 | 4.54 |
-| resnet18 | 1×3×224×224 | crucible-native | 1 | 107.6 | 110.9 | 130.1 | 100.1 | 9.733 | 9.3 | 471.1 | 7.15e-06 | yes | 4.00 | 18.17 |
-| resnet18 | 1×3×224×224 | crucible-native-avx2 | 1 | 44.12 | 45.25 | 51.99 | 42.3 | 3.145 | 22.7 | 446.9 | 6.68e-06 | yes | 1.64 | 7.45 |
-| resnet18 | 1×3×224×224 | pytorch-cpu | 12 | 13.93 | 14 | 15.84 | 11.19 | 1.041 | 71.8 | 1058 | 4.05e-06 | yes | 0.52 | 2.35 |
+| resnet18 | 1×3×224×224 | onnxruntime-cpu | 12 | 7.314 | 7.262 | 8.057 | 5.85 | 0.5448 | 136.7 | 573.3 | — | — | 0.24 | 1.00 |
+| resnet18 | 1×3×224×224 | onnxruntime-cpu-1t | 1 | 30.13 | 30.44 | 33.52 | 28.02 | 1.603 | 33.2 | 348.7 | 0 | yes | 1.00 | 4.12 |
+| resnet18 | 1×3×224×224 | crucible-native | 1 | 113.4 | 114.3 | 122.2 | 105.1 | 4.05 | 8.8 | 353.7 | 7.15e-06 | yes | 3.76 | 15.50 |
+| resnet18 | 1×3×224×224 | crucible-native-avx2 | 1 | 46.39 | 47.24 | 52.01 | 44.01 | 2.317 | 21.6 | 336.3 | 6.68e-06 | yes | 1.54 | 6.34 |
+| resnet18 | 1×3×224×224 | pytorch-cpu | 12 | 15.11 | 15.17 | 18.97 | 11.6 | 2.112 | 66.2 | 928.4 | 4.05e-06 | yes | 0.50 | 2.07 |
 | resnet18 | 1×3×224×224 | crucible-wasm | 1 | unsupported | | | | | | | | | | |
-| mobilenet_v2 | 1×3×224×224 | onnxruntime-cpu | 12 | 2.223 | 2.285 | 2.588 | 1.745 | 0.9623 | 449.9 | 142 | — | — | 0.27 | 1.00 |
-| mobilenet_v2 | 1×3×224×224 | onnxruntime-cpu-1t | 1 | 8.083 | 8.293 | 9.816 | 7.251 | 0.6718 | 123.7 | 137.2 | 0 | yes | 1.00 | 3.64 |
-| mobilenet_v2 | 1×3×224×224 | crucible-native | 1 | 48.82 | 50.17 | 58.18 | 46.53 | 3.862 | 20.5 | 126.2 | 1.41e-05 | yes | 6.04 | 21.97 |
-| mobilenet_v2 | 1×3×224×224 | crucible-native-avx2 | 1 | 33.92 | 34.3 | 37.2 | 32.07 | 2.129 | 29.5 | 148.1 | 1.39e-05 | yes | 4.20 | 15.26 |
-| mobilenet_v2 | 1×3×224×224 | pytorch-cpu | 12 | 12.61 | 12.97 | 16.93 | 9.401 | 2.035 | 79.3 | 313.4 | 1.22e-05 | yes | 1.56 | 5.67 |
+| mobilenet_v2 | 1×3×224×224 | onnxruntime-cpu | 12 | 2.375 | 2.373 | 2.821 | 1.851 | 0.2701 | 421.1 | 157 | — | — | 0.29 | 1.00 |
+| mobilenet_v2 | 1×3×224×224 | onnxruntime-cpu-1t | 1 | 8.254 | 8.444 | 9.887 | 7.501 | 0.7671 | 121.2 | 113.5 | 0 | yes | 1.00 | 3.48 |
+| mobilenet_v2 | 1×3×224×224 | crucible-native | 1 | 55.61 | 56.11 | 62.28 | 51.03 | 2.998 | 18.0 | 95.56 | 1.41e-05 | yes | 6.74 | 23.42 |
+| mobilenet_v2 | 1×3×224×224 | crucible-native-avx2 | 1 | 38.1 | 38.74 | 43.06 | 34.37 | 2.412 | 26.2 | 103.2 | 1.39e-05 | yes | 4.62 | 16.05 |
+| mobilenet_v2 | 1×3×224×224 | pytorch-cpu | 12 | 14.12 | 14.67 | 18.74 | 10.89 | 2.554 | 70.8 | 259.2 | 1.22e-05 | yes | 1.71 | 5.95 |
 | mobilenet_v2 | 1×3×224×224 | crucible-wasm | 1 | unsupported | | | | | | | | | | |
-| fraud_detector | 1×7 | onnxruntime-cpu | 12 | 0.006301 | 0.008896 | 0.01228 | 0.005566 | 0.01232 | 158,705 | 9.755 | — | — | 1.95 | 1.00 |
-| fraud_detector | 1×7 | onnxruntime-cpu-1t | 1 | 0.003233 | 0.003276 | 0.003596 | 0.003109 | 0.0002 | 309,358 | 7.216 | 0 | — | 1.00 | 0.51 |
-| fraud_detector | 1×7 | crucible-native | 1 | 0.001829 | 0.001839 | 0.001916 | 0.001764 | 5.3e-05 | 546,597 | 2.09 | 9.31e-09 | — | 0.57 | 0.29 |
-| fraud_detector | 1×7 | crucible-native-avx2 | 1 | 0.001818 | 0.001974 | 0.002359 | 0.001762 | 0.000256 | 550,206 | 5.885 | 9.31e-09 | — | 0.56 | 0.29 |
-| fraud_detector | 1×7 | pytorch-cpu | 12 | 0.01136 | 0.01245 | 0.01533 | 0.01082 | 0.005907 | 88,055 | 17.72 | 9.31e-09 | — | 3.51 | 1.80 |
-| fraud_detector | 1×7 | crucible-wasm | 1 | 0.01222 | 0.01299 | 0.01502 | 0.01052 | 0.004949 | 81,863 | 2.105 | 9.31e-09 | — | 3.78 | 1.94 |
-| fraud_detector | 64×7 | onnxruntime-cpu | 12 | 0.004034 | 0.004697 | 0.006997 | 0.00361 | 0.002254 | 15,863,180 | 8.803 | — | — | 1.07 | 1.00 |
-| fraud_detector | 64×7 | onnxruntime-cpu-1t | 1 | 0.003768 | 0.004258 | 0.005073 | 0.003486 | 0.004147 | 16,982,885 | 6.793 | 0 | — | 1.00 | 0.93 |
-| fraud_detector | 64×7 | crucible-native | 1 | 0.00258 | 0.002564 | 0.002809 | 0.002278 | 0.00021 | 24,801,395 | 4.045 | 5.59e-08 | — | 0.68 | 0.64 |
-| fraud_detector | 64×7 | crucible-native-avx2 | 1 | 0.002398 | 0.002522 | 0.003198 | 0.002252 | 0.00052 | 26,683,345 | 4.697 | 5.59e-08 | — | 0.64 | 0.59 |
-| fraud_detector | 64×7 | pytorch-cpu | 12 | 0.01237 | 0.01292 | 0.0146 | 0.01164 | 0.002404 | 5,172,971 | 15.57 | 5.96e-08 | — | 3.28 | 3.07 |
-| fraud_detector | 64×7 | crucible-wasm | 1 | 0.01606 | 0.01798 | 0.02631 | 0.01366 | 0.007161 | 3,985,925 | 2.782 | 5.59e-08 | — | 4.26 | 3.98 |
+| fraud_detector | 1×7 | onnxruntime-cpu | 12 | 0.01187 | 0.01269 | 0.01487 | 0.01124 | 0.003698 | 84,253 | 7.844 | — | — | 3.14 | 1.00 |
+| fraud_detector | 1×7 | onnxruntime-cpu-1t | 1 | 0.003774 | 0.00383 | 0.004356 | 0.00325 | 0.000485 | 264,971 | 5.122 | 0 | — | 1.00 | 0.32 |
+| fraud_detector | 1×7 | crucible-native | 1 | 0.002012 | 0.00212 | 0.002175 | 0.001779 | 0.001351 | 497,018 | 2.474 | 9.31e-09 | — | 0.53 | 0.17 |
+| fraud_detector | 1×7 | crucible-native-avx2 | 1 | 0.001864 | 0.002097 | 0.002352 | 0.001777 | 0.001876 | 536,481 | 2.349 | 9.31e-09 | — | 0.49 | 0.16 |
+| fraud_detector | 1×7 | pytorch-cpu | 12 | 0.01282 | 0.01307 | 0.01612 | 0.01115 | 0.001885 | 78,034 | 14.27 | 9.31e-09 | — | 3.40 | 1.08 |
+| fraud_detector | 1×7 | crucible-wasm | 1 | 0.01302 | 0.01601 | 0.02268 | 0.01142 | 0.01193 | 76,817 | 2.527 | 9.31e-09 | — | 3.45 | 1.10 |
+| fraud_detector | 64×7 | onnxruntime-cpu | 12 | 0.006487 | 0.006136 | 0.008727 | 0.003951 | 0.002237 | 9,865,125 | 7.401 | — | — | 1.55 | 1.00 |
+| fraud_detector | 64×7 | onnxruntime-cpu-1t | 1 | 0.004173 | 0.004445 | 0.006234 | 0.003601 | 0.001737 | 15,334,851 | 5.979 | 0 | — | 1.00 | 0.64 |
+| fraud_detector | 64×7 | crucible-native | 1 | 0.002398 | 0.002679 | 0.002893 | 0.002252 | 0.001965 | 26,688,906 | 2.799 | 5.59e-08 | — | 0.57 | 0.37 |
+| fraud_detector | 64×7 | crucible-native-avx2 | 1 | 0.002608 | 0.0028 | 0.003318 | 0.00251 | 0.001217 | 24,535,174 | 2.576 | 5.59e-08 | — | 0.62 | 0.40 |
+| fraud_detector | 64×7 | pytorch-cpu | 12 | 0.0133 | 0.01357 | 0.01505 | 0.01139 | 0.001905 | 4,810,945 | 13.91 | 5.96e-08 | — | 3.19 | 2.05 |
+| fraud_detector | 64×7 | crucible-wasm | 1 | 0.01899 | 0.02406 | 0.03379 | 0.01594 | 0.01924 | 3,369,751 | 3.165 | 5.59e-08 | — | 4.55 | 2.93 |
 
 Unsupported rows:
 

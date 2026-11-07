@@ -123,17 +123,20 @@ Median latency in ms, batch 1, i7-14650HX laptop, Docker (WSL2), 20 warmup +
 
 | Model | Crucible (portable, 1 thread) | ONNX Runtime (1 thread) | ONNX Runtime (default threads) |
 |---|---:|---:|---:|
-| ResNet18 | 107.6 | 26.9 | 5.9 |
-| MobileNetV2 | 48.8 | 8.1 | 2.2 |
+| ResNet18 | 113.4 | 30.1 | 7.3 |
+| MobileNetV2 | 55.6 | 8.3 | 2.4 |
 
-That makes Crucible **4.0× (ResNet18) and 6.0× (MobileNetV2) slower** than
-single-thread ONNX Runtime, and 18–22× slower than ORT's default thread pool.
-Its outputs match ORT within 1.4e-5 with the same top-1 class. Engine
-optimisations in this repo took ResNet18 from 169 ms to about 100 ms and
-MobileNetV2 from 196 ms to about 50 ms: weights are no longer copied per run,
-conv results are written straight to the output, and 1×1 and depthwise convs
-have fast paths. The tiny fraud MLP runs in microseconds on every runtime,
-so those numbers measure call overhead, not kernel speed.
+That makes Crucible **3.8× (ResNet18) and 6.7× (MobileNetV2) slower** than
+single-thread ONNX Runtime, and 15–23× slower than ORT's default thread pool.
+These ratios move by about ±10% from run to run on this laptop. Crucible's
+outputs match ORT within 1.4e-5 with the same top-1 class. Engine
+optimisations in this repo made ResNet18 about 1.5× faster and MobileNetV2
+about 3.5–4× faster than the original code (169 → ~100–115 ms and
+196 → ~45–55 ms, measured in the same container): weights are no longer
+copied per run, conv results are written straight to the output, and 1×1 and
+depthwise convs have fast paths.
+The tiny fraud MLP runs in microseconds on every runtime, so those numbers
+measure call overhead, not kernel speed.
 
 ## Quick start (Linux / macOS)
 
