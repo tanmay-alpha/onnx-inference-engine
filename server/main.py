@@ -11,22 +11,32 @@ Inference
 (``crucible_py``). There is no fallback: without the module they return 503
 and ``/health`` reports ``engine: "unavailable"``. ``inference_time_ms`` is
 measured around ``crucible_py.run`` only. See :mod:`server.engine` for the
-concurrency bound and the 504 timeout semantics (a timed-out native run
-cannot be cancelled; it finishes in the background holding its slot).
+concurrency bound, the per-run memory limits and the deadline (a run that
+exceeds ``INFERENCE_TIMEOUT_SEC`` is stopped by the engine and answers 504).
 
 Uploads
 -------
 ``/convert`` streams the file to ``<CRUCIBLE_MODEL_DIR>/<uuid>.onnx`` (the
 client filename is only a display name), then runs ``onnx.checker`` and the
 native loader/checker (:mod:`server.validator`). Unsupported models are
-stored and owned anyway, flagged with ``unsupported_reasons``.
+stored and owned anyway, flagged with ``unsupported_reasons``; graphs with
+more than ``MAX_GRAPH_NODES`` nodes are refused (400). At most
+``MAX_CONCURRENT_ANALYSES`` analyses run at once (503 + Retry-After beyond).
+Each user may store ``MAX_MODELS_PER_USER`` models totalling
+``MAX_STORAGE_BYTES_PER_USER`` bytes (the operator key is exempt).
 
 Limits
 ------
 Request bodies are capped by an ASGI middleware (``MAX_UPLOAD_BYTES`` + 1 MiB
 multipart overhead on /convert and /validate, ``MAX_REQUEST_BODY_BYTES``
 elsewhere) whether or not Content-Length is sent. ``/infer`` additionally
-caps the tensor at ``MAX_INPUT_ELEMENTS``.
+caps the input tensor at ``MAX_INPUT_ELEMENTS`` and the returned output at
+``MAX_OUTPUT_ELEMENTS`` (both summed over items in ``/inference/batch``).
+
+Rate limits (in-process sliding windows, see :mod:`server.ratelimit`; not
+shared across instances): ``/auth/login`` and ``/auth/register`` per client
+IP, ``/auth/login`` also per IP+email; ``/infer`` and ``/inference/batch``
+per user API key (``ApiKey.rate_limit`` requests/minute). 429 + Retry-After.
 
 Ownership
 ---------
@@ -44,6 +54,7 @@ import logging
 import math
 import os
 import secrets
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -51,16 +62,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi import status as http_status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import select
 
-from server import database, engine, logging_config, metrics, validator
+from server import database, engine, logging_config, metrics, ratelimit, validator
 from server.auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
+    DUMMY_PASSWORD_HASH,
     KEY_PREFIX_DISPLAY_LEN,
     ApiKeyCreate,
     ApiKeyCreated,
@@ -104,10 +116,17 @@ SERVER_VERSION = settings.APP_VERSION
 BACKEND = engine.BACKEND
 MAX_UPLOAD_BYTES = settings.MAX_UPLOAD_BYTES
 MAX_INPUT_ELEMENTS = settings.MAX_INPUT_ELEMENTS
+MAX_OUTPUT_ELEMENTS = settings.MAX_OUTPUT_ELEMENTS
+MAX_MODELS_PER_USER = settings.MAX_MODELS_PER_USER
+MAX_STORAGE_BYTES_PER_USER = settings.MAX_STORAGE_BYTES_PER_USER
 INFERENCE_TIMEOUT_SEC = settings.INFERENCE_TIMEOUT_SEC
 UPLOAD_PATHS = frozenset({"/convert", "/validate"})
 MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 _CHUNK = 1024 * 1024
+# Parsing a model costs ~2x its size in memory; bound how many run at once.
+_ANALYSIS_SLOTS = threading.BoundedSemaphore(settings.MAX_CONCURRENT_ANALYSES)
+# Serialises the final per-user quota check with the insert that consumes it.
+_QUOTA_LOCK = threading.Lock()
 
 
 def _model_dir() -> Path:
@@ -284,8 +303,22 @@ def _user_response(user: database.User) -> UserResponse:
     )
 
 
+def _auth_rate_limit(request: Request, login_email: Optional[str] = None) -> None:
+    """429 when this client IP (or IP+email, for logins) exceeded its attempt budget."""
+    ip = ratelimit.client_ip(request)
+    rules = [(("auth-ip", ip), settings.AUTH_RATE_LIMIT_PER_IP)]
+    if login_email is not None:
+        rules.append((("login", ip, login_email), settings.AUTH_RATE_LIMIT_PER_IP_EMAIL))
+    wait = ratelimit.auth_limiter.acquire(rules)
+    if wait:
+        metrics.record_error("rate_limited")
+        raise HTTPException(status_code=429, detail="Too many attempts; retry later",
+                            headers=ratelimit.retry_after_header(wait))
+
+
 @app.post("/auth/register", response_model=UserResponse, status_code=http_status.HTTP_201_CREATED)
-async def register(user_in: UserCreate) -> UserResponse:
+async def register(user_in: UserCreate, request: Request) -> UserResponse:
+    _auth_rate_limit(request)
     email = user_in.email.lower()
     async with database.get_session_factory()() as session:
         existing = await session.execute(select(database.User).where(database.User.email == email))
@@ -304,15 +337,17 @@ async def register(user_in: UserCreate) -> UserResponse:
 
 
 @app.post("/auth/login", response_model=Token)
-async def login(credentials: UserLogin) -> Token:
+async def login(credentials: UserLogin, request: Request) -> Token:
+    email = credentials.email.lower()
+    _auth_rate_limit(request, email)
     async with database.get_session_factory()() as session:
         user = (await session.execute(
-            select(database.User).where(database.User.email == credentials.email.lower())
+            select(database.User).where(database.User.email == email)
         )).scalar_one_or_none()
-        valid = user is not None and await run_in_threadpool(
-            verify_password, credentials.password, user.hashed_password
-        )
-        if not valid:
+        # Unknown emails are checked against a dummy hash so both paths cost one bcrypt verify.
+        hashed = user.hashed_password if user is not None else DUMMY_PASSWORD_HASH
+        valid = await run_in_threadpool(verify_password, credentials.password, hashed)
+        if user is None or not valid:
             metrics.record_error("auth_failed")
             raise HTTPException(status_code=401, detail="Invalid email or password")
         if not user.is_active:
@@ -412,15 +447,47 @@ async def _store_upload(upload: UploadFile, dest: Path) -> int:
     return size
 
 
-async def _analyze(path: Path) -> validator.ModelAnalysis:
+async def _analyze(path: Path, *, delete_on_error: bool) -> validator.ModelAnalysis:
+    """Analyse ``path`` on a worker thread; at most MAX_CONCURRENT_ANALYSES at once (else 503)."""
+    slots = _ANALYSIS_SLOTS
+    if not slots.acquire(blocking=False):
+        if delete_on_error:
+            path.unlink(missing_ok=True)
+        raise HTTPException(status_code=503, detail="The server is busy analysing other models; retry shortly",
+                            headers={"Retry-After": "2"})
+
+    def _work() -> validator.ModelAnalysis:
+        # Released by the worker so an abandoned request cannot free the slot early.
+        try:
+            return validator.analyze_model_file(path)
+        finally:
+            slots.release()
+
     try:
-        return await run_in_threadpool(validator.analyze_model_file, path)
+        return await run_in_threadpool(_work)
     except ValueError as exc:
-        path.unlink(missing_ok=True)
+        if delete_on_error:
+            path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        path.unlink(missing_ok=True)
+        if delete_on_error:
+            path.unlink(missing_ok=True)
         raise _internal_error(exc) from exc
+
+
+def _check_quota(principal: Principal, incoming_bytes: int) -> None:
+    """409/413 when storing ``incoming_bytes`` more would exceed the caller's quota."""
+    if principal.user_id is None:  # the operator key is exempt
+        return
+    count, used = database.owner_usage(principal.user_id)
+    if count >= MAX_MODELS_PER_USER:
+        raise HTTPException(status_code=409,
+                            detail=f"Model limit reached ({MAX_MODELS_PER_USER} stored models); delete one first")
+    if used + incoming_bytes > MAX_STORAGE_BYTES_PER_USER:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Storage quota exceeded: {used} + {incoming_bytes} bytes > {MAX_STORAGE_BYTES_PER_USER} bytes",
+        )
 
 
 def _display_name(filename: Optional[str]) -> str:
@@ -440,14 +507,26 @@ async def convert(
 
     Unsupported models are stored too (``all_supported=false`` plus reasons).
     """
+    await run_in_threadpool(_check_quota, principal, 0)  # cheap count check before writing the file
     model_id = uuid.uuid4().hex
     path = _model_dir() / f"{model_id}.onnx"
     size = await _store_upload(upload, path)
-    analysis = await _analyze(path)
-    name = _display_name(upload.filename)
     try:
-        await run_in_threadpool(
-            lambda: database.save_model(
+        await run_in_threadpool(_check_quota, principal, size)
+    except HTTPException:
+        path.unlink(missing_ok=True)
+        raise
+    analysis = await _analyze(path, delete_on_error=True)
+    if analysis.exceeds_node_limit:
+        path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Model refused: {analysis.unsupported_reasons[0]}")
+    name = _display_name(upload.filename)
+
+    def _save() -> None:
+        # Re-check under a lock: concurrent uploads of one user passed the checks above.
+        with _QUOTA_LOCK:
+            _check_quota(principal, size)
+            database.save_model(
                 model_id=model_id, name=name, file_path=str(path), size_bytes=size,
                 owner_id=principal.user_id, opset=analysis.opset,
                 operators_used=analysis.operators_used, unsupported_ops=analysis.unsupported_ops,
@@ -455,7 +534,12 @@ async def convert(
                 all_supported=analysis.all_supported, inputs=analysis.inputs,
                 outputs=analysis.outputs, native_checked=analysis.native_checked,
             )
-        )
+
+    try:
+        await run_in_threadpool(_save)
+    except HTTPException:
+        path.unlink(missing_ok=True)
+        raise
     except Exception as exc:  # noqa: BLE001
         path.unlink(missing_ok=True)
         raise _internal_error(exc) from exc
@@ -505,16 +589,13 @@ async def validate(
         path = _model_dir() / f".validate-{uuid.uuid4().hex}.onnx"
         await _store_upload(upload, path)
         try:
-            analysis = await _analyze(path)
+            analysis = await _analyze(path, delete_on_error=True)
         finally:
             path.unlink(missing_ok=True)
     else:
         rec = await run_in_threadpool(_get_owned_model, stored_id, principal)
         path = _model_file(rec)
-        try:
-            analysis = await run_in_threadpool(validator.analyze_model_file, path)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        analysis = await _analyze(path, delete_on_error=False)
     return ValidateResponse(
         valid=analysis.all_supported,
         operators=analysis.operators_used,
@@ -627,6 +708,10 @@ async def _run(req: InferRequest, principal: Principal) -> InferResponse:
     except Exception as exc:  # noqa: BLE001
         raise _internal_error(exc) from exc
 
+    if out.size > MAX_OUTPUT_ELEMENTS:
+        await _log("error", elapsed_ms, list(out.shape), "output too large")
+        raise HTTPException(status_code=413,
+                            detail=f"Output has {out.size} elements; the limit is {MAX_OUTPUT_ELEMENTS}")
     if not np.isfinite(out).all():
         await _log("error", elapsed_ms, list(out.shape), "non-finite output")
         raise HTTPException(status_code=422,
@@ -640,9 +725,25 @@ async def _run(req: InferRequest, principal: Principal) -> InferResponse:
     )
 
 
+def _api_key_rate_limit(principal: Principal, cost: int) -> None:
+    """429 when a user API key exceeded its ``rate_limit`` requests per minute."""
+    if principal.api_key_id is None or not principal.api_key_rate_limit:
+        return
+    wait = ratelimit.api_key_limiter.acquire(
+        [(("api-key", principal.api_key_id), principal.api_key_rate_limit)], cost=cost)
+    if wait:
+        metrics.record_error("rate_limited")
+        raise HTTPException(
+            status_code=429,
+            detail=f"API key rate limit of {principal.api_key_rate_limit} requests/minute exceeded",
+            headers=ratelimit.retry_after_header(wait),
+        )
+
+
 @app.post("/infer", response_model=InferResponse)
 async def infer(req: InferRequest, principal: Principal = Depends(require_principal)) -> InferResponse:
     """Run one inference on a model you own, on the native engine only."""
+    _api_key_rate_limit(principal, 1)
     return await _run(req, principal)
 
 
@@ -650,7 +751,11 @@ async def infer(req: InferRequest, principal: Principal = Depends(require_princi
 async def batch_infer(
     requests: List[InferRequest], principal: Principal = Depends(require_principal)
 ) -> BatchResponse:
-    """Run up to MAX_BATCH_SIZE inference requests sequentially; per-item errors are reported inline."""
+    """Run up to MAX_BATCH_SIZE inference requests sequentially; per-item errors are reported inline.
+
+    Each item counts against an API key's rate limit. If the outputs together
+    exceed MAX_OUTPUT_ELEMENTS the whole batch fails with 413.
+    """
     if len(requests) > settings.MAX_BATCH_SIZE:
         raise HTTPException(status_code=422,
                             detail=f"Batch size {len(requests)} exceeds the limit of {settings.MAX_BATCH_SIZE}")
@@ -660,18 +765,28 @@ async def batch_infer(
                             detail=f"Batch has {total} input elements; the limit is {MAX_INPUT_ELEMENTS}")
     if not engine.native_available():
         raise HTTPException(status_code=503, detail="native engine (crucible_py) is not available on this server")
+    _api_key_rate_limit(principal, len(requests))
     results: List[BatchItemResult] = []
+    output_elements = 0
     for req in requests:
         try:
             r = await _run(req, principal)
-            results.append(BatchItemResult(model_id=req.model_id, status="success", output=r.output,
-                                           output_shape=r.output_shape,
-                                           inference_time_ms=r.inference_time_ms))
-            metrics.record_batch_job("success")
         except HTTPException as exc:
             results.append(BatchItemResult(model_id=req.model_id, status="error",
                                            error=str(exc.detail), status_code=exc.status_code))
             metrics.record_batch_job("error")
+            continue
+        output_elements += len(r.output)
+        if output_elements > MAX_OUTPUT_ELEMENTS:
+            metrics.record_batch_job("error")
+            raise HTTPException(
+                status_code=413,
+                detail=f"Batch outputs exceed {MAX_OUTPUT_ELEMENTS} elements in total; send fewer items",
+            )
+        results.append(BatchItemResult(model_id=req.model_id, status="success", output=r.output,
+                                       output_shape=r.output_shape,
+                                       inference_time_ms=r.inference_time_ms))
+        metrics.record_batch_job("success")
     ok = sum(1 for r in results if r.status == "success")
     return BatchResponse(batch_size=len(requests), success_count=ok,
                          error_count=len(results) - ok, results=results)

@@ -33,7 +33,7 @@
 namespace crucible {
 
 // ONNX TensorProto data_type values (from onnx.proto TensorProto).
-// We only care about FLOAT(1) and INT64(7) for Issue #4.
+// Only FLOAT(1) and INT64(7) initializers are decoded.
 namespace onnx_dtype {
 constexpr int32_t FLOAT  = 1;
 constexpr int32_t INT64  = 7;
@@ -59,6 +59,15 @@ static int64_t product_i64(const std::vector<int64_t>& dims) {
 // ----------------------------------------------------------------------
 // Layer 1: Wire-format reader
 // ----------------------------------------------------------------------
+
+// Non-owning view of bytes inside the model buffer.
+struct ByteView {
+    const std::uint8_t* ptr = nullptr;
+    std::size_t len = 0;
+    const std::uint8_t* data() const { return ptr; }
+    std::size_t size() const { return len; }
+    bool empty() const { return len == 0; }
+};
 
 class Cursor {
 public:
@@ -106,13 +115,15 @@ public:
         return {field, wire};
     }
 
-    // Read a length-delimited payload (string / bytes / sub-message).
-    std::vector<std::uint8_t> read_length_delimited() {
+    // Read a length-delimited payload (string / bytes / sub-message). The
+    // result is a view into the caller's buffer, which outlives the parse;
+    // nothing is copied, so peak memory stays ~1x the file size.
+    ByteView read_length_delimited() {
         std::uint64_t len = read_varint();
         if (len > remaining()) {
             throw std::runtime_error("ONNX: length-delimited payload exceeds buffer");
         }
-        std::vector<std::uint8_t> out(data_ + pos_, data_ + pos_ + len);
+        ByteView out{data_ + pos_, static_cast<std::size_t>(len)};
         pos_ += static_cast<std::size_t>(len);
         return out;
     }
@@ -211,7 +222,7 @@ struct TensorParseResult {
     std::vector<int64_t> dims;
     std::vector<float>    float_data;
     std::vector<int64_t>  int64_data;
-    std::vector<std::uint8_t> raw_data;
+    ByteView raw_data;
     bool external = false;   // data_location == EXTERNAL (weights in a side file)
 };
 

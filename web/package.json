@@ -1,5 +1,5 @@
 {
-  "name": "tanstack_start_ts",
+  "name": "crucible-web",
   "private": true,
   "sideEffects": [
     "src/server.ts"

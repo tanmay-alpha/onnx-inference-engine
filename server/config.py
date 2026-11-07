@@ -53,13 +53,44 @@ class Settings(BaseSettings):
 
     # -- Storage, limits, inference ------------------------------------------
     CRUCIBLE_MODEL_DIR: str = Field(default="/tmp/models", description="Directory for uploaded ONNX files")
-    MAX_UPLOAD_BYTES: int = Field(default=100 * 1024 * 1024, description="Max .onnx upload size (/convert, /validate)")
+    # Peak parse memory is ~2x the file (protobuf bytes + parsed model), so
+    # 50 MB keeps one analysis well inside a 512 MB instance.
+    MAX_UPLOAD_BYTES: int = Field(default=50 * 1024 * 1024, description="Max .onnx upload size (/convert, /validate)")
+    MAX_CONCURRENT_ANALYSES: int = Field(
+        default=1, description="Model analyses (/convert, /validate) in flight at once; 503 + Retry-After beyond"
+    )
+    MAX_GRAPH_NODES: int = Field(default=2000, description="Max nodes in an uploaded model's graph")
+    MAX_MODELS_PER_USER: int = Field(default=20, description="Stored models per user (operator key exempt)")
+    MAX_STORAGE_BYTES_PER_USER: int = Field(
+        default=200 * 1024 * 1024, description="Total stored model bytes per user (operator key exempt)"
+    )
     MAX_REQUEST_BODY_BYTES: int = Field(default=16 * 1024 * 1024, description="Max body size for every non-upload route")
     MAX_INPUT_ELEMENTS: int = Field(default=4_000_000, description="Max elements in one /infer input tensor")
+    MAX_TENSOR_ELEMENTS: int = Field(
+        default=16_000_000,
+        description="Max elements of any tensor the engine allocates during a run (untrusted-model guard; 64 MB of float32)",
+    )
+    MAX_TOTAL_ELEMENTS: int = Field(
+        default=64_000_000,
+        description="Max elements across all live intermediate tensors of one run (256 MB of float32)",
+    )
+    MAX_OUTPUT_ELEMENTS: int = Field(default=1_000_000, description="Max output elements returned by /infer (and per batch)")
     MAX_BATCH_SIZE: int = Field(default=32, description="Max requests in one /inference/batch call")
-    INFERENCE_TIMEOUT_SEC: float = Field(default=60.0, description="Per-request wait limit for a native run (504 after)")
+    INFERENCE_TIMEOUT_SEC: float = Field(
+        default=60.0, gt=0, description="Deadline of one native run; the engine stops at it and the request gets 504"
+    )
     MAX_CONCURRENT_INFERENCES: int = Field(default=2, description="Native runs allowed in flight at once")
     MODEL_CACHE_SIZE: int = Field(default=4, ge=0, description="Loaded native models kept in memory (LRU; 0 disables)")
+
+    # -- Abuse protection (per process; not shared across instances) ----------
+    TRUST_PROXY_HEADERS: bool = Field(
+        default=False,
+        description="Take the client IP from the first X-Forwarded-For entry. Enable only behind a proxy "
+                    "that sets that entry itself (Render does); otherwise clients can spoof it",
+    )
+    AUTH_RATE_LIMIT_PER_IP: int = Field(default=30, description="/auth/login + /auth/register attempts per IP per window")
+    AUTH_RATE_LIMIT_PER_IP_EMAIL: int = Field(default=10, description="/auth/login attempts per IP+email per window")
+    AUTH_RATE_WINDOW_SEC: float = Field(default=300.0, gt=0, description="Sliding window of the auth limits")
 
     # -- CORS -----------------------------------------------------------------
     CRUCIBLE_CORS_ORIGINS: str = Field(
@@ -70,10 +101,6 @@ class Settings(BaseSettings):
     # -- Logging --------------------------------------------------------------
     CRUCIBLE_LOG_LEVEL: str = Field(default="INFO")
     CRUCIBLE_LOG_FORMAT: str = Field(default="console", description="console or json")
-
-    # -- Offline training tooling (server/ml) ---------------------------------
-    CRUCIBLE_TRAIN_DATA: str = Field(default="data/raw/creditcard.csv")
-    CRUCIBLE_MODEL_OUTPUT: str = Field(default="models/fraud_model.onnx")
 
     @property
     def cors_origins_list(self) -> List[str]:
@@ -87,7 +114,12 @@ class Settings(BaseSettings):
             raise ValueError(f"ENVIRONMENT must be one of {sorted(valid)}")
         return v.lower()
 
-    @field_validator("MAX_CONCURRENT_INFERENCES", "MAX_BATCH_SIZE", "MAX_INPUT_ELEMENTS")
+    @field_validator(
+        "MAX_CONCURRENT_INFERENCES", "MAX_BATCH_SIZE", "MAX_INPUT_ELEMENTS", "MAX_TENSOR_ELEMENTS",
+        "MAX_TOTAL_ELEMENTS", "MAX_OUTPUT_ELEMENTS", "MAX_CONCURRENT_ANALYSES", "MAX_GRAPH_NODES",
+        "MAX_MODELS_PER_USER", "MAX_STORAGE_BYTES_PER_USER", "AUTH_RATE_LIMIT_PER_IP",
+        "AUTH_RATE_LIMIT_PER_IP_EMAIL",
+    )
     @classmethod
     def _positive(cls, v: int) -> int:
         if v < 1:

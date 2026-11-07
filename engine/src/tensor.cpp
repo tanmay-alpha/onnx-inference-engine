@@ -9,10 +9,23 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <chrono>
 
 namespace crucible {
 
 namespace {
+
+// 0 = unlimited. Set for the duration of a run by ScopedElementLimit.
+thread_local int64_t g_element_limit = 0;
+
+// Deadline in steady_clock nanoseconds since epoch; 0 = none.
+thread_local int64_t g_deadline_ns = 0;
+
+int64_t steady_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 // -----------------------------------------------------------------------------
 // Internal helpers
@@ -34,7 +47,7 @@ int64_t shape_product_or_throw(const std::vector<int64_t>& shape) {
                 std::to_string(d));
         }
         if (d > 0 && product > std::numeric_limits<int64_t>::max() / d) {
-            throw std::out_of_range("Tensor: shape product overflows int64_t");
+            throw ResourceLimitError("Tensor: shape product overflows int64_t");
         }
         product *= d;
     }
@@ -44,6 +57,42 @@ int64_t shape_product_or_throw(const std::vector<int64_t>& shape) {
 } // namespace
 
 // -----------------------------------------------------------------------------
+// Allocation budget
+// -----------------------------------------------------------------------------
+
+ScopedElementLimit::ScopedElementLimit(int64_t max_elements)
+    : previous_(g_element_limit) {
+    g_element_limit = max_elements > 0 ? max_elements : 0;
+}
+
+ScopedElementLimit::~ScopedElementLimit() { g_element_limit = previous_; }
+
+void check_element_budget(int64_t elements, const char* what) {
+    if (g_element_limit > 0 && elements > g_element_limit) {
+        throw ResourceLimitError(
+            std::string(what) + " needs " + std::to_string(elements) +
+            " elements, above the configured limit of " +
+            std::to_string(g_element_limit) + " elements per tensor");
+    }
+}
+
+ScopedDeadline::ScopedDeadline(int64_t timeout_ms) : previous_(g_deadline_ns) {
+    if (timeout_ms > 0) {
+        const int64_t deadline = steady_now_ns() + timeout_ms * 1'000'000;
+        // Nested scopes can only tighten the deadline.
+        g_deadline_ns = (previous_ != 0 && previous_ < deadline) ? previous_ : deadline;
+    }
+}
+
+ScopedDeadline::~ScopedDeadline() { g_deadline_ns = previous_; }
+
+void check_deadline(const char* where) {
+    if (g_deadline_ns != 0 && steady_now_ns() > g_deadline_ns) {
+        throw ResourceLimitError(std::string("run deadline exceeded (in ") + where + ")");
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Constructors
 // -----------------------------------------------------------------------------
 
@@ -51,6 +100,7 @@ Tensor::Tensor(std::vector<int64_t> shape, float fill)
     : shape_(std::move(shape))
 {
     const int64_t n = shape_product_or_throw(shape_);
+    check_element_budget(n, "Tensor");
     if (n > 0) {
         data_.assign(static_cast<size_t>(n), fill);
     }
@@ -134,7 +184,7 @@ int64_t Tensor::compute_offset(const std::vector<int64_t>& indices) const {
 }
 
 // -----------------------------------------------------------------------------
-// Shape operations (Issue #3)
+// Shape operations
 // -----------------------------------------------------------------------------
 
 Tensor Tensor::reshape(std::vector<int64_t> new_shape) const {
@@ -150,7 +200,7 @@ Tensor Tensor::reshape(std::vector<int64_t> new_shape) const {
             " into shape with product " + std::to_string(new_total));
     }
 
-    // The data buffer is copied (no aliasing); the plan promises Tensor is
+    // The data buffer is copied (no aliasing); Tensor is
     // its own copy on every operation. Assign the members directly so the
     // buffer is allocated once, not zero-filled and then overwritten.
     Tensor out;

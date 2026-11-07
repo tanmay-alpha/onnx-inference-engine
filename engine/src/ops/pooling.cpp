@@ -58,14 +58,16 @@ void resolve_pool(const Tensor& x,
     }
     in = {x.shape()[0], x.shape()[1], x.shape()[2], x.shape()[3]};
 
-    const int64_t num_h = in.H + 2 * pH - kH;
-    const int64_t num_w = in.W + 2 * pW - kW;
+    const int64_t padded_h = in.H + 2 * static_cast<int64_t>(pH);
+    const int64_t padded_w = in.W + 2 * static_cast<int64_t>(pW);
+    const int64_t num_h = padded_h - kH;
+    const int64_t num_w = padded_w - kW;
     if (num_h < 0 || num_w < 0) {
         throw std::invalid_argument(
             "pool: kernel larger than (input + 2*pad) (got " +
             std::to_string(kH) + "x" + std::to_string(kW) +
-            " vs " + std::to_string(in.H + 2 * pH) + "x" +
-            std::to_string(in.W + 2 * pW) + ")");
+            " vs " + std::to_string(padded_h) + "x" +
+            std::to_string(padded_w) + ")");
     }
     out.out_h = num_h / sH + 1;
     out.out_w = num_w / sW + 1;
@@ -96,16 +98,18 @@ Tensor maxpool_forward(const Tensor& x,
     // contribute neg_inf and lose every comparison.
     for (int64_t n = 0; n < in.N; ++n) {
         for (int64_t c = 0; c < in.C; ++c) {
+            check_deadline("MaxPool");
             const float* xc = x.data() + (n * in.C + c) * in.H * in.W;
             for (int64_t oh = 0; oh < out.out_h; ++oh) {
                 for (int64_t ow = 0; ow < out.out_w; ++ow) {
                     float m = neg_inf;
-                    for (int64_t kh = 0; kh < kH; ++kh) {
-                        const int64_t h_in = oh * sH + kh - pH;
-                        if (h_in < 0 || h_in >= in.H) continue;
-                        for (int64_t kw = 0; kw < kW; ++kw) {
-                            const int64_t w_in = ow * sW + kw - pW;
-                            if (w_in < 0 || w_in >= in.W) continue;
+                    const int64_t h0 = oh * sH - pH, w0 = ow * sW - pW;
+                    const int64_t h_lo = std::max<int64_t>(h0, 0);
+                    const int64_t h_hi = std::min<int64_t>(h0 + kH, in.H);
+                    const int64_t w_lo = std::max<int64_t>(w0, 0);
+                    const int64_t w_hi = std::min<int64_t>(w0 + kW, in.W);
+                    for (int64_t h_in = h_lo; h_in < h_hi; ++h_in) {
+                        for (int64_t w_in = w_lo; w_in < w_hi; ++w_in) {
                             const float v = xc[h_in * in.W + w_in];
                             if (v > m) m = v;
                         }
@@ -137,17 +141,19 @@ Tensor avgpool_forward(const Tensor& x,
 
     for (int64_t n = 0; n < in.N; ++n) {
         for (int64_t c = 0; c < in.C; ++c) {
+            check_deadline("AveragePool");
             const float* xc = x.data() + (n * in.C + c) * in.H * in.W;
             for (int64_t oh = 0; oh < out.out_h; ++oh) {
                 for (int64_t ow = 0; ow < out.out_w; ++ow) {
                     float sum = 0.0f;
                     int64_t count = 0;
-                    for (int64_t kh = 0; kh < kH; ++kh) {
-                        const int64_t h_in = oh * sH + kh - pH;
-                        if (h_in < 0 || h_in >= in.H) continue;
-                        for (int64_t kw = 0; kw < kW; ++kw) {
-                            const int64_t w_in = ow * sW + kw - pW;
-                            if (w_in < 0 || w_in >= in.W) continue;
+                    const int64_t h0 = oh * sH - pH, w0 = ow * sW - pW;
+                    const int64_t h_lo = std::max<int64_t>(h0, 0);
+                    const int64_t h_hi = std::min<int64_t>(h0 + kH, in.H);
+                    const int64_t w_lo = std::max<int64_t>(w0, 0);
+                    const int64_t w_hi = std::min<int64_t>(w0 + kW, in.W);
+                    for (int64_t h_in = h_lo; h_in < h_hi; ++h_in) {
+                        for (int64_t w_in = w_lo; w_in < w_hi; ++w_in) {
                             sum += xc[h_in * in.W + w_in];
                             ++count;
                         }
@@ -164,7 +170,7 @@ Tensor avgpool_forward(const Tensor& x,
 }
 
 // --------------------------------------------------------------------
-// GlobalAveragePool — Issue #10.
+// GlobalAveragePool.
 //
 // Reduces each (N, C) feature map to a single scalar by averaging the
 // full H*W plane. Output shape is (N, C, 1, 1); the unit spatial

@@ -111,14 +111,16 @@ Tensor conv2d_forward(const Tensor& input,
     const int64_t kW    = weight.shape()[3];
 
     // ---- 2. Output spatial dimensions --------------------------------------
-    const int64_t num_h = H + 2 * p.pad_h - kH;
-    const int64_t num_w = W + 2 * p.pad_w - kW;
+    const int64_t padded_h = H + 2 * static_cast<int64_t>(p.pad_h);
+    const int64_t padded_w = W + 2 * static_cast<int64_t>(p.pad_w);
+    const int64_t num_h = padded_h - kH;
+    const int64_t num_w = padded_w - kW;
     if (num_h < 0 || num_w < 0) {
         throw std::invalid_argument(
             "conv2d_forward: kernel larger than (input + 2*pad) (got " +
             std::to_string(kH) + "x" + std::to_string(kW) +
-            " vs " + std::to_string(H + 2 * p.pad_h) + "x" +
-            std::to_string(W + 2 * p.pad_w) + ")");
+            " vs " + std::to_string(padded_h) + "x" +
+            std::to_string(padded_w) + ")");
     }
     const int64_t out_h = num_h / p.stride_h + 1;
     const int64_t out_w = num_w / p.stride_w + 1;
@@ -173,6 +175,7 @@ Tensor conv2d_forward(const Tensor& input,
     if (C_in_g == 1 && C_out_g == 1) {
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t c = 0; c < C_out; ++c) {
+                check_deadline("Conv");
                 const float* xc = input.data() + (n * C_in + c) * H * W;
                 const float* wc = weight.data() + c * kH * kW;
                 float* yc = output.data() + (n * C_out + c) * HW_out;
@@ -209,10 +212,14 @@ Tensor conv2d_forward(const Tensor& input,
     const bool pointwise = kH == 1 && kW == 1 && p.stride_h == 1 &&
                            p.stride_w == 1 && p.pad_h == 0 && p.pad_w == 0;
     RowMatrix col;
-    if (!pointwise) col.resize(ksize, HW_out);
+    if (!pointwise) {
+        check_element_budget(ksize * HW_out, "Conv im2col buffer");
+        col.resize(ksize, HW_out);
+    }
 
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t g = 0; g < p.groups; ++g) {
+            check_deadline("Conv");
             const float* x = input.data() + (n * C_in + g * C_in_g) * H * W;
             ConstMap wg(weight.data() + g * C_out_g * ksize, C_out_g, ksize);
             OutMap yg(output.data() + (n * C_out + g * C_out_g) * HW_out,

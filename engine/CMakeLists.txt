@@ -3,19 +3,17 @@
 # =============================================================================
 # Build the core inference library, Python bindings, tests, and benchmarks.
 #
-# Quick start:
-#   cmake --preset debug   -S engine
-#   cmake --build          build/debug
-#   ctest --test-dir       build/debug --output-on-failure
-#
-# Issue #1: this file establishes the build system. Subsequent issues add
-# the Tensor class, ONNX parser, operators, and graph executor.
+# Quick start (from the repo root):
+#   cmake -S engine -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+#         -DCRUCIBLE_ENABLE_TESTS=ON -DCRUCIBLE_ENABLE_PYTHON_BINDINGS=ON
+#   cmake --build build/release
+#   ctest --test-dir build/release --output-on-failure
 # =============================================================================
 
 cmake_minimum_required(VERSION 3.25)
 project(crucible
     VERSION 0.1.0
-    DESCRIPTION "Zero-overhead ONNX inference engine"
+    DESCRIPTION "From-scratch ONNX inference engine (C++17, float32, CPU)"
     LANGUAGES CXX
 )
 
@@ -86,7 +84,7 @@ set(CRUCIBLE_CORE_SOURCES
     src/ops/conv2d.cpp
     src/ops/pooling.cpp
     src/ops/norm.cpp
-    # Issue #15: C ABI for the Rust CLI / WASM bindings.
+    # C ABI for the Rust CLI.
     # Built into the static core so the symbols are always available;
     # also exported via the SHARED library below for the FFI consumers.
     src/c_api.cpp
@@ -99,7 +97,7 @@ add_library(crucible::core ALIAS crucible_core)
 # -----------------------------------------------------------------------------
 # Shared library: crucible (the artifact consumed by the Rust CLI)
 # -----------------------------------------------------------------------------
-# Issue #15: the Rust CLI links against the SHARED library at runtime
+# The Rust CLI links against the SHARED library at runtime
 # (libcrucible.so / libcrucible.dylib / crucible.dll). We mirror the
 # static core's sources into the shared target so the C ABI symbols
 # are visible in exactly one place. BUILD_SHARED_LIBS is OFF by

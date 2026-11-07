@@ -78,6 +78,8 @@ models/*.pt
 models/*.pth
 !models/.gitkeep
 !models/download_models.py
+models/data/*.csv
+models/data/*.zip
 
 # Build output copied by web/scripts/postbuild.js (never commit: Vercel builds from source)
 /public/

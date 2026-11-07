@@ -490,10 +490,26 @@ public:
         if (node.outputs.empty() || node.outputs[0].empty()) {
             node_error(node, "node has no output");
         }
-        owned_[node.outputs[0]] = std::move(t);
+        auto& slot = owned_[node.outputs[0]];
+        live_ -= slot.size();
+        live_ += t.size();
+        if (max_live_ > 0 && live_ > max_live_) {
+            throw ResourceLimitError(
+                "intermediate tensors need " + std::to_string(live_) +
+                " elements in total after " + node_label(node) +
+                ", above the configured limit of " + std::to_string(max_live_));
+        }
+        slot = std::move(t);
     }
 
-    void release(const std::string& name) { owned_.erase(name); }
+    void release(const std::string& name) {
+        if (auto it = owned_.find(name); it != owned_.end()) {
+            live_ -= it->second.size();
+            owned_.erase(it);
+        }
+    }
+
+    void set_live_limit(int64_t max_live) { max_live_ = max_live; }
 
     Tensor take(const std::string& name) {
         if (auto it = owned_.find(name); it != owned_.end()) {
@@ -512,6 +528,8 @@ private:
     const Model& model_;
     const std::unordered_map<std::string, Tensor>& inputs_;
     std::unordered_map<std::string, Tensor> owned_;
+    int64_t live_ = 0;      // elements held in owned_
+    int64_t max_live_ = 0;  // 0 = unlimited
 };
 
 void validate_inputs(const Model& model,
@@ -689,7 +707,13 @@ Tensor run_node(const GraphNode& node, const Model& model, const TensorEnv& env)
             const Tensor& s = env.input(node, 1);
             shape.reserve(static_cast<std::size_t>(s.size()));
             for (int64_t i = 0; i < s.size(); ++i) {
-                shape.push_back(static_cast<int64_t>(s.data()[i]));
+                const float v = s.data()[i];
+                // Out-of-range or fractional float -> int64 conversion is UB.
+                if (!std::isfinite(v) || v != std::trunc(v) || std::fabs(v) > 9.0e15f) {
+                    node_error(node, "shape input must contain integers, got " +
+                                         std::to_string(v));
+                }
+                shape.push_back(static_cast<int64_t>(v));
             }
         }
         int neg_idx = -1;
@@ -785,7 +809,10 @@ std::vector<std::string> check_model(const Model& model) {
 }
 
 Tensor run_inference(const Model& model,
-                     const std::unordered_map<std::string, Tensor>& inputs) {
+                     const std::unordered_map<std::string, Tensor>& inputs,
+                     const RunOptions& options) {
+    ScopedElementLimit limit(options.max_tensor_elements);
+    ScopedDeadline deadline(options.timeout_ms);
     validate_inputs(model, inputs);
     if (model.output_names.empty()) {
         throw std::runtime_error("run_inference: model has no output_names");
@@ -795,22 +822,27 @@ Tensor run_inference(const Model& model,
     const auto order = topological_order(nodes);
 
     // Last consumer (position in `order`) of every tensor name, so each
-    // intermediate can be freed as soon as nothing else reads it.
+    // intermediate can be freed as soon as nothing else reads it. Only the
+    // first graph output is returned, so it is the only one kept to the end;
+    // outputs nobody consumes are freed immediately.
     std::unordered_map<std::string, std::size_t> last_use;
     for (std::size_t pos = 0; pos < order.size(); ++pos) {
         for (const auto& in : nodes[order[pos]].inputs) last_use[in] = pos;
     }
-    const std::unordered_set<std::string> graph_outputs(model.output_names.begin(),
-                                                        model.output_names.end());
+    const std::string& result_name = model.output_names[0];
 
     TensorEnv env(model, inputs);
+    env.set_live_limit(options.max_total_elements);
     for (std::size_t pos = 0; pos < order.size(); ++pos) {
+        check_deadline("between nodes");
         const GraphNode& node = nodes[order[pos]];
         check_node(node, model.graph.opset);
         env.put(node, run_node(node, model, env));
+        const std::string& out = node.outputs[0];
+        if (out != result_name && !last_use.count(out)) env.release(out);
         for (const auto& in : node.inputs) {
             auto it = last_use.find(in);
-            if (it != last_use.end() && it->second == pos && !graph_outputs.count(in)) {
+            if (it != last_use.end() && it->second == pos && in != result_name) {
                 env.release(in);
             }
         }

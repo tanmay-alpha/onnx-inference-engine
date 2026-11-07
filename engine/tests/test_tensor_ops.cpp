@@ -1,13 +1,12 @@
 // =============================================================================
-// Crucible — Tensor operations tests (Issue #3)
+// Crucible — Tensor operations tests
 //
-// Contract from ENGINEERING_PLAN.md §4:
+// Covers:
 //   - Tensor reshape(std::vector<int64_t> new_shape) const;
 //   - Tensor flatten() const;
 //   - void   print(int max_elements = 10) const;
 //
-// Acceptance: 4 more tests pass. reshape({6}) of 2x3 tensor has same
-// elements. flatten() is shape {N}.
+// reshape({6}) of a 2x3 tensor keeps the elements; flatten() is shape {N}.
 // =============================================================================
 
 #include "crucible/tensor.hpp"

@@ -4,11 +4,14 @@ Every upload goes through :func:`analyze_model_file`:
 
 1. ``onnx.load`` (external data is never followed) + ``onnx.checker`` —
    malformed files raise ``ValueError`` (HTTP 400).
-2. If the native engine is importable: ``crucible_py.load_model`` +
+2. A graph with more than ``MAX_GRAPH_NODES`` nodes is marked unsupported
+   with a reason (``node_count`` reports the size) and is neither checked nor
+   loaded further; ``/convert`` refuses to store it.
+3. If the native engine is importable: ``crucible_py.load_model`` +
    ``check_model`` + ``get_model_info`` provide the authoritative support
    verdict, operator list and I/O signature. A model the native loader
    rejects is still stored, marked unsupported with the loader's reason.
-3. If the native engine is missing: metadata comes from the ``onnx``
+4. If the native engine is missing: metadata comes from the ``onnx``
    package and support is judged against :data:`SUPPORTED_OPS`, a static
    mirror of ``crucible_py.supported_ops()``. ``native_checked`` is False
    so callers can tell the verdict is approximate.
@@ -25,6 +28,9 @@ import onnx
 from onnx import TensorProto
 
 from server import engine
+from server.config import get_settings
+
+MAX_GRAPH_NODES = get_settings().MAX_GRAPH_NODES
 
 # Mirror of crucible_py.supported_ops() used only when the native module is
 # unavailable. A test asserts equality with the native list when it is built.
@@ -71,10 +77,15 @@ class ModelAnalysis:
     inputs: List[Dict[str, Any]]
     outputs: List[Dict[str, Any]]
     native_checked: bool
+    node_count: int = 0
     all_supported: bool = field(init=False)
 
     def __post_init__(self) -> None:
         self.all_supported = not self.unsupported_ops and not self.unsupported_reasons
+
+    @property
+    def exceeds_node_limit(self) -> bool:
+        return self.node_count > MAX_GRAPH_NODES
 
 
 def extract_op_types(model: onnx.ModelProto) -> List[str]:
@@ -122,6 +133,16 @@ def analyze_model_file(path: Path) -> ModelAnalysis:
         proto = onnx.load(str(path), load_external_data=False)
     except Exception as exc:  # noqa: BLE001 - any parse failure is a client error
         raise ValueError(f"Invalid ONNX (could not parse): {type(exc).__name__}") from exc
+
+    node_count = len(proto.graph.node)
+    if node_count > MAX_GRAPH_NODES:
+        # Checked before onnx.checker and the native loader, whose cost grows with the graph.
+        ops = extract_op_types(proto)
+        return ModelAnalysis(
+            _default_opset(proto), ops, [],
+            [f"graph has {node_count} nodes; the limit is {MAX_GRAPH_NODES}"],
+            [], [], native_checked=False, node_count=node_count,
+        )
     try:
         onnx.checker.check_model(proto)
     except onnx.checker.ValidationError as exc:
@@ -140,16 +161,17 @@ def analyze_model_file(path: Path) -> ModelAnalysis:
         if _uses_external_data(proto):
             reasons.append("initializers stored as external data are not supported")
         return ModelAnalysis(opset, onnx_ops, unsupported, reasons, onnx_inputs, onnx_outputs,
-                             native_checked=False)
+                             native_checked=False, node_count=node_count)
 
     native_ops = set(native.supported_ops())
     unsupported = sorted(set(onnx_ops) - native_ops)
+    del proto  # the native loader parses the file itself; don't hold both copies
     try:
         model = native.load_model(str(path))
     except (RuntimeError, ValueError) as exc:
         return ModelAnalysis(opset, onnx_ops, unsupported,
                              [f"native loader rejected the model: {exc}"],
-                             onnx_inputs, onnx_outputs, native_checked=True)
+                             onnx_inputs, onnx_outputs, native_checked=True, node_count=node_count)
 
     reasons = [str(r) for r in native.check_model(model)]
     info = native.get_model_info(model)
@@ -163,4 +185,5 @@ def analyze_model_file(path: Path) -> ModelAnalysis:
         inputs=[_native_spec(d) for d in info.get("inputs", [])],
         outputs=[_native_spec(d) for d in info.get("outputs", [])],
         native_checked=True,
+        node_count=node_count,
     )

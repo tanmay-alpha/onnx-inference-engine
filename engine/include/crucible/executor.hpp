@@ -30,19 +30,38 @@
 
 namespace crucible {
 
+// Per-run options.
+struct RunOptions {
+    // Upper bound on the element count of any single tensor or large engine
+    // temporary created during the run (0 = unlimited). Use it when running
+    // untrusted models: a few bytes of ONNX can request terabytes.
+    int64_t max_tensor_elements = 0;
+    // Upper bound on the summed element count of all intermediate tensors
+    // alive at once (0 = unlimited). Guards against graphs that keep many
+    // individually-small tensors alive.
+    int64_t max_total_elements = 0;
+    // Wall-clock budget in milliseconds (0 = none). Checked between nodes
+    // and in the outer loops of Conv/pooling; a single MatMul/Gemm call
+    // finishes before the check, so granularity is one such call.
+    int64_t timeout_ms = 0;
+};
+
 // Run a parsed ONNX model and return the value of its first listed output.
 //
 // Throws std::invalid_argument on:
 //   * a missing graph input, a non-float32 graph input, or an input whose
 //     shape contradicts the model's declared static dimensions
 //   * shape / rank mismatch inside an operator
+// Throws ResourceLimitError (a std::runtime_error) when a tensor would
+// exceed options.max_tensor_elements.
 // Throws std::runtime_error on:
 //   * unsupported operator, domain or attribute value
 //   * graph with a cycle
 //   * a node consuming a tensor that is neither a graph input, an
 //     initializer, nor a prior node's output
 Tensor run_inference(const Model& model,
-                     const std::unordered_map<std::string, Tensor>& inputs);
+                     const std::unordered_map<std::string, Tensor>& inputs,
+                     const RunOptions& options = {});
 
 // Static support check: one human-readable reason per problem that would
 // make run_inference fail regardless of input values (unsupported op /

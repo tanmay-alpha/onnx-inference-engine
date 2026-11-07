@@ -41,18 +41,23 @@ Prometheus text format: `crucible_inference_requests_total{engine,status}`, `cru
 ## Accounts and keys
 
 - `POST /auth/register` — `{"email": "...", "password": "<8-128 chars>", "full_name": "optional"}` → `201` user; `409` if the email exists (case-insensitive).
-- `POST /auth/login` — `{"email": "...", "password": "..."}` → `{"access_token": "...", "token_type": "bearer", "expires_in": 3600}`; `401` on bad credentials.
+- `POST /auth/login` — `{"email": "...", "password": "..."}` → `{"access_token": "...", "token_type": "bearer", "expires_in": 3600}`; `401` on bad credentials (unknown emails take the same bcrypt check as wrong passwords).
 - `GET /auth/me` → `{"id", "email", "full_name", "is_active", "is_admin", "created_at"}`.
 - `POST /auth/api-key` — `{"name": "ci", "expires_in_days": 90 | null}` → key info plus `full_key` (shown once).
-- `GET /auth/api-keys` → `[{"id", "name", "key_prefix", "is_active", "rate_limit", "last_used", "created_at", "expires_at"}]`. `rate_limit` is stored but **not enforced**.
+- `GET /auth/api-keys` → `[{"id", "name", "key_prefix", "is_active", "rate_limit", "last_used", "created_at", "expires_at"}]`. `rate_limit` (default 100) is the key's budget in inference requests per minute on `/infer` and `/inference/batch` (each batch item counts); beyond it → `429` + `Retry-After`. JWT callers have no per-minute limit.
 - `DELETE /auth/api-key/{key_id}` → `{"status": "revoked", "key_id": "..."}`.
 
 The `/auth/me` and API-key routes need a user (the operator key gets `403`).
 
+### Rate limits
+`POST /auth/login` and `POST /auth/register` together allow `AUTH_RATE_LIMIT_PER_IP` (default 30) attempts per client IP per `AUTH_RATE_WINDOW_SEC` (default 300 s, sliding); logins additionally `AUTH_RATE_LIMIT_PER_IP_EMAIL` (default 10) per IP+email. Beyond → `429` with `Retry-After` (seconds). The client IP is the TCP peer, or the first `X-Forwarded-For` entry when `TRUST_PROXY_HEADERS=true` (enable only behind a proxy that sets that entry itself, such as Render's; otherwise clients can spoof it).
+
+All limits are kept **in process memory**: they reset on restart and are not shared between instances or workers (each enforces its own).
+
 ## Models
 
 ### `POST /convert`
-Multipart: `model_file` (ONNX file, ≤ `MAX_UPLOAD_BYTES`, default 100 MB). `input_shape` is accepted for backward compatibility and ignored — signatures are read from the model.
+Multipart: `model_file` (ONNX file, ≤ `MAX_UPLOAD_BYTES`, default 50 MB — parsing peaks at roughly twice the file size). `input_shape` is accepted for backward compatibility and ignored — signatures are read from the model.
 
 The file is saved as `<uuid>.onnx`, checked with `onnx.checker` and, when available, the native loader (`crucible_py.load_model` + `check_model` + `get_model_info`). Models Crucible cannot run are **still stored** and flagged.
 ```json
@@ -64,11 +69,21 @@ The file is saved as `<uuid>.onnx`, checked with `onnx.checker` and, when availa
   "outputs": [{"name": "prob",  "shape": [-1, 1], "dtype": "float32"}]
 }
 ```
-`shape` uses `-1` for dynamic dims and `null` for unknown rank. Malformed ONNX → `400`; oversize → `413`.
+`shape` uses `-1` for dynamic dims and `null` for unknown rank.
+
+| Status | When |
+| --- | --- |
+| `400` | malformed ONNX; graph with more than `MAX_GRAPH_NODES` (default 2000) nodes (not stored) |
+| `409` | you already store `MAX_MODELS_PER_USER` (default 20) models |
+| `413` | file > `MAX_UPLOAD_BYTES`, or it would push your stored bytes past `MAX_STORAGE_BYTES_PER_USER` (default 200 MB) |
+| `503` | `MAX_CONCURRENT_ANALYSES` (default 1) analyses already running (`Retry-After: 2`) |
+
+Quotas don't apply to the operator key.
 
 ### `POST /validate`
 Multipart with exactly one of `model_file` (analysed, not stored) or `model_id` (one of yours). Returns
 `{"valid", "operators", "unsupported", "unsupported_reasons", "opset", "inputs", "outputs"}`.
+A graph over `MAX_GRAPH_NODES` nodes comes back `valid: false` with the node count in `unsupported_reasons`. Malformed ONNX → `400`; busy → `503` as for `/convert`.
 
 ### `GET /models`
 `{"models": [ModelItem], "count": n}` — your models only.
@@ -92,24 +107,27 @@ Runs **only** on the native C++ engine; there is no fallback.
 ```
 `output` is the model's first output. `inference_time_ms` times `crucible_py.run` only (no HTTP, JSON or model loading). Loaded models are cached (LRU, `MODEL_CACHE_SIZE`).
 
+Each run is bounded by the engine: no single tensor above `MAX_TENSOR_ELEMENTS` (default 16M), live intermediates together ≤ `MAX_TOTAL_ELEMENTS` (default 64M = 256 MB float32), and a deadline of `INFERENCE_TIMEOUT_SEC`.
+
 | Status | When |
 | --- | --- |
 | `404` | model unknown or not yours |
 | `410` | model file no longer on disk (ephemeral hosting) — upload again |
-| `413` | more than `MAX_INPUT_ELEMENTS` (default 4,000,000) elements, or body > `MAX_REQUEST_BODY_BYTES` |
-| `422` | value count ≠ product(`input_shape`); shape doesn't match the model's static dims; NaN/Inf input; model not supported; multi-input or non-float32 model; engine rejected the input; NaN/Inf output |
+| `413` | more than `MAX_INPUT_ELEMENTS` (default 4,000,000) input elements, output larger than `MAX_OUTPUT_ELEMENTS` (default 1,000,000), or body > `MAX_REQUEST_BODY_BYTES` |
+| `422` | value count ≠ product(`input_shape`); shape doesn't match the model's static dims; NaN/Inf input; model not supported; multi-input or non-float32 model; engine rejected the input; a tensor or the run's intermediates exceed the element limits; NaN/Inf output |
+| `429` | API key over its `rate_limit` per minute (`Retry-After`) |
 | `503` | native engine unavailable, or all `MAX_CONCURRENT_INFERENCES` slots busy (`Retry-After: 1`) |
-| `504` | run exceeded `INFERENCE_TIMEOUT_SEC`. The native call cannot be cancelled: it finishes in the background and holds its slot until then |
+| `504` | run exceeded `INFERENCE_TIMEOUT_SEC`. The engine checks the deadline between nodes and inside Conv/pooling/MatMul outer loops, so the run stops shortly after it (best effort: one node or outer-loop step) and frees its slot |
 
 ### `POST /inference/batch`
-Body: a JSON **array** of `/infer` requests (≤ `MAX_BATCH_SIZE`, default 32; total elements ≤ `MAX_INPUT_ELEMENTS`). Items run sequentially.
+Body: a JSON **array** of `/infer` requests (≤ `MAX_BATCH_SIZE`, default 32; total input elements ≤ `MAX_INPUT_ELEMENTS`). Items run sequentially.
 ```json
 {"batch_size": 2, "success_count": 1, "error_count": 1, "results": [
   {"model_id": "...", "status": "success", "output": [...], "output_shape": [...], "inference_time_ms": 0.2, "backend": "crucible-native"},
   {"model_id": "...", "status": "error", "error": "Model ... not found", "status_code": 404, "backend": "crucible-native"}
 ]}
 ```
-`503` for the whole batch when the native engine is unavailable.
+Whole-batch errors: `503` when the native engine is unavailable; `413` when the outputs together exceed `MAX_OUTPUT_ELEMENTS` (processing stops there); `429` when an API key lacks budget for every item.
 
 ### `GET /inference/logs?limit=50`
 `{"logs": [{"id", "model_id", "latency_ms", "backend", "input_shape", "output_shape", "status", "created_at"}], "count": n}` — your runs; `status` is `success`, `error` or `timeout`.

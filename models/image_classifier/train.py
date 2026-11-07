@@ -1,14 +1,13 @@
 """
-Export pretrained PyTorch image classification models to ONNX format.
+Export torchvision's pretrained (IMAGENET1K_V1) image classifiers to ONNX.
+Nothing is trained; the committed models/*.onnx files come from the ONNX
+model zoo via models/download_models.py, not from this script.
 
-Supported models:
-  - mobilenet_v2  (lightweight, ~14 MB)
-  - resnet18      (higher accuracy, ~45 MB)
+Supported models: mobilenet_v2, resnet18
 
 Usage:
-    python models/image_classifier/train.py --model mobilenet_v2
-    python models/image_classifier/train.py --model resnet18 --output-dir models/
-    python models/image_classifier/train.py --both
+    python models/image_classifier/train.py --model mobilenet_v2 --output-dir /tmp/export
+    python models/image_classifier/train.py --both --output-dir /tmp/export
 
 The exported ONNX model is validated and a test inference is run to verify
 output shapes and value ranges.

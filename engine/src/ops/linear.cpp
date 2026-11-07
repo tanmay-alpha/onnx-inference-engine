@@ -5,13 +5,11 @@
 // Eigen::RowMajor storage order, so layout matches the rest of the
 // engine (PyTorch / NumPy / ONNX Runtime).
 //
-// Why not write our own matmul?
-//   * Eigen gives us a 30-year-battle-tested BLAS integration on
-//     x86_64 (FMA + AVX2 path) and NEON on aarch64. Hand-written
-//     float32 matmul would be 2-5x slower for the same correctness.
-//   * The plan (Issue #5 AC) only requires 1e-5 numerical match
-//     against numpy, which Eigen's default product() provides
-//     out of the box.
+// Why Eigen instead of a hand-written matmul?
+//   * Eigen's GEMM is blocked and vectorised (SSE2 in the portable x86_64
+//     build; AVX/FMA only when built with -DCRUCIBLE_MARCH_NATIVE=ON).
+//     A naive triple loop is much slower and not worth maintaining here.
+//   * Results match ONNX Runtime to ~1e-5 (engine/tests/python/test_parity.py).
 //   * Eigen is header-only — no extra build steps, no .so to ship.
 //
 // The code is C++17, follows the same style as tensor.cpp (RAII,
@@ -64,11 +62,11 @@ Tensor matmul(const Tensor& A, const Tensor& B) {
             "matmul: inner dimension mismatch (A.cols=" +
             std::to_string(a.cols) + ", B.rows=" + std::to_string(b.rows) + ")");
     }
-    RowMatrix Ya = view(A);
-    RowMatrix Yb = view(B);
-    // Eigen product is fully expression-templated; assigning to RowMatrix
-    // forces materialisation in row-major so the data layout matches
-    // the rest of the engine.
+    check_element_budget(a.rows * b.cols, "MatMul output");
+    // Map the operands in place (no copy); the product is materialised
+    // row-major so the data layout matches the rest of the engine.
+    const auto Ya = view(A);
+    const auto Yb = view(B);
     RowMatrix Yc = Ya * Yb;
 
     // Copy the Eigen result into a fresh Tensor (Eigen allocates its
@@ -100,10 +98,11 @@ Tensor gemm(const Tensor& A, const Tensor& B, const Tensor& C,
             ", B=" + std::to_string(K2) + ")");
     }
 
-    RowMatrix Ya = view(A);
-    RowMatrix Yb = view(B);
+    check_element_budget(M * N, "Gemm output");
+    const auto Ya = view(A);
+    const auto Yb = view(B);
 
-    RowMatrix Yc = RowMatrix::Zero(M, N);
+    RowMatrix Yc(M, N);
     if (!transA) {
         if (!transB) Yc = Ya * Yb;
         else         Yc = Ya * Yb.transpose();

@@ -169,8 +169,8 @@ fn cmd_run(
     let model = runner::Model::load(model_path)?;
     let input = runner::Tensor::from_json_file(input_path)?;
     let outputs = model.run(&[input])?;
-    // The C side only fills the first output for now; later we'll
-    // surface all of them once Issue #11's Session lands.
+    // The engine's C ABI fills only the model's first output; any
+    // further outputs come back empty, so only the first is printed.
     let out = outputs.into_iter().next().unwrap_or_else(runner::Tensor::empty);
 
     let labels = match labels_path {

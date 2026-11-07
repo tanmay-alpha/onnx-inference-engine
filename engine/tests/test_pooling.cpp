@@ -1,7 +1,7 @@
 // GoogleTest cases for crucible::ops::maxpool_forward and
-// crucible::ops::avgpool_forward (Issue #8: pooling operators).
+// crucible::ops::avgpool_forward (pooling operators).
 //
-// The AC test required by the plan:
+// Core test:
 //   * MaxPoolHalvesDims — MaxPool(2,2,stride=2) on (1,32,222,222)
 //                          → (1,32,111,111).
 //
@@ -293,7 +293,7 @@ TEST(AvgPool, SourceUnchanged) {
 }
 
 // -----------------------------------------------------------------------
-// GlobalAveragePool — Issue #10.
+// GlobalAveragePool.
 //
 // Used by MobileNetV2 and ResNet18 as the classifier head (the layer
 // right before the final fully-connected layer). Each (N, C) feature

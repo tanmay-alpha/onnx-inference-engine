@@ -327,6 +327,71 @@ def _expect_reject(model, feeds, tmp_path, match):
         crucible_py.run(m, feeds)
 
 
+# --------------------------------------------------------------------------
+# untrusted-model resource limits
+# --------------------------------------------------------------------------
+
+def test_tensor_budget_rejects_tiny_model_requesting_huge_tensor(tmp_path):
+    # ~100 bytes of ONNX asking for a 400k x 400k Conv output (~640 GB).
+    x = np.ones((1, 1, 4, 4), np.float32)
+    node = helper.make_node("Conv", ["X", "W"], ["Y"], pads=[200000] * 4)
+    model = _make_model([node], [_vi("X", x.shape)], [_vi("Y", None)],
+                        [_init("W", np.ones((1, 1, 1, 1)))])
+    path = tmp_path / "m.onnx"
+    onnx.save(model, str(path))
+    m = crucible_py.load_model(str(path))
+    with pytest.raises(crucible_py.ResourceLimitError, match="limit"):
+        crucible_py.run(m, {"X": x}, max_tensor_elements=1_000_000)
+
+
+def test_tensor_budget_allows_models_within_limit():
+    m = crucible_py.load_model(str(REPO / "models" / "resnet18.onnx"))
+    x = np.zeros((1, 3, 224, 224), np.float32)
+    # Largest ResNet18 temporary is the first im2col buffer (147 x 12544).
+    assert crucible_py.run(m, {"data": x}, max_tensor_elements=4_000_000).shape == (1, 1000)
+
+
+def test_pool_cost_bounded_by_input_not_kernel_attribute(tmp_path):
+    # kernel_shape of 2e9 with matching pads: output is 5x5; the window loop
+    # must only visit in-bounds elements, so this finishes instantly.
+    x = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+    node = helper.make_node("MaxPool", ["X"], ["Y"], kernel_shape=[2_000_000_000] * 2,
+                            pads=[1_000_000_000] * 4, strides=[1, 1])
+    model = _make_model([node], [_vi("X", x.shape)], [_vi("Y", None)])
+    path = tmp_path / "m.onnx"
+    onnx.save(model, str(path))
+    y = crucible_py.run(crucible_py.load_model(str(path)), {"X": x})
+    assert y.shape == (1, 1, 5, 5) and np.all(y == 15.0)
+
+
+def test_total_budget_counts_many_live_intermediates(tmp_path):
+    # Each Relu output is small, but a Concat keeps 50 of them alive at once.
+    x = np.ones((1, 1000), np.float32)
+    nodes = [helper.make_node("Relu", ["X"], [f"r{i}"]) for i in range(50)]
+    nodes.append(helper.make_node("Concat", [f"r{i}" for i in range(50)], ["Y"], axis=0))
+    model = _make_model(nodes, [_vi("X", x.shape)], [_vi("Y", [50, 1000])])
+    path = tmp_path / "m.onnx"
+    onnx.save(model, str(path))
+    m = crucible_py.load_model(str(path))
+    assert crucible_py.run(m, {"X": x}, max_total_elements=100_000).shape == (50, 1000)
+    with pytest.raises(crucible_py.ResourceLimitError, match="in total"):
+        crucible_py.run(m, {"X": x}, max_total_elements=20_000)
+
+
+def test_deadline_stops_long_running_graph(tmp_path):
+    # 400 chained 256x256 MatMuls take far longer than 1 ms.
+    w = _rand(256, 256) * 0.01
+    nodes = [helper.make_node("MatMul", ["X" if i == 0 else f"h{i}", "W"], [f"h{i + 1}"])
+             for i in range(400)]
+    nodes.append(helper.make_node("Identity", ["h400"], ["Y"]))
+    model = _make_model(nodes, [_vi("X", [256, 256])], [_vi("Y", [256, 256])], [_init("W", w)])
+    path = tmp_path / "m.onnx"
+    onnx.save(model, str(path))
+    m = crucible_py.load_model(str(path))
+    with pytest.raises(crucible_py.ResourceLimitError, match="deadline"):
+        crucible_py.run(m, {"X": _rand(256, 256)}, timeout_ms=1)
+
+
 def test_rejects_unsupported_op(tmp_path):
     x = _rand(2, 3)
     node = helper.make_node("Mul", ["X", "X"], ["Y"])

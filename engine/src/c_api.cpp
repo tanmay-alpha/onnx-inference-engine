@@ -1,5 +1,5 @@
 // =============================================================================
-// Crucible C ABI implementation — Issue #15 (Rust CLI bridge).
+// Crucible C ABI implementation (used by the Rust CLI).
 //
 // The contract lives in engine/include/crucible/c_api.h. This file
 // is a thin `extern "C"` wrapper over the C++ engine: it owns the
@@ -294,10 +294,7 @@ extern "C" CRUCIBLE_API CrucibleStatus crucible_run(
                 model->holder->input_name_ptrs[i],
                 crucible::Tensor(std::move(shape), std::move(data)));
         }
-        // The current executor returns the FIRST output. We run
-        // once per output (wasteful but correct) — this will be
-        // fixed when Issue #11's Session class exposes
-        // multi-output run_inference.
+        // The executor returns only the model's FIRST output.
         if (num_outputs > 0) {
             crucible::Tensor out = crucible::run_inference(
                 model->holder->model, cpp_inputs);
@@ -306,10 +303,8 @@ extern "C" CRUCIBLE_API CrucibleStatus crucible_run(
             if (ttb_status != CRUCIBLE_OK) {
                 return ttb_status;
             }
-            // For any additional declared outputs we don't have a
-            // multi-output path yet; surface that by leaving the
-            // buffer null and rank=0 so the Rust side knows the
-            // value is absent. Future fix in Issue #11's Session.
+            // Further declared outputs are not computed; report them as
+            // absent (null buffer, rank 0) so callers can tell.
             for (int32_t i = 1; i < num_outputs; ++i) {
                 output_descs[i].rank = 0;
                 output_descs[i].size = 0;

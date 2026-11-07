@@ -26,6 +26,23 @@
 use wasm_bindgen::prelude::*;
 use std::collections::HashMap;
 
+/// Largest tensor (in elements) any parsed or computed value may have.
+/// 64M f32 = 256 MiB, well above every demo model and far below what would
+/// let a hostile model exhaust the browser tab.
+pub const MAX_TENSOR_ELEMENTS: usize = 64 * 1024 * 1024;
+
+/// Checked element count of `dims`: rejects negative dims, overflow, and
+/// anything above [`MAX_TENSOR_ELEMENTS`].
+pub fn checked_numel<I: IntoIterator<Item = i64>>(dims: I, what: &str) -> Result<usize, String> {
+    let n = dims.into_iter().try_fold(1usize, |acc, d| {
+        let d = usize::try_from(d).map_err(|_| format!("{what}: negative dimension {d}"))?;
+        acc.checked_mul(d)
+            .filter(|&n| n <= MAX_TENSOR_ELEMENTS)
+            .ok_or_else(|| format!("{what}: tensor exceeds {MAX_TENSOR_ELEMENTS} element limit"))
+    })?;
+    Ok(n)
+}
+
 // ============================================================================
 // Tensor representation
 // ============================================================================
@@ -104,7 +121,7 @@ impl<'a> Cursor<'a> {
     }
 
     fn read_length_delimited(&mut self) -> Result<&'a [u8], String> {
-        let len = self.read_varint()? as usize;
+        let len = usize::try_from(self.read_varint()?).unwrap_or(usize::MAX);
         if len > self.remaining() {
             return Err("ONNX: length-delimited payload exceeds buffer".into());
         }
@@ -142,7 +159,7 @@ impl<'a> Cursor<'a> {
                 self.read_fixed64()?;
             }
             2 => {
-                let len = self.read_varint()? as usize;
+                let len = usize::try_from(self.read_varint()?).unwrap_or(usize::MAX);
                 if len > self.remaining() {
                     return Err("ONNX: skip length exceeds buffer".into());
                 }
@@ -508,18 +525,7 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
                 if tp.name.is_empty() {
                     return Err("ONNX: initializer with empty name".into());
                 }
-                let expected_len = if tp.dims.is_empty() {
-                    1
-                } else {
-                    tp.dims.iter().try_fold(1usize, |acc, &d| {
-                        if d < 0 {
-                            return Err("ONNX: negative initializer dimension".to_string());
-                        }
-                        let d_us = d as usize;
-                        acc.checked_mul(d_us)
-                            .ok_or_else(|| "ONNX: dim product overflowed usize".to_string())
-                    })?
-                };
+                let expected_len = checked_numel(tp.dims.iter().copied(), "ONNX initializer")?;
                 if tp.data_type == 1 {
                     if tp.float_data.len() != expected_len {
                         return Err(format!(
@@ -705,7 +711,7 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor, String> {
             b.data.len()
         ));
     }
-    let total = m.checked_mul(n).ok_or("MatMul: output size overflows usize")?;
+    let total = checked_numel([m as i64, n as i64], "MatMul output")?;
     let mut data = vec![0.0f32; total];
     for r in 0..m {
         let a_row = &a.data[r * k..(r + 1) * k];
@@ -750,18 +756,17 @@ pub fn softmax(input: &Tensor, axis_attr: Option<i64>, opset: Option<i64>) -> Re
     }
     let axis = axis as usize;
     let dims: Vec<usize> = input.shape.iter().map(|&d| d.max(0) as usize).collect();
+    let numel = |s: &[usize]| checked_numel(s.iter().map(|&d| d as i64), "softmax");
 
     // Normalise over `n` elements spaced by `stride`, in `outer * stride` groups.
     let (outer, n, stride) = if legacy {
-        let outer: usize = dims[..axis].iter().product();
-        let n: usize = dims[axis..].iter().product();
-        (outer, n, 1usize)
+        (numel(&dims[..axis])?, numel(&dims[axis..])?, 1usize)
     } else {
-        let outer: usize = dims[..axis].iter().product();
-        let inner: usize = dims[axis + 1..].iter().product();
-        (outer, dims[axis], inner)
+        (numel(&dims[..axis])?, dims[axis], numel(&dims[axis + 1..])?)
     };
-    if outer * n * stride != input.data.len() {
+    if checked_numel(input.shape.iter().copied(), "softmax")? != input.data.len()
+        || outer.checked_mul(n).and_then(|v| v.checked_mul(stride)) != Some(input.data.len())
+    {
         return Err(format!(
             "softmax: shape {:?} does not match data length {}",
             input.shape,
@@ -797,14 +802,16 @@ pub fn softmax(input: &Tensor, axis_attr: Option<i64>, opset: Option<i64>) -> Re
 /// Elementwise Add with numpy-style multidirectional broadcasting.
 pub fn add(a: &Tensor, b: &Tensor) -> Result<Tensor, String> {
     let rank = a.shape.len().max(b.shape.len());
-    let pad = |s: &[i64]| -> Vec<usize> {
+    let pad = |s: &[i64]| -> Result<Vec<usize>, String> {
         let mut v = vec![1usize; rank - s.len()];
-        v.extend(s.iter().map(|&d| d.max(0) as usize));
-        v
+        for &d in s {
+            v.push(usize::try_from(d).map_err(|_| format!("add: negative dimension in {:?}", s))?);
+        }
+        Ok(v)
     };
-    let (sa, sb) = (pad(&a.shape), pad(&b.shape));
-    let numel = |s: &[usize]| s.iter().product::<usize>();
-    if numel(&sa) != a.data.len() || numel(&sb) != b.data.len() {
+    let (sa, sb) = (pad(&a.shape)?, pad(&b.shape)?);
+    let numel = |s: &[usize]| checked_numel(s.iter().map(|&d| d as i64), "add");
+    if numel(&sa)? != a.data.len() || numel(&sb)? != b.data.len() {
         return Err(format!(
             "add: tensor shape/data mismatch (A {:?} len {}, B {:?} len {})",
             a.shape,
@@ -837,7 +844,7 @@ pub fn add(a: &Tensor, b: &Tensor) -> Result<Tensor, String> {
         st
     };
     let (sta, stb) = (strides(&sa), strides(&sb));
-    let total = numel(&out);
+    let total = numel(&out)?;
     let mut data = Vec::with_capacity(total);
     let mut idx = vec![0usize; rank];
     let (mut ia, mut ib) = (0usize, 0usize);
@@ -947,13 +954,8 @@ pub fn run_inference_internal(
             input_vi.name, input_vi.elem_type
         ));
     }
-    let expected = input_shape.iter().try_fold(1usize, |acc, &d| {
-        if d < 0 {
-            return None;
-        }
-        acc.checked_mul(d as usize)
-    });
-    if expected != Some(input_data.len()) {
+    let expected = checked_numel(input_shape.iter().copied(), "input");
+    if expected.as_ref().ok() != Some(&input_data.len()) {
         return Err(format!(
             "input data has {} elements but shape {:?} is invalid or needs a different count",
             input_data.len(),
@@ -1313,6 +1315,92 @@ mod tests {
         assert!(matmul(&a, &a).unwrap_err().contains("inner dimensions differ"));
         assert!(matmul(&t(&[3], &[1.0, 2.0, 3.0]), &b).unwrap_err().contains("rank-2"));
         assert!(matmul(&a, &t(&[3, 1], &[1.0])).unwrap_err().contains("shape/data mismatch"));
+    }
+
+    #[test]
+    fn test_huge_shapes_rejected() {
+        // [65536,1] + [1,65536] broadcasts to 4G elements: must Err, not OOM.
+        let a = t(&[65536, 1], &vec![0.0; 65536]);
+        let b = t(&[1, 65536], &vec![0.0; 65536]);
+        assert!(add(&a, &b).unwrap_err().contains("element limit"));
+        // Products that overflow usize.
+        let big = t(&[i64::MAX, i64::MAX, 0], &[]);
+        assert!(add(&big, &big).is_err());
+        assert!(softmax(&big, None, Some(13)).is_err());
+        assert!(add(&t(&[-1], &[]), &t(&[1], &[1.0])).is_err());
+        // MatMul output over the cap with tiny (k = 0) operands.
+        let a = t(&[1 << 20, 0], &[]);
+        let b = t(&[0, 1 << 20], &[]);
+        assert!(matmul(&a, &b).unwrap_err().contains("element limit"));
+        // Runtime input shape over the cap.
+        let model = load_model(&repo_file("models/fraud/fraud_detector.onnx")).unwrap();
+        assert!(run_inference_internal(&model, &[], &[1 << 40, 1 << 40, 0]).is_err());
+    }
+
+    /// Minimal protobuf encoders for hand-built malformed models.
+    fn varint(mut v: u64, out: &mut Vec<u8>) {
+        while v >= 0x80 {
+            out.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+    fn ld(field: u64, payload: &[u8]) -> Vec<u8> {
+        let mut o = Vec::new();
+        varint(field << 3 | 2, &mut o);
+        varint(payload.len() as u64, &mut o);
+        o.extend_from_slice(payload);
+        o
+    }
+
+    #[test]
+    fn test_malformed_protobuf_errors_not_panics() {
+        // Initializer claiming dims [2^31, 2^31] with 1 float of data.
+        let mut tensor = Vec::new();
+        for d in [1u64 << 31, 1 << 31] {
+            varint(1 << 3, &mut tensor);
+            varint(d, &mut tensor);
+        }
+        varint(2 << 3, &mut tensor);
+        varint(1, &mut tensor);
+        tensor.extend(ld(8, b"W"));
+        tensor.extend(ld(9, &[0, 0, 0, 0]));
+        let huge_init = ld(7, &ld(5, &tensor));
+        // Negative dim (varint of u64::MAX = -1).
+        let mut neg = Vec::new();
+        varint(1 << 3, &mut neg);
+        varint(u64::MAX, &mut neg);
+        neg.extend(ld(8, b"N"));
+        let neg_init = ld(7, &ld(5, &neg));
+
+        let mut huge_len = Vec::new();
+        varint(7 << 3 | 2, &mut huge_len);
+        varint(u64::MAX, &mut huge_len);
+        let mut huge_skip = Vec::new();
+        varint(99 << 3 | 2, &mut huge_skip);
+        varint(1 << 40, &mut huge_skip);
+
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("truncated varint", vec![0x08, 0x80]),
+            ("overlong varint", vec![0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]),
+            ("field 0", vec![0x00]),
+            ("bad wire type", vec![0x0f]),
+            ("truncated fixed32", vec![0x0d, 0x01]),
+            ("truncated fixed64", vec![0x09, 0x01, 0x02]),
+            ("huge length", huge_len),
+            ("huge skip", huge_skip),
+            ("truncated graph", ld(7, &[0x2a, 0x05, 0x01])),
+            ("huge initializer dims", huge_init),
+            ("negative initializer dim", neg_init),
+        ];
+        for (name, bytes) in &cases {
+            assert!(load_model(bytes).is_err(), "{name} parsed");
+        }
+        // Every truncation of a real model must Err or parse, never panic.
+        let good = repo_file("models/fraud/fraud_detector.onnx");
+        for n in 0..good.len() {
+            let _ = load_model(&good[..n]);
+        }
     }
 
     #[test]

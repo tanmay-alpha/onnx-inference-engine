@@ -1,4 +1,4 @@
-// GoogleTest cases for crucible::load_model() — Issue #4.
+// GoogleTest cases for crucible::load_model().
 //
 // These tests load tiny hand-crafted .onnx fixtures from
 // engine/tests/fixtures/ and verify that load_model() returns a Model

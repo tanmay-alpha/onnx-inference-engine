@@ -27,7 +27,8 @@
     0.36204198002815247
   ],
   "threshold": 0.5,
-  "auc": 0.847,
   "model_type": "LogisticRegression",
-  "note": "AUC is estimated after fixing the data leak that previously produced AUC=1.0. Re-run train_fraud_model.py to recompute the exact value."
+  "training_data": "synthetic two-population data (synthetic_data(), seed 42, 50,000 rows)",
+  "test_auc": 1.0,
+  "test_auc_note": "ROC AUC on the last 20% of the shuffled rows. On the synthetic data the classes are separable by construction, so this is not a real-world accuracy figure."
 }

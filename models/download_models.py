@@ -1,4 +1,4 @@
-"""Download ONNX models from the official ONNX model zoo.
+"""Download the two ONNX model zoo files committed in models/.
 
 Run from the repo root:
 
@@ -6,73 +6,45 @@ Run from the repo root:
     python models/download_models.py --model mobilenet_v2
     python models/download_models.py --model resnet18
 
-The files land in this directory (`models/`) and are gitignored.
-We pin to opset 7 for both models because Crucible's executor
-currently targets that opset — see ENGINEERING_PLAN.md §6.
+`models/mobilenet_v2.onnx` and `models/resnet18.onnx` are committed unmodified
+(force-added; `models/*.onnx` is otherwise gitignored). This script fetches
+the same files again and checks their SHA-256 against the committed copies.
 
-Why opset 7?
-  * It is the highest version for which MobileNetV2 and ResNet18
-    are published as standalone pre-converted .onnx files in the
-    ONNX model zoo (newer versions require exporting from PyTorch).
-  * The hand-rolled protobuf reader in `engine/src/onnx_parser.cpp`
-    covers the opset-7 schema's exact attribute set, so we don't
-    have to extend it for these two models.
+Both are the model zoo's opset-7 exports (`mobilenetv2-7.onnx`,
+`resnet18-v2-7.onnx`), the versions the zoo publishes as standalone files. The
+engine is not limited to opset 7; see docs/ARCHITECTURE.md for the parser and
+the opset-dependent semantics it handles.
 
-We use `urllib.request` (stdlib only) so the script runs in any
-Python 3.8+ without a `pip install` step. The official ONNX
-model-zoo S3 bucket has served these files reliably for years.
+Stdlib only (`urllib.request`), so no `pip install` is needed.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-# ResNet18 v2 is published as part of the ONNX model zoo under
-# `onnx-models/.../resnet18-v2-7.onnx`. The MobileNetV2 file is at
-# `onnx-models/.../mobilenetv2/mobilenet-v2-7.onnx`. The hosting
-# arrangement changed in 2023:
-#
-#   * The S3 mirror (`s3.amazonaws.com/onnx-model-zoo/...`) was
-#     decommissioned; URLs return 404.
-#   * The `onnx/models` GitHub repo serves the files via Git LFS.
-#     `git clone` retrieves the real binary, but the raw URL serves
-#     only the 133-byte LFS pointer — useless for direct download.
-#   * The ONNX model zoo redirected to HuggingFace
-#     (`huggingface.co/onnxmodelzoo/legacy_models`); the redirect is
-#     a 302 to an Xet-backed S3 mirror that serves the real binary.
-#
-# So our mirror list is:
+# The ONNX model zoo moved to HuggingFace (`onnxmodelzoo/legacy_models`); the
+# old S3 bucket is gone and the `onnx/models` GitHub raw URLs serve only Git LFS
+# pointers. HuggingFace answers with a 302 to a mirror that serves the file.
+_ZOO = "https://huggingface.co/onnxmodelzoo/legacy_models/resolve/main/validated/vision/classification"
 URLS = {
-    "mobilenet_v2": [
-        # HuggingFace (primary, current location of the model zoo)
-        "https://huggingface.co/onnxmodelzoo/legacy_models/resolve/main/validated/vision/classification/mobilenet/model/mobilenetv2-7.onnx",
-    ],
-    "resnet18": [
-        # HuggingFace (primary)
-        "https://huggingface.co/onnxmodelzoo/legacy_models/resolve/main/validated/vision/classification/resnet/model/resnet18-v2-7.onnx",
-    ],
+    "mobilenet_v2": f"{_ZOO}/mobilenet/model/mobilenetv2-7.onnx",
+    "resnet18": f"{_ZOO}/resnet/model/resnet18-v2-7.onnx",
 }
 
-# Approximate expected sizes (bytes). We don't pin a SHA-256 because
-# the model-zoo re-publishes occasionally; the size is good enough
-# to detect a truncated or HTML error page download.
-EXPECTED_SIZES = {
-    "mobilenet_v2": 13_900_000,   # ~13.3 MB
-    "resnet18":     44_700_000,   # ~44.6 MB
+# SHA-256 of the committed files, which match HuggingFace's X-Linked-ETag.
+SHA256 = {
+    "mobilenet_v2": "c1c513582d56afceff8516c73804e484c81c6a830712ab6d682253f4a3cd042f",
+    "resnet18": "3b4d048057854022232aa20bf68262e31718ab7119a17f920b8a2dc1433f824b",
 }
-
-DEFAULT_TOLERANCE = 0.20  # ±20% — covers the 7.x re-uploads
 
 
 def _download(url: str, dst: Path) -> int:
-    """Download `url` to `dst`. Returns bytes written. Raises on
-    HTTP errors so the caller can fall back to the next URL."""
+    """Download `url` to `dst`. Returns bytes written; raises on HTTP errors."""
     print(f"  GET {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "crucible-downloader/1.0"})
     with urllib.request.urlopen(req, timeout=300) as resp:
@@ -93,33 +65,15 @@ def download_model(name: str, dst_dir: Path) -> Path:
     if name not in URLS:
         raise ValueError(f"unknown model {name!r}; valid: {sorted(URLS)}")
     dst = dst_dir / f"{name}.onnx"
-    expected = EXPECTED_SIZES[name]
-    lo = int(expected * (1 - DEFAULT_TOLERANCE))
-    hi = int(expected * (1 + DEFAULT_TOLERANCE))
-
-    last_error: Exception | None = None
-    for url in URLS[name]:
-        try:
-            size = _download(url, dst)
-        except Exception as e:  # noqa: BLE001 — we genuinely want
-                                # to catch every failure (timeout,
-                                # 404, network unreachable) and try
-                                # the next URL.
-            last_error = e
-            print(f"  -> failed: {e}")
-            continue
-        if not (lo <= size <= hi):
-            print(f"  -> size {size} outside expected [{lo}, {hi}]; trying next mirror")
-            try:
-                dst.unlink()
-            except OSError:
-                pass
-            continue
-        sha = hashlib.sha256(dst.read_bytes()).hexdigest()
-        print(f"  -> wrote {dst} ({size:,} bytes) sha256={sha[:16]}...")
-        return dst
-    raise RuntimeError(
-        f"all mirrors failed for {name}; last error: {last_error}")
+    tmp = dst.with_suffix(".onnx.part")
+    size = _download(URLS[name], tmp)
+    sha = hashlib.sha256(tmp.read_bytes()).hexdigest()
+    if sha != SHA256[name]:
+        tmp.unlink()
+        raise RuntimeError(f"sha256 mismatch for {name}: got {sha}, expected {SHA256[name]}")
+    tmp.replace(dst)
+    print(f"  -> wrote {dst} ({size:,} bytes, sha256 verified)")
+    return dst
 
 
 def main() -> int:

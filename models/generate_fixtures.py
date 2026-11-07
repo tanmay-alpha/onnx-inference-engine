@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate tiny .onnx test fixtures for the Crucible C++ parser (Issue #4).
+Generate tiny .onnx test fixtures for the Crucible C++ parser.
 
 These are hand-crafted models that exercise the parser's full API surface
 while staying under a few KB each. They are committed alongside the test

@@ -1,4 +1,4 @@
-// Google Benchmark — crucible::ops::conv2d_forward (Issue #11).
+// Google Benchmark — crucible::ops::conv2d_forward.
 //
 // Measures the throughput of our im2col + Eigen-GEMM Conv2D on a
 // representative mid-sized tensor from MobileNetV2:
@@ -16,8 +16,8 @@
 //
 // We deliberately skip benchmarking multiple sizes here: conv2d has
 // enough configuration axes (kernel, stride, pad, groups, channels)
-// that a sweep is its own mini-project. Issue #11 just wants to see
-// conv2d in the harness, prove it works, and compare Debug vs Release.
+// that a sweep is its own mini-project. This benchmark only puts conv2d
+// in the harness, shows it works, and lets Debug and Release be compared.
 
 #include <benchmark/benchmark.h>
 

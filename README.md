@@ -85,22 +85,24 @@ the fraud model but not for any CNN, and the UI says so.
 
 | Model | Opset | Result |
 |---|---|---|
-| `models/fraud/fraud_detector.onnx` (MatMul → Add → Sigmoid) | 13 | max abs diff ≤ 1e-5 |
+| `models/fraud/fraud_detector.onnx` (logistic regression: MatMul → Add → Sigmoid) | 13 | max abs diff ≤ 1e-5 |
 | `models/resnet18.onnx` (ONNX model zoo) | 7 | rtol/atol 1e-3, same top-1 |
 | `models/mobilenet_v2.onnx` (ONNX model zoo) | 7 | rtol/atol 1e-3, same top-1 |
 | 67 single-operator graphs (broadcasting, groups, padding, axes, opsets) | 11–20 | rtol 1e-4, atol 1e-5 |
 
-These are all in `engine/tests/python/test_parity.py`. Models that aren't
-listed haven't been tested.
+These are all in `engine/tests/python/test_parity.py`, which also checks that
+unsupported features are rejected and that the resource limits for untrusted
+models fire (see [Security](#security)). Models that aren't listed haven't been
+tested.
 
 ## Testing
 
 | Suite | What it checks | Count |
 |---|---|---|
 | `ctest` (GoogleTest) | Tensor, parser, each operator, executor | 143 |
-| `engine/tests/python/test_parity.py` | Native engine vs ONNX Runtime | 70 |
-| `server/tests` | API, auth, ownership, limits; `/infer` output vs onnxruntime | 61 |
-| `wasm/` `cargo test` | WASM kernels and 12 ORT-generated fixtures | 22 |
+| `engine/tests/python/test_parity.py` | Native engine vs ONNX Runtime, rejections, resource limits | 75 |
+| `server/tests` | API, auth, ownership, quotas, rate limits; `/infer` output vs onnxruntime | 78 |
+| `wasm/` `cargo test` | WASM kernels, 12 ORT-generated fixtures, malformed/oversized inputs | 24 |
 | `cli/` `cargo test` | CLI argument handling | 2 |
 
 CI ([`ci-engine.yml`](.github/workflows/ci-engine.yml)):
@@ -111,6 +113,28 @@ CI ([`ci-engine.yml`](.github/workflows/ci-engine.yml)):
 
 `ci-rust.yml` runs the WASM tests and clippy; `ci-web.yml` runs type-check,
 lint and build.
+
+## Security
+
+Uploaded models, tensors and credentials are treated as untrusted input.
+
+| Threat | Mitigation |
+|---|---|
+| A tiny model requesting a huge tensor (a ~100-byte Conv with large pads asks for ~640 GB) | Engine limits per tensor and for all live intermediates together → `ResourceLimitError` → HTTP 422 |
+| A model that computes for hours | Wall-clock deadline checked between nodes and in Conv/pool loops; the run stops and returns 504, freeing its slot |
+| An absurd `kernel_shape` / pad values | Pool loops clamp to the input; pad arithmetic is 64-bit; shape products are overflow-checked |
+| Large uploads and graphs | 50 MB upload cap, graph node limit, one analysis at a time, parser memory about 2× the file size |
+| Disk and storage abuse | Per-user model-count and byte quotas; UUID filenames; deletes contained to the model directory |
+| Huge inputs or outputs | Input and output element caps (413), batch totals capped |
+| Account abuse | bcrypt; no email-enumeration timing difference; login/register rate limits; API keys stored as SHA-256 hashes, revocable, rate-limited |
+| Cross-user access | Every model, log and fraud record is scoped to its owner (404 otherwise) |
+| Browser | CSP, `frame-ancestors 'none'`, `nosniff`; the WASM runtime caps tensor sizes and turns malformed files into errors, not panics |
+
+**Known gaps:**
+* The JWT is kept in `localStorage`.
+* The CSP allows inline scripts, because TanStack Start's server-rendered hydration needs them.
+* Rate limits are per process, so they aren't shared across multiple instances.
+* A single large MatMul runs to completion before the deadline is checked again.
 
 ## Benchmarks
 
@@ -135,7 +159,7 @@ about 3.5–4× faster than the original code (169 → ~100–115 ms and
 196 → ~45–55 ms, measured in the same container): weights are no longer
 copied per run, conv results are written straight to the output, and 1×1 and
 depthwise convs have fast paths.
-The tiny fraud MLP runs in microseconds on every runtime, so those numbers
+The tiny fraud model runs in microseconds on every runtime, so those numbers
 measure call overhead, not kernel speed.
 
 ## Quick start (Linux / macOS)
@@ -261,8 +285,8 @@ export LD_LIBRARY_PATH=../build/release
   at upload time (`check_model`) and at run time, so a wrong result is never
   passed off as a supported one.
 * **Two runtimes.** The browser runtime is a separate Rust implementation
-  rather than the C++ engine compiled with Emscripten. That keeps the bundle
-  under 100 KB, but its op set is much smaller, and the UI labels which
+  rather than the C++ engine compiled with Emscripten. That keeps the `.wasm`
+  file at about 94 KB, but its op set is much smaller, and the UI labels which
   backend produced every result.
 
 ## Repository layout
@@ -274,7 +298,7 @@ cli/        Rust CLI over the C ABI
 wasm/       Rust/WASM interpreter + ORT fixtures
 web/        React frontend (TanStack Start), deployed to Vercel
 benchmarks/ Benchmark harness (results -> web/public/benchmarks/results.json)
-models/     Fraud model (+ training scripts), ResNet18, MobileNetV2
+models/     Fraud model (+ script that reproduces it), ResNet18, MobileNetV2
 docs/       Architecture, API reference, benchmark methodology
 ```
 

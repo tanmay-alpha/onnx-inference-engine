@@ -1,5 +1,5 @@
 // GoogleTest cases for crucible::ops activation functions
-// (Issue #6: Activation functions — ReLU, Sigmoid, Softmax, GELU).
+// (ReLU, Sigmoid, Softmax, GELU).
 //
 // Each op takes a Tensor and an optional std::unordered_map<std::string,
 // float> of named attributes, and returns a fresh Tensor. Inputs are

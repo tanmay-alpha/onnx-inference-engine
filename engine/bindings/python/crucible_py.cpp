@@ -1,5 +1,5 @@
 // =============================================================================
-// Crucible — pybind11 module (Issue #12)
+// Crucible — pybind11 module
 //
 // Exposes three entry points to Python:
 //
@@ -127,8 +127,13 @@ dict_to_inputs(const py::dict& inputs) {
 }  // namespace
 
 PYBIND11_MODULE(crucible_py, m) {
-    m.doc() = "Crucible — zero-overhead ONNX inference engine";
+    m.doc() = "Crucible — a from-scratch ONNX inference engine (C++17, float32, CPU)";
     m.attr("__version__") = "0.1.0";
+
+    // Raised when a run would allocate a tensor larger than
+    // max_tensor_elements. Subclass of RuntimeError.
+    py::register_exception<crucible::ResourceLimitError>(
+        m, "ResourceLimitError", PyExc_RuntimeError);
 
     // -----------------------------------------------------------------
     // Session (lightweight wrapper around crucible::Model)
@@ -183,26 +188,40 @@ PYBIND11_MODULE(crucible_py, m) {
     // We register the dict overload FIRST so pybind11's overload
     // resolution prefers dict over ndarray when a dict is passed.
     m.def("run",
-        [](const crucible::Model& model, const py::dict& inputs) {
+        [](const crucible::Model& model, const py::dict& inputs,
+           int64_t max_tensor_elements, int64_t max_total_elements,
+           int64_t timeout_ms) {
             auto tensor_inputs = dict_to_inputs(inputs);
+            crucible::RunOptions opts;
+            opts.max_tensor_elements = max_tensor_elements;
+            opts.max_total_elements = max_total_elements;
+            opts.timeout_ms = timeout_ms;
             crucible::Tensor out;
             {
                 // The Model is read-only during a run and every input has
                 // been copied out of Python memory, so other Python threads
                 // may proceed while the graph executes.
                 py::gil_scoped_release release;
-                out = crucible::run_inference(model, tensor_inputs);
+                out = crucible::run_inference(model, tensor_inputs, opts);
             }
             return tensor_to_ndarray(out);
         },
-        py::arg("model"), py::arg("inputs"),
+        py::arg("model"), py::arg("inputs"), py::kw_only(),
+        py::arg("max_tensor_elements") = 0, py::arg("max_total_elements") = 0,
+        py::arg("timeout_ms") = 0,
         "Run inference with a dict of named numpy array inputs.\n"
-        "Returns the value of the model's FIRST output as a numpy array.");
+        "Returns the value of the model's FIRST output as a numpy array.\n"
+        "Limits for untrusted models (0 = unlimited), all raising\n"
+        "ResourceLimitError: max_tensor_elements caps each tensor/temporary,\n"
+        "max_total_elements caps all live intermediates together, timeout_ms\n"
+        "stops the run at a wall-clock deadline.");
 
     m.def("run",
         [](const crucible::Model& model,
            const py::array_t<float, py::array::c_style |
-                              py::array::forcecast>& arr) {
+                              py::array::forcecast>& arr,
+           int64_t max_tensor_elements, int64_t max_total_elements,
+           int64_t timeout_ms) {
             if (model.input_names.empty()) {
                 throw std::runtime_error(
                     "Crucible.run: model has no input names");
@@ -210,14 +229,20 @@ PYBIND11_MODULE(crucible_py, m) {
             std::unordered_map<std::string, crucible::Tensor> inputs;
             inputs.reserve(1);
             inputs.emplace(model.input_names.front(), ndarray_to_tensor(arr));
+            crucible::RunOptions opts;
+            opts.max_tensor_elements = max_tensor_elements;
+            opts.max_total_elements = max_total_elements;
+            opts.timeout_ms = timeout_ms;
             crucible::Tensor out;
             {
                 py::gil_scoped_release release;
-                out = crucible::run_inference(model, inputs);
+                out = crucible::run_inference(model, inputs, opts);
             }
             return tensor_to_ndarray(out);
         },
-        py::arg("model"), py::arg("inputs"),
+        py::arg("model"), py::arg("inputs"), py::kw_only(),
+        py::arg("max_tensor_elements") = 0, py::arg("max_total_elements") = 0,
+        py::arg("timeout_ms") = 0,
         "Run inference with a single numpy array input.\n"
         "The array is bound to the model's first declared input.");
 

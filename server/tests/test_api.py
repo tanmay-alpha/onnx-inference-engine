@@ -5,13 +5,15 @@ they skip without crucible_py unless CRUCIBLE_REQUIRE_NATIVE=1.
 """
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
 import numpy as np
 import pytest
+from onnx import TensorProto, helper, numpy_helper
 
-from server import database, engine, main
+from server import database, engine, main, validator
 from server.tests.helpers import (
     conv_bytes,
     files_in,
@@ -93,6 +95,46 @@ def test_register_rejects_duplicate_email_case_insensitively(client, make_user) 
     assert r.status_code == 409
 
 
+def test_login_unknown_email_still_verifies_a_hash(client, monkeypatch) -> None:
+    calls = []
+    real_verify = main.verify_password
+
+    def _counting(plain, hashed):
+        calls.append(hashed)
+        return real_verify(plain, hashed)
+
+    monkeypatch.setattr(main, "verify_password", _counting)
+    r = client.post("/auth/login", json={"email": "nobody@example.com", "password": "whatever-123"})
+    assert r.status_code == 401
+    assert calls == [main.DUMMY_PASSWORD_HASH]
+
+
+def test_login_rate_limited_per_ip_and_email(client, make_user) -> None:
+    make_user("victim@example.com")  # its login is the first attempt for this IP+email
+    bad = {"email": "victim@example.com", "password": "wrong-password"}
+    assert [client.post("/auth/login", json=bad).status_code for _ in range(9)] == [401] * 9
+    r = client.post("/auth/login", json={"email": "victim@example.com", "password": "correct-horse-1"})
+    assert r.status_code == 429 and int(r.headers["Retry-After"]) >= 1
+    # Other emails from the same IP keep their own (per IP+email) budget.
+    other = client.post("/auth/login", json={"email": "other@example.com", "password": "wrong-password"})
+    assert other.status_code == 401
+
+
+def test_auth_rate_limited_per_ip_and_proxy_header_opt_in(client, monkeypatch) -> None:
+    monkeypatch.setattr(main.settings, "AUTH_RATE_LIMIT_PER_IP", 3)
+    creds = [{"email": f"u{i}@example.com", "password": "wrong-password"} for i in range(3)]
+    assert [client.post("/auth/login", json=c).status_code for c in creds] == [401] * 3
+    assert client.post("/auth/login", json={"email": "x@example.com", "password": "p"}).status_code == 429
+    new_user = {"email": "new@example.com", "password": "correct-horse-1"}
+    assert client.post("/auth/register", json=new_user).status_code == 429
+    spoofed = {"X-Forwarded-For": "203.0.113.9"}
+    # Untrusted by default: a client-chosen X-Forwarded-For does not open a new bucket.
+    assert client.post("/auth/register", json=new_user, headers=spoofed).status_code == 429
+    monkeypatch.setattr(main.settings, "TRUST_PROXY_HEADERS", True)
+    assert client.post("/auth/register", json=new_user,
+                       headers={"X-Forwarded-For": "203.0.113.9, 10.0.0.1"}).status_code == 201
+
+
 def test_user_api_key_lifecycle(client, make_user) -> None:
     jwt_headers = make_user()
     created = client.post("/auth/api-key", headers=jwt_headers, json={"name": "ci"}).json()
@@ -172,6 +214,69 @@ def test_validate_file_and_model_id(client, make_user, model_dir) -> None:
     r = client.post("/validate", headers=headers, data={"model_id": model_id})
     assert r.status_code == 200 and r.json()["valid"] is True
     assert client.post("/validate", headers=headers).status_code == 400
+
+
+def test_analysis_busy_is_503_and_stores_nothing(client, make_user, monkeypatch, model_dir) -> None:
+    headers = make_user()
+    busy = threading.BoundedSemaphore(1)
+    busy.acquire()
+    monkeypatch.setattr(main, "_ANALYSIS_SLOTS", busy)
+    files = {"model_file": ("m.onnx", mlp_bytes(), "application/octet-stream")}
+    r = client.post("/convert", headers=headers, files=files)
+    assert r.status_code == 503 and r.headers["Retry-After"]
+    assert client.post("/validate", headers=headers, files=files).status_code == 503
+    assert files_in(model_dir) == []
+    assert client.get("/models", headers=headers).json()["count"] == 0
+    busy.release()
+    upload(client, headers, mlp_bytes())
+
+
+def test_graph_node_limit(client, make_user, monkeypatch, model_dir) -> None:
+    headers = make_user()
+    monkeypatch.setattr(validator, "MAX_GRAPH_NODES", 3)  # the MLP has 4 nodes
+    files = {"model_file": ("m.onnx", mlp_bytes(), "application/octet-stream")}
+    r = client.post("/convert", headers=headers, files=files)
+    assert r.status_code == 400 and "4 nodes; the limit is 3" in r.json()["detail"]
+    assert files_in(model_dir) == []
+    assert client.get("/models", headers=headers).json()["count"] == 0
+    r = client.post("/validate", headers=headers, files=files)
+    assert r.status_code == 200
+    assert r.json()["valid"] is False
+    assert r.json()["unsupported_reasons"] == ["graph has 4 nodes; the limit is 3"]
+
+
+def test_model_count_quota(client, make_user, monkeypatch, model_dir) -> None:
+    a, b = make_user(), make_user()
+    monkeypatch.setattr(main, "MAX_MODELS_PER_USER", 2)
+    upload(client, a, mlp_bytes())
+    upload(client, a, mlp_bytes())
+    r = client.post("/convert", headers=a,
+                    files={"model_file": ("m.onnx", mlp_bytes(), "application/octet-stream")})
+    assert r.status_code == 409
+    assert len(files_in(model_dir)) == 2
+    upload(client, b, mlp_bytes())  # quotas are per user
+
+
+def test_storage_bytes_quota(client, make_user, monkeypatch, model_dir) -> None:
+    headers = make_user()
+    size = len(mlp_bytes())
+    monkeypatch.setattr(main, "MAX_STORAGE_BYTES_PER_USER", 2 * size - 1)
+    first = upload(client, headers, mlp_bytes())["onnx_model_id"]
+    r = client.post("/convert", headers=headers,
+                    files={"model_file": ("m.onnx", mlp_bytes(), "application/octet-stream")})
+    assert r.status_code == 413 and "quota" in r.json()["detail"]
+    assert files_in(model_dir) == [model_dir / f"{first}.onnx"]
+    assert client.delete(f"/models/{first}", headers=headers).status_code == 200
+    upload(client, headers, mlp_bytes())
+
+
+def test_operator_key_is_exempt_from_quotas(client, monkeypatch) -> None:
+    monkeypatch.setenv("CRUCIBLE_API_KEY", "operator-key-0123456789")
+    monkeypatch.setattr(main, "MAX_MODELS_PER_USER", 1)
+    monkeypatch.setattr(main, "MAX_STORAGE_BYTES_PER_USER", 1)
+    op = {"X-API-Key": "operator-key-0123456789"}
+    upload(client, op, mlp_bytes())
+    upload(client, op, mlp_bytes())
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +384,23 @@ def test_infer_shape_mismatch_vs_model_is_422(client, make_user) -> None:
     assert _infer(client, headers, conv_id, np.zeros((2, 3, 8, 8), np.float32)).status_code == 422
 
 
+def test_infer_rejects_model_requesting_huge_tensor(client, make_user, native) -> None:
+    # A ~100-byte model whose Conv pads request a ~640 GB output: the engine's
+    # per-tensor budget must turn this into a 422, not an OOM-killed worker.
+    graph = helper.make_graph(
+        [helper.make_node("Conv", ["X", "W"], ["Y"], pads=[200000] * 4)], "g",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 1, 4, 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 1, 400004, 400004])],
+        [numpy_helper.from_array(np.ones((1, 1, 1, 1), np.float32), "W")],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    headers = make_user()
+    model_id = upload(client, headers, model.SerializeToString())["onnx_model_id"]
+    r = _infer(client, headers, model_id, np.ones((1, 1, 4, 4), np.float32))
+    assert r.status_code == 422
+    assert "limit" in r.json()["detail"]
+
+
 def test_infer_bad_shape_values_are_422(client, make_user) -> None:
     r = client.post("/infer", headers=make_user(),
                     json={"model_id": "x", "input": [], "input_shape": [1, -3]})
@@ -316,28 +438,174 @@ def test_infer_and_batch_503_without_native_engine(client, make_user, monkeypatc
     assert client.get("/inference/logs", headers=headers).json()["count"] == 0
 
 
-def test_infer_timeout_is_504(client, make_user, monkeypatch) -> None:
-    """A run that outlives INFERENCE_TIMEOUT_SEC yields 504 (engine stubbed to block)."""
+class _ResourceLimitError(RuntimeError):
+    """Stands in for crucible_py.ResourceLimitError in stub modules."""
+
+
+def _stub_engine(run_fn):
+    class _Stub:
+        ResourceLimitError = _ResourceLimitError
+        load_model = staticmethod(lambda path: object())
+        run = staticmethod(run_fn)
+    return _Stub
+
+
+def _wait_all_slots_free(timeout: float) -> bool:
+    """True once every inference slot can be taken (i.e. no native run in flight)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        taken = 0
+        while taken < engine.MAX_CONCURRENT and engine._SLOTS.acquire(blocking=False):
+            taken += 1
+        for _ in range(taken):
+            engine._SLOTS.release()
+        if taken == engine.MAX_CONCURRENT:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_infer_passes_limits_and_backstop_timeout_is_504(client, make_user, monkeypatch) -> None:
+    """The deadline and memory limits reach crucible_py.run; a run overrunning them still gets 504."""
     headers = make_user()
     model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+    seen = {}
 
-    class _SlowModule:
-        @staticmethod
-        def load_model(path):
-            return object()
+    def _slow_run(model, inputs, **limits):
+        seen.update(limits)
+        time.sleep(0.5)  # ignores its deadline: the asyncio backstop must answer
+        return np.zeros((1, 3), np.float32)
 
-        @staticmethod
-        def run(model, inputs):
-            time.sleep(0.5)
-            return np.zeros((1, 3), np.float32)
-
-    monkeypatch.setattr(engine, "crucible_py", _SlowModule)
+    monkeypatch.setattr(engine, "crucible_py", _stub_engine(_slow_run))
     monkeypatch.setattr(main, "INFERENCE_TIMEOUT_SEC", 0.05)
     r = _infer(client, headers, model_id, np.ones((1, 4), np.float32))
     assert r.status_code == 504
+    assert seen == {"timeout_ms": 50, "max_tensor_elements": engine.MAX_TENSOR_ELEMENTS,
+                    "max_total_elements": engine.MAX_TOTAL_ELEMENTS}
     logs = client.get("/inference/logs", headers=headers).json()["logs"]
     assert [l["status"] for l in logs] == ["timeout"]
-    time.sleep(0.6)  # let the uncancellable background run release its slot
+    assert _wait_all_slots_free(2.0)
+
+
+@pytest.mark.parametrize("message,status", [
+    ("run deadline exceeded (in node 3, MatMul)", 504),
+    ("intermediate tensors need 70000000 elements in total", 422),
+    ("tensor of 20000000 elements is above the configured limit of 16000000 elements per tensor", 422),
+])
+def test_engine_resource_limit_errors_map_to_status(client, make_user, monkeypatch, message, status) -> None:
+    headers = make_user()
+    model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+
+    def _raising_run(model, inputs, **limits):
+        raise _ResourceLimitError(message)
+
+    monkeypatch.setattr(engine, "crucible_py", _stub_engine(_raising_run))
+    r = _infer(client, headers, model_id, np.ones((1, 4), np.float32))
+    assert r.status_code == status, r.text
+    logs = client.get("/inference/logs", headers=headers).json()["logs"]
+    assert [l["status"] for l in logs] == ["timeout" if status == 504 else "error"]
+
+
+def _matmul_chain_bytes(n_nodes: int, dim: int) -> bytes:
+    """X[dim,dim] -> MatMul(W) repeated n_nodes times; W is the identity."""
+    w = numpy_helper.from_array(np.eye(dim, dtype=np.float32), "W")
+    nodes, prev = [], "X"
+    for i in range(n_nodes):
+        out = "Y" if i == n_nodes - 1 else f"T{i}"
+        nodes.append(helper.make_node("MatMul", [prev, "W"], [out]))
+        prev = out
+    graph = helper.make_graph(
+        nodes, "chain",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [dim, dim])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [dim, dim])],
+        [w],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    return model.SerializeToString()
+
+
+def test_native_deadline_stops_the_run(client, make_user, monkeypatch, native) -> None:
+    """A ~400-node MatMul chain takes seconds; the engine must stop at the deadline and free its slot."""
+    headers = make_user()
+    model_id = upload(client, headers, _matmul_chain_bytes(400, 512))["onnx_model_id"]
+    monkeypatch.setattr(main, "INFERENCE_TIMEOUT_SEC", 0.3)
+    t0 = time.monotonic()
+    r = _infer(client, headers, model_id, np.ones((512, 512), np.float32))
+    assert r.status_code == 504, r.text
+    assert time.monotonic() - t0 < 5.0
+    # Without the native deadline the run would keep its slot for many seconds.
+    assert _wait_all_slots_free(2.0)
+
+
+def test_native_total_elements_limit_is_422(client, make_user, monkeypatch, native) -> None:
+    """Eight 1M-element copies of an initializer, all live until summed, exceed a 4M budget."""
+    big = numpy_helper.from_array(np.ones((1000, 1000), np.float32), "B")
+    copies = [f"I{i}" for i in range(8)]
+    nodes = [helper.make_node("Identity", ["B"], [c]) for c in copies]  # all run first
+    acc = copies[0]
+    for i, c in enumerate(copies[1:], 1):
+        nodes.append(helper.make_node("Add", [acc, c], [f"S{i}"]))
+        acc = f"S{i}"
+    nodes.append(helper.make_node("Add", [acc, "X"], ["Y"]))
+    graph = helper.make_graph(
+        nodes, "copies",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 1000])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1000, 1000])],
+        [big],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    headers = make_user()
+    model_id = upload(client, headers, model.SerializeToString())["onnx_model_id"]
+    x = np.ones((1, 1000), np.float32)
+    monkeypatch.setattr(engine, "MAX_TOTAL_ELEMENTS", 4_000_000)
+    r = _infer(client, headers, model_id, x)
+    assert r.status_code == 422, r.text[:500]
+    assert "in total" in r.json()["detail"]
+    monkeypatch.setattr(engine, "MAX_TOTAL_ELEMENTS", 64_000_000)
+    r = _infer(client, headers, model_id, x)
+    assert r.status_code == 200
+    assert r.json()["output"][:3] == [9.0, 9.0, 9.0]
+
+
+def test_output_cap_is_413_for_infer_and_batch(client, make_user, monkeypatch) -> None:
+    headers = make_user()
+    model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+    monkeypatch.setattr(engine, "crucible_py",
+                        _stub_engine(lambda model, inputs, **limits: np.zeros((1, 3), np.float32)))
+    item = {"model_id": model_id, "input": [1.0] * 4, "input_shape": [1, 4]}
+    monkeypatch.setattr(main, "MAX_OUTPUT_ELEMENTS", 2)
+    r = _infer(client, headers, model_id, np.ones((1, 4), np.float32))
+    assert r.status_code == 413 and "Output has 3 elements" in r.json()["detail"]
+    monkeypatch.setattr(main, "MAX_OUTPUT_ELEMENTS", 5)
+    assert _infer(client, headers, model_id, np.ones((1, 4), np.float32)).status_code == 200
+    r = client.post("/inference/batch", headers=headers, json=[item, item, item])
+    assert r.status_code == 413 and "in total" in r.json()["detail"]
+    assert client.post("/inference/batch", headers=headers, json=[item]).status_code == 200
+
+
+def test_api_key_rate_limit_is_enforced(client, make_user, monkeypatch) -> None:
+    from sqlalchemy.orm import Session
+
+    jwt_headers = make_user()
+    created = client.post("/auth/api-key", headers=jwt_headers, json={"name": "ci"}).json()
+    assert created["rate_limit"] == 100
+    with Session(database._get_sync_engine()) as s:
+        s.get(database.ApiKey, created["id"]).rate_limit = 3
+        s.commit()
+    key_headers = {"X-API-Key": created["full_key"]}
+    x = np.zeros((1, 4), np.float32)
+    assert [_infer(client, key_headers, "missing", x).status_code for _ in range(3)] == [404] * 3
+    r = _infer(client, key_headers, "missing", x)
+    assert r.status_code == 429 and int(r.headers["Retry-After"]) >= 1
+    # JWT callers have no per-minute limit.
+    assert _infer(client, jwt_headers, "missing", x).status_code == 404
+    # A batch spends one unit per item and is refused as a whole when they don't fit.
+    monkeypatch.setattr(engine, "crucible_py",
+                        _stub_engine(lambda model, inputs, **limits: np.zeros((1, 3), np.float32)))
+    item = {"model_id": "missing", "input": [0.0] * 4, "input_shape": [1, 4]}
+    assert client.post("/inference/batch", headers=key_headers, json=[item]).status_code == 429
 
 
 def test_loaded_model_is_cached_and_delete_evicts(client, make_user, monkeypatch, model_dir) -> None:
@@ -354,7 +622,7 @@ def test_loaded_model_is_cached_and_delete_evicts(client, make_user, monkeypatch
             return object()
 
         @staticmethod
-        def run(model, inputs):
+        def run(model, inputs, **limits):
             return np.zeros((1, 3), np.float32)
 
     monkeypatch.setattr(engine, "crucible_py", _CountingModule)

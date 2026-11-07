@@ -84,7 +84,7 @@ struct Graph {
     int64_t opset = 0;
 };
 
-// Top-level Model struct (per ENGINEERING_PLAN.md §4).
+// Top-level Model struct.
 struct Model {
     Graph graph;
     std::unordered_map<std::string, Tensor>& weights = graph.weights;

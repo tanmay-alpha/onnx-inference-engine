@@ -8,14 +8,14 @@
 // Every Tensor is its own copy. The cost is a memcpy on operator=, the win
 // is predictable performance and no cache-line bouncing on shared mutation.
 //
-// Design choices (see ENGINEERING_PLAN.md §4):
+// Design choices:
 //   - Shape: std::vector<int64_t>. int64 to match ONNX's int64 dimensions
 //     without surprise truncation when models are large.
 //   - Storage: std::vector<float>. Heap-allocated only for non-empty tensors;
 //     an empty tensor has data() == nullptr.
 //   - Layout: row-major (C-order). PyTorch / NumPy / ONNX Runtime all default
-//     to row-major, so this minimises friction when we add the Python
-//     bindings in Issue #12.
+//     to row-major, so the Python bindings can hand buffers to NumPy
+//     without transposing.
 //   - Indexing: at({i, j, k}) computes offset = i * (D2*D3) + j * D3 + k.
 //     O(rank) per access. Real hot loops will use data() directly.
 //   - Bounds checks: at() throws std::out_of_range on bad indices. These
@@ -24,15 +24,56 @@
 //     a rounding error compared to the operator work.
 //   - reshape / flatten: return NEW tensors (no aliasing). Source untouched.
 //     Copying a 224*224*3 float buffer is 600 KB — cheap, and removes a
-//     whole class of lifetime bugs that would only surface in Issue #9
-//     (graph executor) and #10 (end-to-end inference).
+//     whole class of lifetime bugs in the graph executor.
 // =============================================================================
 
 #include <cstdint>
 #include <iosfwd>
+#include <stdexcept>
 #include <vector>
 
 namespace crucible {
+
+// ---- Per-thread allocation budget ------------------------------------------
+// Models are untrusted input: a few bytes of ONNX can describe a tensor of
+// billions of elements (e.g. Conv with huge pads). While a ScopedElementLimit
+// is alive on a thread, every Tensor allocation and every large engine
+// temporary on that thread is checked against `max_elements` and fails with
+// ResourceLimitError instead of exhausting memory. 0 = unlimited.
+class ResourceLimitError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+class ScopedElementLimit {
+public:
+    explicit ScopedElementLimit(int64_t max_elements);
+    ~ScopedElementLimit();
+    ScopedElementLimit(const ScopedElementLimit&) = delete;
+    ScopedElementLimit& operator=(const ScopedElementLimit&) = delete;
+private:
+    int64_t previous_;
+};
+
+// Throws ResourceLimitError if `elements` exceeds the active limit.
+void check_element_budget(int64_t elements, const char* what);
+
+// Wall-clock deadline for the current thread's run. While a ScopedDeadline
+// is alive, check_deadline() throws ResourceLimitError once it has passed.
+// The executor calls it between nodes and the heavy kernels call it in
+// their outer loops, so a run stops shortly after its deadline instead of
+// holding a worker indefinitely. timeout_ms <= 0 = no deadline.
+class ScopedDeadline {
+public:
+    explicit ScopedDeadline(int64_t timeout_ms);
+    ~ScopedDeadline();
+    ScopedDeadline(const ScopedDeadline&) = delete;
+    ScopedDeadline& operator=(const ScopedDeadline&) = delete;
+private:
+    int64_t previous_;
+};
+
+void check_deadline(const char* where);
 
 class Tensor {
 public:
@@ -70,7 +111,7 @@ public:
     float&       at(const std::vector<int64_t>& indices);
     const float& at(const std::vector<int64_t>& indices) const;
 
-    // ---- Shape operations (Issue #3) ----------------------------------------
+    // ---- Shape operations ---------------------------------------------------
 
     /// Return a new tensor with the same data viewed under a different shape.
     /// Total element count must match. Throws std::invalid_argument otherwise
