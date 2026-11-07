@@ -18,10 +18,14 @@ native call actually returns. Consequences:
 * a request whose run exceeds ``INFERENCE_TIMEOUT_SEC`` gets
   :class:`EngineTimeout` (HTTP 504), but the run keeps executing in the
   background and keeps its slot until it finishes.
+
+Loaded models are kept in an LRU cache (``MODEL_CACHE_SIZE`` entries, keyed
+by resolved path + mtime + size); ``DELETE /models/{id}`` evicts its entry.
 """
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import logging
 import threading
 import time
@@ -74,12 +78,52 @@ MAX_CONCURRENT = _settings.MAX_CONCURRENT_INFERENCES
 _POOL = ThreadPoolExecutor(max_workers=MAX_CONCURRENT, thread_name_prefix="crucible-infer")
 _SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT)
 
+# Loaded crucible_py models, LRU-bounded. The key includes mtime/size so a
+# replaced file is reloaded; Model objects are immutable during run() (the
+# engine allocates per-call buffers), so one instance may serve concurrent runs.
+MODEL_CACHE_SIZE = _settings.MODEL_CACHE_SIZE
+_CacheKey = Tuple[int, str, int, int]
+_cache: "OrderedDict[_CacheKey, Any]" = OrderedDict()
+_cache_lock = threading.Lock()
 
-def _run_blocking(module: Any, model_path: str, input_name: str,
+
+def _load_cached(module: Any, model_path: Path) -> Any:
+    resolved = model_path.resolve()
+    st = resolved.stat()
+    key: _CacheKey = (id(module), str(resolved), st.st_mtime_ns, st.st_size)
+    with _cache_lock:
+        model = _cache.get(key)
+        if model is not None:
+            _cache.move_to_end(key)
+            return model
+    model = module.load_model(str(resolved))  # outside the lock: loads can be slow
+    if MODEL_CACHE_SIZE > 0:
+        with _cache_lock:
+            _cache[key] = model
+            _cache.move_to_end(key)
+            while len(_cache) > MODEL_CACHE_SIZE:
+                _cache.popitem(last=False)
+    return model
+
+
+def evict_model(model_path: Path) -> None:
+    """Drop every cached model loaded from ``model_path`` (any mtime/size)."""
+    resolved = str(model_path.resolve())
+    with _cache_lock:
+        for key in [k for k in _cache if k[1] == resolved]:
+            del _cache[key]
+
+
+def cached_paths() -> List[str]:
+    with _cache_lock:
+        return [k[1] for k in _cache]
+
+
+def _run_blocking(module: Any, model_path: Path, input_name: str,
                   arr: np.ndarray) -> Tuple[np.ndarray, float]:
-    """Load + run on a worker thread. Returns (output, engine-only ms)."""
+    """Load (cached) + run on a worker thread. Returns (output, engine-only ms)."""
     try:
-        model = module.load_model(model_path)
+        model = _load_cached(module, model_path)
         t0 = time.perf_counter()
         out = module.run(model, {input_name: arr})
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -103,7 +147,7 @@ async def run_native(model_path: Path, input_name: str, arr: np.ndarray,
     if not _SLOTS.acquire(blocking=False):
         raise EngineBusy(f"all {MAX_CONCURRENT} inference slots are busy")
     try:
-        fut = _POOL.submit(_run_blocking, module, str(model_path), input_name, arr)
+        fut = _POOL.submit(_run_blocking, module, Path(model_path), input_name, arr)
     except BaseException:
         _SLOTS.release()
         raise

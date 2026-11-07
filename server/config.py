@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     MAX_BATCH_SIZE: int = Field(default=32, description="Max requests in one /inference/batch call")
     INFERENCE_TIMEOUT_SEC: float = Field(default=60.0, description="Per-request wait limit for a native run (504 after)")
     MAX_CONCURRENT_INFERENCES: int = Field(default=2, description="Native runs allowed in flight at once")
+    MODEL_CACHE_SIZE: int = Field(default=4, ge=0, description="Loaded native models kept in memory (LRU; 0 disables)")
 
     # -- CORS -----------------------------------------------------------------
     CRUCIBLE_CORS_ORIGINS: str = Field(

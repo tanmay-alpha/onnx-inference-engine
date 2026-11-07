@@ -340,6 +340,33 @@ def test_infer_timeout_is_504(client, make_user, monkeypatch) -> None:
     time.sleep(0.6)  # let the uncancellable background run release its slot
 
 
+def test_loaded_model_is_cached_and_delete_evicts(client, make_user, monkeypatch, model_dir) -> None:
+    """The second /infer reuses the loaded model; DELETE drops it from the cache."""
+    headers = make_user()
+    model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+    path = str((model_dir / f"{model_id}.onnx").resolve())
+    loads = []
+
+    class _CountingModule:
+        @staticmethod
+        def load_model(p):
+            loads.append(p)
+            return object()
+
+        @staticmethod
+        def run(model, inputs):
+            return np.zeros((1, 3), np.float32)
+
+    monkeypatch.setattr(engine, "crucible_py", _CountingModule)
+    x = np.ones((1, 4), np.float32)
+    assert _infer(client, headers, model_id, x).status_code == 200
+    assert _infer(client, headers, model_id, x).status_code == 200
+    assert loads == [path]
+    assert path in engine.cached_paths()
+    assert client.delete(f"/models/{model_id}", headers=headers).status_code == 200
+    assert path not in engine.cached_paths()
+
+
 # ---------------------------------------------------------------------------
 # /infer on the native engine vs onnxruntime
 # ---------------------------------------------------------------------------

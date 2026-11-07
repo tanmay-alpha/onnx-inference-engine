@@ -549,6 +549,7 @@ def delete_model(model_id: str, principal: Principal = Depends(require_principal
     rec = _get_owned_model(model_id, principal)
     path = _contained_model_path(rec["file_path"])
     if path is not None:
+        engine.evict_model(path)
         path.unlink(missing_ok=True)
     else:
         _log.warning("model %s: stored path outside model dir, file left untouched", model_id)

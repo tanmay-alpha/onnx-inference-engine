@@ -43,17 +43,23 @@ option(CRUCIBLE_WARNINGS_AS_ERRORS    "Treat compiler warnings as errors"   OFF)
 # -----------------------------------------------------------------------------
 set(CRUCIBLE_THIRD_PARTY ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
-# Sanity-check that submodules are populated. add_subdirectory() will fail
-# noisily if the directories are empty, but a clear upfront message helps.
-foreach(submod eigen googletest google-benchmark pybind11)
-    if(NOT EXISTS "${CRUCIBLE_THIRD_PARTY}/${submod}/CMakeLists.txt"
-       AND NOT EXISTS "${CRUCIBLE_THIRD_PARTY}/${submod}/README.md"
-       AND NOT EXISTS "${CRUCIBLE_THIRD_PARTY}/${submod}/Eigen")
+# Sanity-check that the submodules this configuration needs are populated.
+# add_subdirectory() would fail anyway, but a clear upfront message helps.
+set(CRUCIBLE_REQUIRED_SUBMODULES eigen)
+if(CRUCIBLE_ENABLE_TESTS)
+    list(APPEND CRUCIBLE_REQUIRED_SUBMODULES googletest)
+endif()
+if(CRUCIBLE_ENABLE_BENCHMARKS)
+    list(APPEND CRUCIBLE_REQUIRED_SUBMODULES google-benchmark)
+endif()
+if(CRUCIBLE_ENABLE_PYTHON_BINDINGS)
+    list(APPEND CRUCIBLE_REQUIRED_SUBMODULES pybind11)
+endif()
+foreach(submod ${CRUCIBLE_REQUIRED_SUBMODULES})
+    if(NOT EXISTS "${CRUCIBLE_THIRD_PARTY}/${submod}/CMakeLists.txt")
         message(WARNING
             "Crucible: third_party/${submod} appears empty.\n"
-            "          Run: git submodule update --init --recursive\n"
-            "          (See engine/CMakeLists.txt for details.)"
-        )
+            "          Run: git submodule update --init --depth 1 engine/third_party/${submod}")
     endif()
 endforeach()
 
