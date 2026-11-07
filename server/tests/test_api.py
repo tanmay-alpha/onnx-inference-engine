@@ -1,584 +1,446 @@
-"""End-to-end tests for the Crucible FastAPI server (Issue #13).
+"""API tests for the Crucible server.
 
-Strategy
-========
-
-We use FastAPI's TestClient — synchronous, in-process, no socket
-binding. Each test gets a fresh model registry (the module-level
-_MODEL_REGISTRY in server.main) by clearing it; that keeps tests
-independent without the brittleness of reload-on-every-test
-fixtures.
-
-Tests that touch /convert use the .onnx upload path (per the
-post-review security fix: /convert no longer accepts .pt pickles
-because torch.load(weights_only=False) is RCE). Tests build the
-.onnx bytes in-process via converter.convert_torch_module, which
-is safe because the input is a trusted fixture, not a network
-upload.
-
-Auth contract
-=============
-
-The security review requires X-API-Key on every non-public
-endpoint. We set CRUCIBLE_API_KEY via monkeypatch in a session-
-scoped fixture so /health and /operators stay reachable without
-auth (liveness probes) and the rest require the header.
+Native-engine tests (``native`` fixture) compare /infer against onnxruntime;
+they skip without crucible_py unless CRUCIBLE_REQUIRE_NATIVE=1.
 """
 from __future__ import annotations
 
-import io
-import os
-import sys
+import time
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import pytest
-import torch
-import torch.nn as nn
-from fastapi.testclient import TestClient
 
-# Make the server package importable when pytest is run from the
-# repo root. Without this, `from server.main import app` fails
-# because server/ is not on sys.path.
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from server import database, engine, main
+from server.tests.helpers import (
+    conv_bytes,
+    files_in,
+    mlp_bytes,
+    ort_run,
+    unsupported_bytes,
+    upload,
+)
 
-from server.main import _MODEL_REGISTRY, _check_api_key, _engine_name, app  # noqa: E402
-from server import converter, validator  # noqa: E402
+RTOL, ATOL = 1e-4, 1e-5
+
+
+def _infer(client, headers, model_id, x: np.ndarray):
+    return client.post("/infer", headers=headers, json={
+        "model_id": model_id, "input": x.reshape(-1).tolist(), "input_shape": list(x.shape),
+    })
 
 
 # ---------------------------------------------------------------------------
-# Constants
+# Public endpoints
 # ---------------------------------------------------------------------------
-TEST_API_KEY = "test-key-1234567890"
+def test_health_reports_engine_availability(client) -> None:
+    body = client.get("/health").json()
+    assert body["status"] == "ok"
+    assert body["native_available"] is engine.native_available()
+    assert body["engine"] == ("crucible-native" if engine.native_available() else "unavailable")
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-@pytest.fixture(autouse=True)
-def _configure_api_key(monkeypatch):
-    """Set CRUCIBLE_API_KEY for every test.
-
-    autouse=True so individual tests don't have to remember.
-    Tests that want to exercise the "no key configured" 503 path
-    monkeypatch it back to ''.
-
-    Function-scoped (not session) so the override in each test is
-    applied independently. monkeypatch is function-scoped by
-    default, but making this fixture's lifetime explicit avoids
-    surprises.
-    """
-    monkeypatch.setenv("CRUCIBLE_API_KEY", TEST_API_KEY)
-    yield
+def test_ready_requires_native_engine(client) -> None:
+    r = client.get("/ready")
+    assert r.json()["database"] is True
+    assert r.status_code == (200 if engine.native_available() else 503)
 
 
-@pytest.fixture
-def auth_headers() -> dict[str, str]:
-    return {"X-API-Key": TEST_API_KEY}
+def test_operators_public_and_complete(client) -> None:
+    body = client.get("/operators").json()
+    assert body["count"] == len(body["supported"]) == 20
+    assert {"Conv", "Gemm", "Relu", "Softmax", "GlobalAveragePool"} <= set(body["supported"])
 
 
-@pytest.fixture
-def client() -> Iterator[TestClient]:
-    """A TestClient with the in-process model registry cleared.
-
-    We use the module-level `_MODEL_REGISTRY` so /infer can find
-    models registered by /convert within the same test. Resetting
-    it between tests prevents accidental cross-test coupling.
-    """
-    _MODEL_REGISTRY.clear()
-    with TestClient(app) as c:
-        yield c
-
-
-@pytest.fixture
-def tmp_model_dir(tmp_path, monkeypatch) -> Path:
-    """Point CRUCIBLE_MODEL_DIR at a per-test temp directory so
-    /convert's writes don't pollute /tmp and survive across runs.
-    """
-    model_dir = tmp_path / "models"
-    model_dir.mkdir()
-    monkeypatch.setenv("CRUCIBLE_MODEL_DIR", str(model_dir))
-    return model_dir
-
-
-# Defined at module scope (not inside the fixture) so torch.save
-# can pickle it. Defining nn.Module subclasses inside a function
-# makes them local objects that pickle refuses to serialise.
-class SmallClassifier(nn.Module):
-    """A 3-channel -> 32-channel -> 5-class classifier.
-
-    Two Conv+Relu blocks feeding GlobalAveragePool -> Linear.
-    Uses 5 classes (not 1000) so the test output is small and
-    obviously right; the API contract is shape-driven, not
-    value-driven.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-        )
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.classifier = nn.Linear(32, 5)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = self.pool(x).flatten(1)
-        return self.classifier(x)
-
-
-@pytest.fixture
-def small_classifier() -> nn.Module:
-    model = SmallClassifier()
-    model.eval()
-    return model
-
-
-@pytest.fixture
-def onnx_bytes(small_classifier: nn.Module, tmp_path: Path) -> bytes:
-    """Build a small .onnx file in tmp and return its bytes.
-
-    Used as the upload body for /convert and /validate tests.
-    Building in tmp (rather than memory) catches file-system
-    issues at the test layer instead of production.
-    """
-    onnx_path = tmp_path / "small.onnx"
-    converter.convert_torch_module(small_classifier, [1, 3, 32, 32], onnx_path)
-    return onnx_path.read_bytes()
+def test_static_operator_mirror_matches_native(native) -> None:
+    from server.validator import SUPPORTED_OPS
+    assert sorted(native.supported_ops()) == sorted(SUPPORTED_OPS)
 
 
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
-def test_no_key_returns_503(client: TestClient, monkeypatch) -> None:
-    """If the operator forgets CRUCIBLE_API_KEY, /convert returns 503,
-    not 200. We do not default-allow."""
-    monkeypatch.setenv("CRUCIBLE_API_KEY", "")
-    r = client.post("/convert",
-                    files={"model_file": ("x.onnx", b"", "application/octet-stream")},
-                    data={"input_shape": "[1]"})
-    assert r.status_code == 503
+PROTECTED = [
+    ("post", "/convert"), ("post", "/validate"), ("post", "/infer"), ("post", "/inference/batch"),
+    ("get", "/models"), ("get", "/models/abc"), ("delete", "/models/abc"), ("get", "/inference/logs"),
+    ("post", "/fraud/log"), ("get", "/fraud/history"), ("get", "/analytics/inference"),
+    ("get", "/analytics/fraud"), ("get", "/analytics/models"), ("post", "/auth/api-key"),
+    ("get", "/auth/api-keys"), ("delete", "/auth/api-key/abc"), ("get", "/auth/me"),
+]
 
 
-def test_wrong_key_returns_401(client: TestClient) -> None:
-    r = client.post(
-        "/convert",
-        files={"model_file": ("x.onnx", b"", "application/octet-stream")},
-        data={"input_shape": "[1]"},
-        headers={"X-API-Key": "definitely-wrong"},
-    )
-    assert r.status_code == 401
+@pytest.mark.parametrize("method,path", PROTECTED)
+def test_protected_routes_reject_missing_credentials(client, method, path) -> None:
+    assert getattr(client, method)(path).status_code == 401
 
 
-def test_health_and_operators_are_public(client: TestClient) -> None:
-    """No header, no monkeypatch override. /health and /operators
-    must work without credentials or container health checks fail."""
-    assert client.get("/health").status_code == 200
-    assert client.get("/operators").status_code == 200
+def test_invalid_credentials_rejected(client) -> None:
+    assert client.get("/models", headers={"Authorization": "Bearer not-a-jwt"}).status_code == 401
+    assert client.get("/models", headers={"X-API-Key": "cr_nope"}).status_code == 401
+
+
+def test_unset_operator_key_does_not_block_users(client, make_user, monkeypatch) -> None:
+    monkeypatch.delenv("CRUCIBLE_API_KEY", raising=False)
+    monkeypatch.setattr(main.settings, "CRUCIBLE_API_KEY", "")
+    headers = make_user()
+    assert client.get("/models", headers=headers).status_code == 200
+    assert client.get("/models", headers={"X-API-Key": ""}).status_code == 401
+
+
+def test_register_rejects_duplicate_email_case_insensitively(client, make_user) -> None:
+    make_user("Dup@Example.com")
+    r = client.post("/auth/register", json={"email": "dup@example.com", "password": "another-pass-1"})
+    assert r.status_code == 409
+
+
+def test_user_api_key_lifecycle(client, make_user) -> None:
+    jwt_headers = make_user()
+    created = client.post("/auth/api-key", headers=jwt_headers, json={"name": "ci"}).json()
+    key = created["full_key"]
+    assert created["key_prefix"] == key[:12]
+    key_headers = {"X-API-Key": key}
+    upload(client, key_headers, mlp_bytes(), "via-key.onnx")
+    models = client.get("/models", headers=jwt_headers).json()
+    assert [m["name"] for m in models["models"]] == ["via-key.onnx"]  # key acts as its owner
+    listed = client.get("/auth/api-keys", headers=jwt_headers).json()
+    assert [k["key_prefix"] for k in listed] == [key[:12]]
+    assert client.delete(f"/auth/api-key/{created['id']}", headers=jwt_headers).status_code == 200
+    assert client.get("/models", headers=key_headers).status_code == 401
+
+
+def test_operator_key_sees_all_users(client, make_user, monkeypatch) -> None:
+    monkeypatch.setenv("CRUCIBLE_API_KEY", "operator-key-0123456789")
+    a = make_user()
+    model_id = upload(client, a, mlp_bytes())["onnx_model_id"]
+    op = {"X-API-Key": "operator-key-0123456789"}
+    assert model_id in [m["id"] for m in client.get("/models", headers=op).json()["models"]]
+    assert client.get(f"/models/{model_id}", headers=op).status_code == 200
+    assert client.get("/auth/api-keys", headers=op).status_code == 403  # not a user account
 
 
 # ---------------------------------------------------------------------------
-# /health
+# /convert + /models
 # ---------------------------------------------------------------------------
-def test_health_ok(client: TestClient) -> None:
-    r = client.get("/health")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "ok"
-    assert body["engine"] == _engine_name()
-    assert body["version"]
-
-
-# ---------------------------------------------------------------------------
-# /operators
-# ---------------------------------------------------------------------------
-def test_operators_lists_all_supported(client: TestClient) -> None:
-    r = client.get("/operators")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["count"] == 20
-    assert body["count"] == len(body["supported"])
-    for op in ("Conv", "Relu", "GlobalAveragePool", "Gemm", "Add", "Flatten"):
-        assert op in body["supported"]
-
-
-# ---------------------------------------------------------------------------
-# /convert
-# ---------------------------------------------------------------------------
-def test_convert_uploads_onnx_and_returns_model_id(
-    client: TestClient,
-    auth_headers: dict,
-    tmp_model_dir: Path,
-    onnx_bytes: bytes,
-) -> None:
-    """Happy path: upload a real .onnx, get back a model id and
-    the operator audit (all ops supported)."""
-    r = client.post(
-        "/convert",
-        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
-        data={"input_shape": "[1, 3, 32, 32]"},
-        headers=auth_headers,
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["onnx_model_id"] in _MODEL_REGISTRY
-    assert (tmp_model_dir / f"{body['onnx_model_id']}.onnx").is_file()
-    assert set(body["operators_used"]) <= set(validator.SUPPORTED_OPS)
+def test_convert_reports_metadata_and_stores_uuid_file(client, make_user, model_dir) -> None:
+    headers = make_user()
+    body = upload(client, headers, mlp_bytes(), "../../evil name.onnx")
+    assert body["name"] == "evil name.onnx"
     assert body["all_supported"] is True
-    assert body["unsupported_ops"] == []
+    assert body["unsupported_ops"] == [] and body["unsupported_reasons"] == []
+    assert body["operators_used"] == ["Gemm", "Relu", "Softmax"]
+    assert body["opset"] == 13
+    assert body["inputs"] == [{"name": "X", "shape": [-1, 4], "dtype": "float32"}]
+    assert body["outputs"][0]["name"] == "Y"
+    assert files_in(model_dir) == [model_dir / f"{body['onnx_model_id']}.onnx"]
+
+    item = client.get(f"/models/{body['onnx_model_id']}", headers=headers).json()
+    assert item["inputs"] == body["inputs"] and item["size_bytes"] == len(mlp_bytes())
+    assert set(item) >= {"id", "name", "size_bytes", "created_at", "opset", "operators_used",
+                         "all_supported", "unsupported_reasons", "inputs", "outputs"}
 
 
-def test_convert_rejects_non_onnx_bytes(
-    client: TestClient,
-    auth_headers: dict,
-    tmp_model_dir: Path,
-) -> None:
-    """Random non-ONNX bytes get a 400 with a useful message."""
-    r = client.post(
-        "/convert",
-        files={"model_file": ("garbage.bin", b"definitely not onnx",
-                              "application/octet-stream")},
-        data={"input_shape": "[1, 3, 32, 32]"},
-        headers=auth_headers,
-    )
+def test_convert_accepts_legacy_input_shape_field(client, make_user) -> None:
+    body = upload(client, make_user(), mlp_bytes(), input_shape="[1, 4]")
+    assert body["inputs"][0]["shape"] == [-1, 4]
+
+
+def test_convert_rejects_malformed_onnx_and_leaves_no_file(client, make_user, model_dir) -> None:
+    r = client.post("/convert", headers=make_user(),
+                    files={"model_file": ("x.onnx", b"definitely not onnx", "application/octet-stream")})
     assert r.status_code == 400
+    assert files_in(model_dir) == []
 
 
-def test_convert_rejects_malformed_input_shape(
-    client: TestClient,
-    auth_headers: dict,
-    tmp_model_dir: Path,
-    onnx_bytes: bytes,
-) -> None:
-    """input_shape must be a JSON array of ints; anything else is 400."""
-    r = client.post(
-        "/convert",
-        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
-        data={"input_shape": "1,3,32,32"},  # wrong: not JSON
-        headers=auth_headers,
-    )
-    assert r.status_code == 400
+def test_convert_stores_unsupported_model_with_reasons(client, make_user) -> None:
+    headers = make_user()
+    body = upload(client, headers, unsupported_bytes())
+    assert body["all_supported"] is False
+    assert body["unsupported_ops"] == ["Cos"]
+    assert body["unsupported_reasons"]
+    listed = client.get("/models", headers=headers).json()
+    assert listed["count"] == 1 and listed["models"][0]["all_supported"] is False
 
 
-def test_convert_rejects_oversize_input_shape(
-    client: TestClient,
-    auth_headers: dict,
-    tmp_model_dir: Path,
-    onnx_bytes: bytes,
-) -> None:
-    """A request that would build a 200M-element tensor is rejected
-    at upload time. Without this, a hostile 4 GiB JSON body could
-    OOM the server."""
-    r = client.post(
-        "/convert",
-        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
-        data={"input_shape": "[1024, 1024, 256]"},  # ~268M elements
-        headers=auth_headers,
-    )
-    assert r.status_code == 400
-    assert "cap" in r.json()["detail"].lower()
-
-
-# ---------------------------------------------------------------------------
-# /validate
-# ---------------------------------------------------------------------------
-def test_validate_uploaded_onnx_is_supported(
-    client: TestClient,
-    auth_headers: dict,
-    onnx_bytes: bytes,
-) -> None:
-    """Validate a multipart upload."""
-    r = client.post(
-        "/validate",
-        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
-        headers=auth_headers,
-    )
+def test_validate_file_and_model_id(client, make_user, model_dir) -> None:
+    headers = make_user()
+    r = client.post("/validate", headers=headers,
+                    files={"model_file": ("u.onnx", unsupported_bytes(), "application/octet-stream")})
     assert r.status_code == 200
-    body = r.json()
-    assert body["valid"] is True
-    assert body["unsupported"] == []
-    assert "Conv" in body["operators"]
-    assert "Relu" in body["operators"]
-
-
-def test_validate_by_model_id(
-    client: TestClient,
-    auth_headers: dict,
-    tmp_model_dir: Path,
-    onnx_bytes: bytes,
-) -> None:
-    """After /convert, /validate(model_id=...) should find the
-    saved model and report its ops."""
-    cr = client.post(
-        "/convert",
-        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
-        data={"input_shape": "[1, 3, 32, 32]"},
-        headers=auth_headers,
-    )
-    model_id = cr.json()["onnx_model_id"]
-
-    r = client.post("/validate", data={"model_id": model_id},
-                    headers=auth_headers)
-    assert r.status_code == 200
-    body = r.json()
-    assert body["valid"] is True
-    assert "Conv" in body["operators"]
-
-
-def test_validate_rejects_missing_model_id(client: TestClient, auth_headers: dict) -> None:
-    r = client.post("/validate", data={"model_id": "deadbeef"},
-                    headers=auth_headers)
-    assert r.status_code == 404
-
-
-def test_validate_requires_exactly_one_of_file_or_id(client: TestClient, auth_headers: dict) -> None:
-    r = client.post("/validate", headers=auth_headers)  # neither
-    assert r.status_code == 400
+    assert r.json()["valid"] is False and r.json()["unsupported"] == ["Cos"]
+    assert files_in(model_dir) == []  # validation does not store
+    model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+    r = client.post("/validate", headers=headers, data={"model_id": model_id})
+    assert r.status_code == 200 and r.json()["valid"] is True
+    assert client.post("/validate", headers=headers).status_code == 400
 
 
 # ---------------------------------------------------------------------------
-# /infer
+# Ownership
 # ---------------------------------------------------------------------------
-def test_infer_returns_correct_shape(
-    client: TestClient,
-    auth_headers: dict,
-    tmp_model_dir: Path,
-    onnx_bytes: bytes,
-) -> None:
-    """Full convert -> infer flow on the small classifier.
+def test_ownership_isolation(client, make_user, model_dir) -> None:
+    a, b = make_user(), make_user()
+    model_id = upload(client, a, mlp_bytes())["onnx_model_id"]
 
-    The fallback path returns zeros of the right shape; the C++
-    path runs the actual graph. Both must satisfy:
-        output_shape == (1, 5)
-        output.dtype == float32
-    """
-    cr = client.post(
-        "/convert",
-        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
-        data={"input_shape": "[1, 3, 32, 32]"},
-        headers=auth_headers,
+    assert client.get("/models", headers=b).json()["count"] == 0
+    assert client.get(f"/models/{model_id}", headers=b).status_code == 404
+    assert client.delete(f"/models/{model_id}", headers=b).status_code == 404
+    assert client.post("/validate", headers=b, data={"model_id": model_id}).status_code == 404
+    assert _infer(client, b, model_id, np.zeros((1, 4), np.float32)).status_code == 404
+    assert (model_dir / f"{model_id}.onnx").is_file()
+    assert client.get(f"/models/{model_id}", headers=a).status_code == 200
+
+
+def test_unauthenticated_delete_is_401_and_keeps_model(client, make_user, model_dir) -> None:
+    a = make_user()
+    model_id = upload(client, a, mlp_bytes())["onnx_model_id"]
+    assert client.delete(f"/models/{model_id}").status_code == 401
+    assert (model_dir / f"{model_id}.onnx").is_file()
+
+
+def test_owner_delete_removes_file_and_row(client, make_user, model_dir) -> None:
+    a = make_user()
+    model_id = upload(client, a, mlp_bytes())["onnx_model_id"]
+    r = client.delete(f"/models/{model_id}", headers=a)
+    assert r.status_code == 200 and r.json() == {"status": "deleted", "model_id": model_id}
+    assert files_in(model_dir) == []
+    assert client.get(f"/models/{model_id}", headers=a).status_code == 404
+
+
+def test_delete_never_unlinks_outside_model_dir(client, make_user, tmp_path) -> None:
+    a = make_user()
+    owner_id = client.get("/auth/me", headers=a).json()["id"]
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"precious")
+    database.save_model(
+        model_id="m-outside", name="x", file_path=str(outside), size_bytes=8, owner_id=owner_id,
+        opset=13, operators_used=[], unsupported_ops=[], unsupported_reasons=[], all_supported=True,
+        inputs=[], outputs=[], native_checked=False,
     )
-    model_id = cr.json()["onnx_model_id"]
+    assert client.delete("/models/m-outside", headers=a).status_code == 200
+    assert outside.read_bytes() == b"precious"
 
-    arr = np.random.RandomState(0).randn(1, 3, 32, 32).astype(np.float32)
-    payload = {
-        "model_id": model_id,
-        "input": arr.reshape(-1).tolist(),
-        "input_shape": [1, 3, 32, 32],
-    }
-    r = client.post("/infer", json=payload, headers=auth_headers)
+
+# ---------------------------------------------------------------------------
+# Body limits
+# ---------------------------------------------------------------------------
+def test_upload_over_middleware_limit_is_413(client, make_user, monkeypatch, model_dir) -> None:
+    headers = make_user()
+    monkeypatch.setattr(main.settings, "MAX_UPLOAD_BYTES", 1000)
+    monkeypatch.setattr(main, "MULTIPART_OVERHEAD_BYTES", 0)
+    r = client.post("/convert", headers=headers,
+                    files={"model_file": ("big.onnx", b"\0" * 5000, "application/octet-stream")})
+    assert r.status_code == 413
+    assert files_in(model_dir) == []
+
+
+def test_upload_over_file_limit_is_413(client, make_user, monkeypatch, model_dir) -> None:
+    headers = make_user()
+    monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 100)
+    r = client.post("/convert", headers=headers,
+                    files={"model_file": ("m.onnx", mlp_bytes(), "application/octet-stream")})
+    assert r.status_code == 413
+    assert files_in(model_dir) == []
+
+
+def test_json_body_limit_with_and_without_content_length(client, make_user, monkeypatch) -> None:
+    headers = make_user()
+    monkeypatch.setattr(main.settings, "MAX_REQUEST_BODY_BYTES", 1000)
+    payload = b'{"model_id": "x", "input": [' + b"0.0," * 1000 + b'0.0], "input_shape": [1001]}'
+    r = client.post("/infer", headers={**headers, "Content-Type": "application/json"}, content=payload)
+    assert r.status_code == 413
+    chunked = client.post("/infer", headers={**headers, "Content-Type": "application/json"},
+                          content=iter([payload[:600], payload[600:]]))
+    assert chunked.status_code == 413
+
+
+def test_infer_element_cap_is_413(client, make_user, monkeypatch) -> None:
+    monkeypatch.setattr(main, "MAX_INPUT_ELEMENTS", 10)
+    r = _infer(client, make_user(), "anything", np.zeros((3, 4), np.float32))
+    assert r.status_code == 413
+
+
+# ---------------------------------------------------------------------------
+# /infer validation (no native engine needed)
+# ---------------------------------------------------------------------------
+def test_infer_value_count_mismatch_is_422(client, make_user) -> None:
+    headers = make_user()
+    model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+    r = client.post("/infer", headers=headers,
+                    json={"model_id": model_id, "input": [0.0] * 5, "input_shape": [2, 4]})
+    assert r.status_code == 422
+
+
+def test_infer_shape_mismatch_vs_model_is_422(client, make_user) -> None:
+    headers = make_user()
+    model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+    assert _infer(client, headers, model_id, np.zeros((2, 5), np.float32)).status_code == 422
+    assert _infer(client, headers, model_id, np.zeros((1, 2, 4), np.float32)).status_code == 422
+    conv_id = upload(client, headers, conv_bytes())["onnx_model_id"]
+    assert _infer(client, headers, conv_id, np.zeros((2, 3, 8, 8), np.float32)).status_code == 422
+
+
+def test_infer_bad_shape_values_are_422(client, make_user) -> None:
+    r = client.post("/infer", headers=make_user(),
+                    json={"model_id": "x", "input": [], "input_shape": [1, -3]})
+    assert r.status_code == 422
+
+
+def test_infer_unknown_model_is_404(client, make_user) -> None:
+    assert _infer(client, make_user(), "nope", np.zeros((1, 4), np.float32)).status_code == 404
+
+
+def test_infer_unsupported_model_is_422(client, make_user) -> None:
+    headers = make_user()
+    model_id = upload(client, headers, unsupported_bytes())["onnx_model_id"]
+    r = _infer(client, headers, model_id, np.zeros((1, 4), np.float32))
+    assert r.status_code == 422 and "Cos" in r.json()["detail"]
+
+
+def test_infer_missing_model_file_is_410(client, make_user, model_dir) -> None:
+    headers = make_user()
+    model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+    (model_dir / f"{model_id}.onnx").unlink()
+    assert _infer(client, headers, model_id, np.zeros((1, 4), np.float32)).status_code == 410
+
+
+def test_infer_and_batch_503_without_native_engine(client, make_user, monkeypatch) -> None:
+    headers = make_user()
+    model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+    monkeypatch.setattr(engine, "crucible_py", None)
+    assert client.get("/health").json()["engine"] == "unavailable"
+    r = _infer(client, headers, model_id, np.ones((1, 4), np.float32))
+    assert r.status_code == 503
+    assert "output" not in r.json()
+    batch = [{"model_id": model_id, "input": [1.0] * 4, "input_shape": [1, 4]}]
+    assert client.post("/inference/batch", headers=headers, json=batch).status_code == 503
+    assert client.get("/inference/logs", headers=headers).json()["count"] == 0
+
+
+def test_infer_timeout_is_504(client, make_user, monkeypatch) -> None:
+    """A run that outlives INFERENCE_TIMEOUT_SEC yields 504 (engine stubbed to block)."""
+    headers = make_user()
+    model_id = upload(client, headers, mlp_bytes())["onnx_model_id"]
+
+    class _SlowModule:
+        @staticmethod
+        def load_model(path):
+            return object()
+
+        @staticmethod
+        def run(model, inputs):
+            time.sleep(0.5)
+            return np.zeros((1, 3), np.float32)
+
+    monkeypatch.setattr(engine, "crucible_py", _SlowModule)
+    monkeypatch.setattr(main, "INFERENCE_TIMEOUT_SEC", 0.05)
+    r = _infer(client, headers, model_id, np.ones((1, 4), np.float32))
+    assert r.status_code == 504
+    logs = client.get("/inference/logs", headers=headers).json()["logs"]
+    assert [l["status"] for l in logs] == ["timeout"]
+    time.sleep(0.6)  # let the uncancellable background run release its slot
+
+
+# ---------------------------------------------------------------------------
+# /infer on the native engine vs onnxruntime
+# ---------------------------------------------------------------------------
+def test_infer_mlp_matches_onnxruntime_jwt(client, make_user, native) -> None:
+    headers = make_user()
+    data = mlp_bytes()
+    model_id = upload(client, headers, data)["onnx_model_id"]
+    x = np.random.RandomState(42).randn(3, 4).astype(np.float32)
+    r = _infer(client, headers, model_id, x)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["output_shape"] == [1, 5]
-    assert len(body["output"]) == 5
-    assert body["engine"] in ("crucible-cpp", "crucible-fallback")
-    assert 0.0 <= body["inference_time_ms"] < 60_000.0
+    assert body["backend"] == body["engine"] == "crucible-native"
+    assert body["model_id"] == model_id
+    assert body["output_shape"] == [3, 3]
+    assert body["inference_time_ms"] > 0
+    got = np.asarray(body["output"], np.float32).reshape(body["output_shape"])
+    np.testing.assert_allclose(got, ort_run(data, x), rtol=RTOL, atol=ATOL)
+
+    logs = client.get("/inference/logs", headers=headers).json()
+    assert logs["count"] == 1
+    log = logs["logs"][0]
+    assert log["backend"] == "crucible-native" and log["status"] == "success"
+    assert log["input_shape"] == [3, 4] and log["output_shape"] == [3, 3]
+    assert log["model_id"] == model_id
 
 
-def test_infer_rejects_unknown_model_id(client: TestClient, auth_headers: dict) -> None:
-    r = client.post(
-        "/infer",
-        json={"model_id": "nope", "input": [0.0], "input_shape": [1]},
-        headers=auth_headers,
-    )
-    assert r.status_code == 404
+def test_infer_conv_matches_onnxruntime_user_api_key(client, make_user, native) -> None:
+    jwt_headers = make_user()
+    key = client.post("/auth/api-key", headers=jwt_headers, json={"name": "k"}).json()["full_key"]
+    headers = {"X-API-Key": key}
+    data = conv_bytes()
+    model_id = upload(client, headers, data)["onnx_model_id"]
+    x = np.random.RandomState(7).randn(1, 3, 8, 8).astype(np.float32)
+    r = _infer(client, headers, model_id, x)
+    assert r.status_code == 200, r.text
+    got = np.asarray(r.json()["output"], np.float32).reshape(r.json()["output_shape"])
+    np.testing.assert_allclose(got, ort_run(data, x), rtol=RTOL, atol=ATOL)
 
 
-def test_infer_rejects_shape_mismatch(
-    client: TestClient,
-    auth_headers: dict,
-    tmp_model_dir: Path,
-    onnx_bytes: bytes,
-) -> None:
-    cr = client.post(
-        "/convert",
-        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
-        data={"input_shape": "[1, 3, 32, 32]"},
-        headers=auth_headers,
-    )
-    model_id = cr.json()["onnx_model_id"]
-
-    # 100 floats but input_shape expects 3072
-    r = client.post(
-        "/infer",
-        json={
-            "model_id": model_id,
-            "input": [0.0] * 100,
-            "input_shape": [1, 3, 32, 32],
-        },
-        headers=auth_headers,
-    )
-    assert r.status_code == 400
+def test_fraud_detector_end_to_end(client, make_user, native) -> None:
+    path = Path(__file__).resolve().parents[2] / "models" / "fraud" / "fraud_detector.onnx"
+    if not path.is_file():
+        pytest.skip("models/fraud/fraud_detector.onnx not present")
+    headers = make_user()
+    data = path.read_bytes()
+    body = upload(client, headers, data, "fraud_detector.onnx")
+    assert body["all_supported"] is True
+    shape = body["inputs"][0]["shape"]
+    x = np.random.RandomState(3).randn(5, shape[1]).astype(np.float32)
+    r = _infer(client, headers, body["onnx_model_id"], x)
+    assert r.status_code == 200, r.text
+    got = np.asarray(r.json()["output"], np.float32).reshape(r.json()["output_shape"])
+    np.testing.assert_allclose(got, ort_run(data, x), rtol=RTOL, atol=ATOL)
 
 
-def test_infer_rejects_negative_input_shape_dim(client: TestClient, auth_headers: dict) -> None:
-    """Pydantic validator catches negative dims before we hit numpy."""
-    r = client.post(
-        "/infer",
-        json={
-            "model_id": "anything",
-            "input": [],
-            "input_shape": [1, -3, 32, 32],
-        },
-        headers=auth_headers,
-    )
-    assert r.status_code == 422  # FastAPI's Pydantic validation error
+def test_batch_matches_onnxruntime_and_reports_item_errors(client, make_user, native) -> None:
+    headers = make_user()
+    data = mlp_bytes()
+    model_id = upload(client, headers, data)["onnx_model_id"]
+    x = np.random.RandomState(5).randn(2, 4).astype(np.float32)
+    batch = [
+        {"model_id": model_id, "input": x.reshape(-1).tolist(), "input_shape": [2, 4]},
+        {"model_id": "missing", "input": [0.0] * 4, "input_shape": [1, 4]},
+    ]
+    r = client.post("/inference/batch", headers=headers, json=batch)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["success_count"], body["error_count"]) == (1, 1)
+    ok, bad = body["results"]
+    np.testing.assert_allclose(np.asarray(ok["output"], np.float32).reshape(ok["output_shape"]),
+                               ort_run(data, x), rtol=RTOL, atol=ATOL)
+    assert ok["backend"] == "crucible-native"
+    assert bad["status_code"] == 404
 
 
-def test_infer_rejects_oversize_input_shape(
-    client: TestClient, auth_headers: dict,
-) -> None:
-    """Defence-in-depth: even if Pydantic let it through, the
-    /infer path's product check should still catch a 100M-element
-    shape and return 400, not OOM."""
-    r = client.post(
-        "/infer",
-        json={
-            "model_id": "anything",
-            "input": [0.0],
-            "input_shape": [1024, 1024, 256],  # ~268M
-        },
-        headers=auth_headers,
-    )
-    # 422 (Pydantic) or 400 (our middleware) are both acceptable;
-    # 404 (unknown model) wins if shape validation happens after
-    # model lookup. What matters is that 500 (OOM) is NOT the
-    # response — the assertion rejects any 5xx.
-    assert r.status_code in (400, 422, 404)
-    assert r.status_code < 500
-
-
-def test_extreme_api_load(
-    client: TestClient, auth_headers: dict, tmp_model_dir: Path
-) -> None:
-    """Run 2000 extreme test cases against the /infer and /validate endpoints
-    to verify stability, memory containment, and execution throughput under load.
-    """
-    class SmallModel(nn.Module):
-        def forward(self, x):
-            return x + x
-
-    model = SmallModel()
-    onnx_path = tmp_model_dir / "small_load.onnx"
-    converter.convert_torch_module(model, [1, 3, 32, 32], onnx_path)
-    onnx_bytes = onnx_path.read_bytes()
-
-    cr = client.post(
-        "/convert",
-        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
-        data={"input_shape": "[1, 3, 32, 32]"},
-        headers=auth_headers,
-    )
-    assert cr.status_code == 200
-    model_id = cr.json()["onnx_model_id"]
-
-    for i in range(50):
-        ir = client.post(
-            "/infer",
-            json={
-                "model_id": model_id,
-                "input": [float(i)] * 3072,
-                "input_shape": [1, 3, 32, 32],
-            },
-            headers=auth_headers,
-        )
-        assert ir.status_code == 200
-        assert len(ir.json()["output"]) == 3072
-
-        vr = client.post(
-            "/validate",
-            data={"model_id": model_id},
-            headers=auth_headers,
-        )
-        assert vr.status_code == 200
-        assert vr.json()["valid"] is True
+def test_analytics_reflect_own_inferences(client, make_user, native) -> None:
+    a, b = make_user(), make_user()
+    model_id = upload(client, a, mlp_bytes())["onnx_model_id"]
+    assert _infer(client, a, model_id, np.ones((1, 4), np.float32)).status_code == 200
+    inf = client.get("/analytics/inference", headers=a).json()
+    assert sum(d["count"] for d in inf["data"]) == 1
+    assert client.get("/analytics/inference", headers=b).json()["data"] == []
+    models = client.get("/analytics/models", headers=a).json()["models"]
+    assert [(m["id"], m["usage_count"], m["inference_count"]) for m in models] == [(model_id, 1, 1)]
+    assert client.get("/inference/logs", headers=b).json()["count"] == 0
 
 
 # ---------------------------------------------------------------------------
-# Database & CRUD Endpoints
+# Fraud check history
 # ---------------------------------------------------------------------------
-def test_database_models_and_logs(client: TestClient, auth_headers: dict, tmp_model_dir: Path, onnx_bytes: bytes) -> None:
-    cr = client.post(
-        "/convert",
-        files={"model_file": ("small.onnx", onnx_bytes, "application/octet-stream")},
-        data={"input_shape": "[1, 3, 32, 32]"},
-        headers=auth_headers,
-    )
-    model_id = cr.json()["onnx_model_id"]
-
-    mr = client.get("/models")
-    assert mr.status_code == 200
-    m_body = mr.json()
-    assert m_body["count"] >= 1
-    assert any(m["id"] == model_id for m in m_body["models"])
-
-    gr = client.get(f"/models/{model_id}")
-    assert gr.status_code == 200
-    assert gr.json()["id"] == model_id
-
-    # Infer to generate a log
-    ir = client.post(
-        "/infer",
-        json={
-            "model_id": model_id,
-            "input": [1.0] * 3072,
-            "input_shape": [1, 3, 32, 32],
-        },
-        headers=auth_headers,
-    )
-    assert ir.status_code == 200
-
-    lr = client.get("/inference/logs")
-    assert lr.status_code == 200
-    assert lr.json()["count"] >= 1
-
-    dr = client.delete(f"/models/{model_id}")
-    assert dr.status_code == 200
-    assert dr.json()["status"] == "deleted"
-
-
-def test_fraud_and_benchmark_logging(client: TestClient) -> None:
-    fr = client.post(
-        "/fraud/log",
-        json={
-            "tx_type": "TRANSFER",
-            "amount": 50000.0,
-            "orig_before": 100000.0,
-            "orig_after": 50000.0,
-            "dest_before": 0.0,
-            "dest_after": 50000.0,
-            "probability": 0.12,
-            "verdict": "Low risk",
-            "execution_mode": "wasm",
-            "latency_ms": 1.25,
-        },
-    )
-    assert fr.status_code == 200
-    assert fr.json()["verdict"] == "Low risk"
-
-    fh = client.get("/fraud/history")
-    assert fh.status_code == 200
-    assert fh.json()["count"] >= 1
-
-    br = client.post(
-        "/benchmarks",
-        json={
-            "model_name": "fraud_detector.onnx",
-            "engine": "crucible-wasm",
-            "latency_ms": 1.15,
-            "memory_mb": 3.2,
-        },
-    )
-    assert br.status_code == 200
-    assert br.json()["engine"] == "crucible-wasm"
-
-    bl = client.get("/benchmarks")
-    assert bl.status_code == 200
-    assert bl.json()["count"] >= 1
-
+def test_fraud_history_persists_fields_and_is_scoped(client, make_user) -> None:
+    a, b = make_user(), make_user()
+    tx = {"tx_type": "TRANSFER", "amount": 500.0, "orig_before": 1000.0, "orig_after": 500.0,
+          "dest_before": 0.0, "dest_after": 500.0, "probability": 0.91, "verdict": "High risk",
+          "execution_mode": "wasm", "latency_ms": 0.8}
+    r = client.post("/fraud/log", headers=a, json=tx)
+    assert r.status_code == 200
+    hist = client.get("/fraud/history", headers=a).json()
+    assert hist["count"] == 1
+    item = hist["history"][0]
+    assert {k: item[k] for k in tx} == tx
+    assert client.get("/fraud/history", headers=b).json()["count"] == 0
+    fraud = client.get("/analytics/fraud", headers=a).json()["data"]
+    assert [(d["total"], d["fraud_count"]) for d in fraud] == [(1, 1)]

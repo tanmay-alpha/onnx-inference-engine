@@ -16,8 +16,8 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, root_dir)
 
-from server.database import Base, _prep_name_func
-from server.models import User, ApiKey, ModelRecord, InferenceLog, FraudCase, Benchmark  # noqa: F401
+from server.database import Base, _get_database_url, _prep_name_func
+from server.models import User, ApiKey, ModelRecord, InferenceLog, FraudCase  # noqa: F401
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -26,13 +26,8 @@ target_metadata = Base.metadata
 
 
 def get_db_url() -> str:
-    """Get the async database URL, preferring the env var from the project root."""
-    # Check DATABASE_URL from environment (project root .env sets this)
-    url = os.environ.get("DATABASE_URL")
-    if url:
-        return url
-    # Fallback to alembic.ini value
-    return config.get_main_option("sqlalchemy.url", "")
+    """Async database URL, normalised exactly like the server does (DATABASE_URL)."""
+    return _get_database_url()
 
 
 def run_migrations_offline() -> None:

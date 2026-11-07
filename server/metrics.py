@@ -1,92 +1,48 @@
-"""Prometheus metrics for onnx-inference-engine.
+"""Prometheus metrics exposed at GET /metrics.
 
-Exposes GET /metrics endpoint with:
-  - crucible_inference_requests_total — counter of all inference requests
-  - crucible_inference_duration_seconds — histogram of inference latency
-  - crucible_errors_total — counter of failed requests by error type
-  - crucible_fraud_confidence — histogram of fraud prediction confidence scores
-  - crucible_active_models — gauge of currently loaded models
-  - crucible_batch_jobs_total — counter of batch inference jobs
+  - crucible_inference_requests_total{engine,status}
+  - crucible_inference_duration_seconds{engine}   (engine-only time, successes)
+  - crucible_errors_total{error_type}
+  - crucible_batch_jobs_total{status}
+
+Model ids are deliberately not used as labels (unbounded cardinality).
 """
-from prometheus_client import (
-    Counter,
-    Gauge,
-    Histogram,
-    REGISTRY,
-    generate_latest,
-)
+from prometheus_client import REGISTRY, Counter, Histogram, generate_latest
 from starlette.responses import Response
 
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
 _inference_requests_total = Counter(
     "crucible_inference_requests_total",
-    "Total number of inference requests",
-    ["model_id", "engine", "status"],
+    "Inference requests that reached the native engine",
+    ["engine", "status"],
 )
 
 _inference_duration = Histogram(
     "crucible_inference_duration_seconds",
-    "Inference request latency in seconds",
-    ["model_id", "engine"],
-    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+    "Time spent inside the native engine run call",
+    ["engine"],
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
 )
 
-_errors_total = Counter(
-    "crucible_errors_total",
-    "Total number of errors by type",
-    ["error_type"],
-)
+_errors_total = Counter("crucible_errors_total", "Errors by type", ["error_type"])
 
-_active_models = Gauge(
-    "crucible_active_models",
-    "Number of currently active/loaded models",
-)
-
-_fraud_confidence = Histogram(
-    "crucible_fraud_confidence",
-    "Distribution of fraud prediction confidence scores",
-    buckets=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0),
-)
-
-_batch_jobs_total = Counter(
-    "crucible_batch_jobs_total",
-    "Total batch inference jobs",
-    ["status"],
-)
+_batch_jobs_total = Counter("crucible_batch_jobs_total", "Batch inference items", ["status"])
 
 
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-def record_inference(model_id: str, engine: str, latency_ms: float, status: str = "success") -> None:
-    """Record an inference request and its latency."""
-    _inference_requests_total.labels(model_id=model_id, engine=engine, status=status).inc()
-    _inference_duration.labels(model_id=model_id, engine=engine).observe(latency_ms / 1000.0)
-    if status != "success":
-        _errors_total.labels(error_type="inference").inc()
+def record_inference(engine: str, latency_ms: float, status: str = "success") -> None:
+    _inference_requests_total.labels(engine=engine, status=status).inc()
+    if status == "success":
+        _inference_duration.labels(engine=engine).observe(latency_ms / 1000.0)
+    else:
+        _errors_total.labels(error_type=f"inference_{status}").inc()
 
 
 def record_error(error_type: str) -> None:
-    """Record a generic error by type."""
     _errors_total.labels(error_type=error_type).inc()
 
 
-def set_active_models(count: int) -> None:
-    """Set the active models gauge."""
-    _active_models.set(count)
-
-
 def record_batch_job(status: str) -> None:
-    """Record a batch job completion."""
     _batch_jobs_total.labels(status=status).inc()
 
 
-# ---------------------------------------------------------------------------
-# Endpoint
-# ---------------------------------------------------------------------------
 def metrics_response() -> Response:
-    """Return Prometheus metrics as plain text."""
-    data = generate_latest(REGISTRY)
-    return Response(content=data, media_type="text/plain; version=0.0.4")
+    return Response(content=generate_latest(REGISTRY), media_type="text/plain; version=0.0.4")

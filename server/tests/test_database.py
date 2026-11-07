@@ -1,149 +1,69 @@
-"""Tests for Crucible server database layer."""
+"""Tests for the synchronous CRUD helpers in server.database."""
 from __future__ import annotations
 
 import uuid
 
-import pytest
-
-from server.database import (
-    init_db,
-    reset_engine,
-    save_model,
-    get_model,
-    list_models,
-    delete_model,
-    log_inference,
-    get_inference_logs,
-    log_fraud_tx,
-    get_fraud_history,
-    log_benchmark,
-    get_benchmarks,
-)
+from server import database
 
 
-@pytest.fixture(autouse=True)
-def _fresh_db(tmp_path, monkeypatch):
-    """Use a fresh SQLite database for each test."""
-    db_path = tmp_path / "test_crucible.db"
-    monkeypatch.setenv("CRUCIBLE_MODEL_DIR", str(tmp_path))
-    monkeypatch.setenv("CRUCIBLE_DB_PATH", str(db_path))
-    import server.database as db_mod
-
-    db_mod.reset_engine()
-    from server.database import init_db
-    init_db()
-    yield
+def _save(model_id: str, owner: str | None) -> None:
+    database.save_model(
+        model_id=model_id, name=f"{model_id}.onnx", file_path=f"/tmp/models/{model_id}.onnx",
+        size_bytes=1024, owner_id=owner, opset=13, operators_used=["Gemm", "Relu"],
+        unsupported_ops=[], unsupported_reasons=[], all_supported=True,
+        inputs=[{"name": "X", "shape": [-1, 4], "dtype": "float32"}],
+        outputs=[{"name": "Y", "shape": [-1, 3], "dtype": "float32"}], native_checked=True,
+    )
 
 
-class TestModelCRUD:
-    def test_save_and_get_model(self):
-        model_id = uuid.uuid4().hex
-        save_model(
-            model_id=model_id,
-            name="test-model.onnx",
-            file_path="/tmp/models/test-model.onnx",
-            file_size_bytes=1024,
-            input_shape=[1, 3, 224, 224],
-            operators=["Conv", "Relu", "Gemm"],
-            all_supported=True,
-        )
-        rec = get_model(model_id)
-        assert rec is not None
-        assert rec["id"] == model_id
-        assert rec["name"] == "test-model.onnx"
-        assert rec["file_size_bytes"] == 1024
-        assert rec["input_shape"] == [1, 3, 224, 224]
-        assert rec["all_supported"] is True
-
-    def test_list_models(self):
-        initial_count = len(list_models())
-        for i in range(3):
-            save_model(
-                model_id=uuid.uuid4().hex,
-                name=f"model-{i}.onnx",
-                file_path=f"/tmp/models/model-{i}.onnx",
-                file_size_bytes=512 * (i + 1),
-                input_shape=[1, 3],
-                operators=["Relu"],
-                all_supported=True,
-            )
-        models = list_models()
-        assert len(models) == initial_count + 3
-
-    def test_delete_model(self):
-        model_id = uuid.uuid4().hex
-        save_model(
-            model_id=model_id,
-            name="to-delete.onnx",
-            file_path="/tmp/models/to-delete.onnx",
-            file_size_bytes=256,
-            input_shape=[1],
-            operators=[],
-            all_supported=True,
-        )
-        result = delete_model(model_id)
-        assert result is True
-        assert get_model(model_id) is None
+def test_model_roundtrip_and_scoping() -> None:
+    a, b = uuid.uuid4().hex, uuid.uuid4().hex
+    _save("m1", a)
+    _save("m2", b)
+    rec = database.get_model("m1", owner_id=a)
+    assert rec is not None
+    assert rec["size_bytes"] == 1024 and rec["opset"] == 13
+    assert rec["operators_used"] == ["Gemm", "Relu"] and rec["all_supported"] is True
+    assert rec["inputs"] == [{"name": "X", "shape": [-1, 4], "dtype": "float32"}]
+    assert database.get_model("m1", owner_id=b) is None
+    assert database.get_model("m1", owner_id=None, all_owners=True) is not None
+    assert [m["id"] for m in database.list_models(owner_id=a)] == ["m1"]
+    assert {m["id"] for m in database.list_models(owner_id=None, all_owners=True)} == {"m1", "m2"}
+    assert database.delete_model("m1") is True
+    assert database.delete_model("m1") is False
 
 
-class TestInferenceLogs:
-    def test_log_and_retrieve(self):
-        model_id = uuid.uuid4().hex
-        save_model(
-            model_id=model_id,
-            name="inf-model.onnx",
-            file_path="/tmp/models/inf-model.onnx",
-            file_size_bytes=512,
-            input_shape=[1, 3],
-            operators=["Relu"],
-            all_supported=True,
-        )
-        log = log_inference(
-            model_id=model_id,
-            input_shape=[1, 3],
-            output_shape=[1, 10],
-            inference_time_ms=12.5,
-            engine="crucible-cpp",
-        )
-        assert log["model_id"] == model_id
-        assert log["inference_time_ms"] == 12.5
-
-        logs = get_inference_logs(limit=10)
-        assert len(logs) >= 1
-        assert any(l["id"] == log["id"] for l in logs)
+def test_inference_logs_scoped_and_count_usage() -> None:
+    a = uuid.uuid4().hex
+    _save("m", a)
+    database.log_inference(model_id="m", user_id=a, api_key_id=None, input_shape=[1, 4],
+                           output_shape=[1, 3], latency_ms=1.5, backend="crucible-native")
+    database.log_inference(model_id="m", user_id=a, api_key_id=None, input_shape=[1, 4],
+                           output_shape=None, latency_ms=0.0, backend="crucible-native",
+                           status="error", error_message="bad")
+    logs = database.get_inference_logs(owner_id=a)
+    assert [l["status"] for l in logs] and {l["status"] for l in logs} == {"success", "error"}
+    ok = next(l for l in logs if l["status"] == "success")
+    assert ok["input_shape"] == [1, 4] and ok["output_shape"] == [1, 3] and ok["backend"] == "crucible-native"
+    assert database.get_inference_logs(owner_id=uuid.uuid4().hex) == []
+    assert database.get_model("m", owner_id=a)["usage_count"] == 1
 
 
-class TestFraudTransactions:
-    def test_log_and_retrieve(self):
-        tx = log_fraud_tx(
-            tx_type="TRANSFER",
-            amount=50000.0,
-            orig_before=60000.0,
-            orig_after=10000.0,
-            dest_before=20000.0,
-            dest_after=70000.0,
-            probability=0.82,
-            verdict="High risk",
-            execution_mode="wasm",
-            latency_ms=1.2,
-        )
-        assert tx["amount"] == 50000.0
-        assert tx["probability"] == 0.82
-
-        history = get_fraud_history(limit=10)
-        assert any(h["id"] == tx["id"] for h in history)
+def test_fraud_history_roundtrip() -> None:
+    a = uuid.uuid4().hex
+    item = database.log_fraud_tx(user_id=a, tx_type="CASH_OUT", amount=10.0, orig_before=20.0,
+                                 orig_after=10.0, dest_before=0.0, dest_after=10.0, probability=0.2,
+                                 verdict="Low risk", execution_mode="server", latency_ms=1.0)
+    assert item["tx_type"] == "CASH_OUT" and item["probability"] == 0.2
+    hist = database.get_fraud_history(owner_id=a)
+    assert [h["id"] for h in hist] == [item["id"]]
+    assert database.get_fraud_history(owner_id=None) == []
 
 
-class TestBenchmarks:
-    def test_log_and_retrieve(self):
-        bench = log_benchmark(
-            model_name="test-model.onnx",
-            engine="crucible-wasm",
-            latency_ms=14.3,
-            memory_mb=2.5,
-        )
-        assert bench["latency_ms"] == 14.3
-        assert bench["memory_mb"] == 2.5
-
-        benches = get_benchmarks(limit=10)
-        assert any(b["id"] == bench["id"] for b in benches)
+def test_postgres_urls_use_installed_drivers(monkeypatch) -> None:
+    monkeypatch.delenv("CRUCIBLE_DB_PATH")
+    from server.config import get_settings
+    monkeypatch.setattr(get_settings(), "DATABASE_URL", "postgres://u:p@h/db")
+    url = database._get_database_url()
+    assert url == "postgresql+asyncpg://u:p@h/db"
+    assert database._sync_url(url) == "postgresql+psycopg2://u:p@h/db"

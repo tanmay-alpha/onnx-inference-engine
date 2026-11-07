@@ -1,30 +1,20 @@
+# Render blueprint for the Crucible API. The web frontend is deployed on
+# Vercel (https://crucible-ivory-three.vercel.app), not here.
+#
+# Notes:
+# - Free instances have an ephemeral disk: uploaded model files under
+#   CRUCIBLE_MODEL_DIR vanish on restart/redeploy (DB rows remain; /infer then
+#   answers 410 and the model must be uploaded again).
+# - DATABASE_URL is required in production (e.g. a Supabase/Neon Postgres URL;
+#   postgresql:// URLs are accepted and mapped to asyncpg/psycopg2).
 services:
-  # ── Frontend: Vite/TanStack Start static site ────────────────────────────
   - type: web
-    name: crucible-web
-    runtime: static
-    buildCommand: cd web && npm install && npm run build
-    staticPublishPath: web/.output/public
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-    envVars:
-      - key: NODE_VERSION
-        value: "20"
-      - key: VITE_API_URL
-        fromService:
-          type: web
-          name: crucible-api
-          property: url
-
-  # ── Backend: FastAPI inference server ──────────────────────────────────────
-  - type: web
-    name: crucible-api
+    name: crucible-onnx-api
     runtime: docker
     dockerfilePath: server/Dockerfile
     dockerContext: .
     plan: free
+    healthCheckPath: /health
     envVars:
       - key: ENVIRONMENT
         value: production
@@ -34,21 +24,26 @@ services:
         sync: false
       - key: CRUCIBLE_SECRET_KEY
         generateValue: true
+      # Optional operator key (sees all users' data). Leave unset to disable.
       - key: CRUCIBLE_API_KEY
         sync: false
       - key: CRUCIBLE_CORS_ORIGINS
-        sync: false
+        value: https://crucible-ivory-three.vercel.app
       - key: CRUCIBLE_MODEL_DIR
         value: /tmp/models
+      - key: MAX_UPLOAD_BYTES
+        value: "104857600"
+      - key: MAX_REQUEST_BODY_BYTES
+        value: "16777216"
+      - key: MAX_INPUT_ELEMENTS
+        value: "4000000"
       - key: INFERENCE_TIMEOUT_SEC
         value: "60"
-      - key: MAX_UPLOAD_BYTES
-        value: "209715200"
+      - key: MAX_CONCURRENT_INFERENCES
+        value: "1"
       - key: CRUCIBLE_LOG_LEVEL
         value: INFO
       - key: CRUCIBLE_LOG_FORMAT
         value: json
-      - key: PYTHONUNBUFFERED
-        value: "1"
       - key: TZ
         value: UTC

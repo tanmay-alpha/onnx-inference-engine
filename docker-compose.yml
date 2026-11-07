@@ -1,82 +1,58 @@
-version: "3.9"
-
+# Local full stack: Postgres + API (native engine) + web + Prometheus/Grafana.
+#   CRUCIBLE_SECRET_KEY=$(openssl rand -hex 32) docker compose up --build
 services:
-  # ─── Redis (caching + rate limiting) ────────────────────────────────────────
-  redis:
-    image: redis:7-alpine
-    container_name: onnx-inference-redis
-    ports:
-      - "6379:6379"
+  postgres:
+    image: postgres:16-alpine
+    container_name: crucible-postgres
+    environment:
+      POSTGRES_USER: crucible
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crucible}
+      POSTGRES_DB: crucible
     volumes:
-      - redis_data:/data
-    restart: unless-stopped
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "pg_isready -U crucible -d crucible"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
 
-  # ─── ONNX Inference Engine API Server ──────────────────────────────────────
   server:
     build:
       context: .
       dockerfile: server/Dockerfile
-    container_name: onnx-inference-server
+    container_name: crucible-server
     environment:
-      # Supabase PostgreSQL — set these in your deployment environment
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: redis://redis:6379/0
-      CRUCIBLE_MODEL_DIR: /app/models
-      # Auth — MUST set these in production
-      CRUCIBLE_API_KEY: ${CRUCIBLE_API_KEY}
-      CRUCIBLE_SECRET_KEY: ${CRUCIBLE_SECRET_KEY}
-      # Supabase
-      SUPABASE_URL: ${SUPABASE_URL}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-      SUPABASE_STORAGE_BUCKET: ${SUPABASE_STORAGE_BUCKET:-models}
-      # CORS — set to your frontend URL
+      DATABASE_URL: postgresql://crucible:${POSTGRES_PASSWORD:-crucible}@postgres:5432/crucible
+      CRUCIBLE_SECRET_KEY: ${CRUCIBLE_SECRET_KEY:?set CRUCIBLE_SECRET_KEY}
+      # Optional operator key; empty disables operator access.
+      CRUCIBLE_API_KEY: ${CRUCIBLE_API_KEY:-}
       CRUCIBLE_CORS_ORIGINS: ${CRUCIBLE_CORS_ORIGINS:-http://localhost:3000}
-      INFERENCE_TIMEOUT_SEC: 60
-      MAX_UPLOAD_BYTES: 209715200
-      MAX_REQUEST_BODY_BYTES: 10485760
-      MAX_INPUT_ELEMENTS: 50000000
-      CRUCIBLE_LOG_LEVEL: INFO
+      CRUCIBLE_MODEL_DIR: /crucible/models
       CRUCIBLE_LOG_FORMAT: console
     ports:
       - "8000:8000"
     volumes:
-      - ./models:/app/models
-      - ./data:/app/data
-      - supabase_storage:/app/supabase_storage
+      - model_files:/crucible/models
     depends_on:
-      redis:
+      postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 20s
     restart: unless-stopped
     command: >
-      sh -c "
-        echo 'Waiting for database...' &&
-        python3 -c 'import asyncpg; import asyncio; import os; url=os.environ.get(\"DATABASE_URL\",\"\");
-        if url:
-          dsn=url.replace(\"+asyncpg\",\"\")
-          asyncio.run(asyncpg.connect(dsn=dsn))' &&
-        echo 'Running migrations...' &&
-        cd server && alembic upgrade head &&
-        echo 'Starting server...' &&
-        uvicorn server.main:app --host 0.0.0.0 --port 8000 --workers 2
-      "
+      sh -c "cd /crucible/server && alembic upgrade head &&
+             cd /crucible && uvicorn server.main:app --host 0.0.0.0 --port 8000"
 
-  # ─── Web Frontend (TanStack Start) ──────────────────────────────────────────
   web:
     build:
       context: ./web
       dockerfile: Dockerfile
-    container_name: onnx-inference-web
+    container_name: crucible-web
     ports:
       - "3000:3000"
     environment:
@@ -85,46 +61,33 @@ services:
       - server
     restart: unless-stopped
 
-  # ─── Prometheus (metrics collection) ───────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.47.0
-    container_name: onnx-inference-prometheus
+    container_name: crucible-prometheus
     ports:
       - "9090:9090"
     volumes:
       - prometheus_data:/prometheus
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
     restart: unless-stopped
 
-  # ─── Grafana (metrics dashboard) ───────────────────────────────────────────
   grafana:
     image: grafana/grafana:10.3.0
-    container_name: onnx-inference-grafana
+    container_name: crucible-grafana
     ports:
       - "3001:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:?set GF_ADMIN_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_SERVER_ROOT_URL: ${GF_SERVER_ROOT_URL:-http://localhost:3001}
     volumes:
       - grafana_data:/var/lib/grafana
     restart: unless-stopped
 
 volumes:
   postgres_data:
-    driver: local
-  redis_data:
-    driver: local
+  model_files:
   grafana_data:
-    driver: local
   prometheus_data:
-    driver: local
-  supabase_storage:
-    driver: local
-
-networks:
-  default:
-    driver: bridge

@@ -1,0 +1,5 @@
+# Test dependencies for the server suite (install alongside requirements.txt):
+#   pip install -r server/requirements.txt -r server/requirements-dev.txt
+pytest>=8,<10
+httpx==0.27.0              # FastAPI TestClient transport
+onnxruntime>=1.17          # reference outputs for /infer parity assertions
