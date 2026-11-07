@@ -81,19 +81,21 @@ CrucibleStatus classify(const std::exception& e) {
         return CRUCIBLE_ERR_INVALID_ARGUMENT;
     }
     if (dynamic_cast<const std::runtime_error*>(&e) != nullptr) {
-        // Both parse-time and run-time errors come through here;
-        // the C++ engine does not distinguish them. We bucket by
-        // message prefix when we can recognise one.
-        const char* what = e.what();
-        if (what != nullptr && std::strstr(what, "parse") != nullptr) {
-            return CRUCIBLE_ERR_PARSE;
+        // The engine signals categories through message prefixes: the
+        // parser prefixes every error with "ONNX: ", file-access failures
+        // use the phrases below, and the executor says "unsupported" /
+        // "not supported" for features it rejects.
+        const std::string what = e.what() ? e.what() : "";
+        auto has = [&](const char* s) { return what.find(s) != std::string::npos; };
+        if (has("unsupported") || has("not supported") || has("external data")) {
+            return CRUCIBLE_ERR_UNSUPPORTED;
         }
-        if (what != nullptr && std::strstr(what, "io") != nullptr) {
+        if (has("ONNX: cannot open") || has("ONNX: read error") ||
+            has("ONNX: cannot determine file size") || has("is empty")) {
             return CRUCIBLE_ERR_IO;
         }
-        if (what != nullptr && (std::strstr(what, "unsupported") != nullptr ||
-                                std::strstr(what, "not supported") != nullptr)) {
-            return CRUCIBLE_ERR_UNSUPPORTED;
+        if (what.rfind("ONNX: ", 0) == 0) {
+            return CRUCIBLE_ERR_PARSE;
         }
         return CRUCIBLE_ERR_RUNTIME;
     }
