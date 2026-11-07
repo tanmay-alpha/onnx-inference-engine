@@ -100,6 +100,7 @@ class Principal:
     email: Optional[str]
     is_operator: bool = False
     api_key_id: Optional[str] = None
+    api_key_rate_limit: Optional[int] = None  # requests/minute for this key (/infer, /inference/batch)
 
     @property
     def all_owners(self) -> bool:
@@ -116,6 +117,12 @@ def hash_password(password: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     return _pwd_context.verify(plain, hashed)
+
+
+# Hash of a random password, computed once at import. Login verifies against
+# it when the email is unknown so both paths cost one bcrypt check (no
+# account enumeration by timing).
+DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 def create_access_token(user_id: str, email: str, is_admin: bool = False) -> str:
@@ -193,7 +200,8 @@ async def _user_from_api_key(raw_key: str) -> Optional[Principal]:
             raise HTTPException(status_code=401, detail="API key revoked, expired, or owner inactive")
         key.last_used = now
         await session.commit()
-        return Principal(user_id=user.id, email=user.email, api_key_id=key.id)
+        return Principal(user_id=user.id, email=user.email, api_key_id=key.id,
+                         api_key_rate_limit=key.rate_limit)
 
 
 async def require_principal(

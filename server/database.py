@@ -382,6 +382,16 @@ def list_models(*, owner_id: Optional[str], all_owners: bool = False) -> List[Di
         return [_model_dict(r) for r in rows]
 
 
+def owner_usage(owner_id: str) -> tuple[int, int]:
+    """(stored model count, total stored bytes) for one user."""
+    with Session(_get_sync_engine()) as session:
+        count, total = session.execute(
+            select(func.count(ModelRecord.id), func.coalesce(func.sum(ModelRecord.file_size), 0))
+            .where(ModelRecord.created_by == owner_id)
+        ).one()
+    return int(count), int(total)
+
+
 def delete_model(model_id: str) -> bool:
     with Session(_get_sync_engine()) as session:
         rec = session.get(ModelRecord, model_id)

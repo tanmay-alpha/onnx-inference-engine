@@ -20,7 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from server import database, engine  # noqa: E402
+from server import database, engine, ratelimit  # noqa: E402
 from server.main import app  # noqa: E402
 
 
@@ -32,6 +32,7 @@ def _isolated_env(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("CRUCIBLE_DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("CRUCIBLE_API_KEY", "")
     database.reset_engine()
+    ratelimit.reset_all()
     database.init_db()
     yield model_dir
     database.reset_engine()
