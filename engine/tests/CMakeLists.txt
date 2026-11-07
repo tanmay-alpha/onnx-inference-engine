@@ -16,6 +16,9 @@ endif()
 
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(BUILD_GMOCK   OFF CACHE BOOL "" FORCE)
+# MSVC: googletest defaults to the static CRT (/MT) while our targets use
+# /MD; mixing them fails with LNK2038. Use the shared CRT everywhere.
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 add_subdirectory(${CRUCIBLE_GTEST_DIR} gtest_build EXCLUDE_FROM_ALL)
 
 # Discover all test_*.cpp files. Issue #1 contributes a single smoke test
