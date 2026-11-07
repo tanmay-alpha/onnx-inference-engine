@@ -1,441 +1,280 @@
-# onnx-inference-engine
+# Crucible — ONNX Inference Engine
 
-A high-performance ONNX model inference engine with a FastAPI backend, TanStack Start frontend, and a C++17 execution core. Supports fraud detection, image classification (MobileNetV2, ResNet18), and custom ONNX models. Deploys on Render + Vercel + Supabase.
+[![Engine CI](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-engine.yml/badge.svg)](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-engine.yml)
+[![Rust (WASM)](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-rust.yml)
+[![Web](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-web.yml/badge.svg)](https://github.com/tanmay-alpha/onnx-inference-engine/actions/workflows/ci-web.yml)
 
-## What It Is
+Crucible is an ONNX inference engine written from scratch in C++17, together
+with the code that turns it into a small model-serving product:
 
-onnx-inference-engine (internally codenamed **Crucible**) provides a complete pipeline for training, converting, validating, and serving ONNX models at production scale. A custom C++ inference engine delivers low-latency execution with a Python fallback for environments where the native bindings are unavailable. The web frontend exposes an interactive playground, analytics dashboard, fraud detection history, and architecture visualizations. A pure-Rust WASM reimplementation enables zero-latency, privacy-preserving inference directly in the browser.
+* a **native engine** with a hand-written protobuf parser, a graph executor
+  and 20 operators, checked against ONNX Runtime on real models;
+* a **FastAPI service** where users upload ONNX models, inspect them and run
+  inference on the native engine through pybind11;
+* a **Rust CLI** over the engine's C ABI;
+* a **browser runtime**: a separate, much smaller pure-Rust interpreter
+  compiled to WebAssembly that runs the demo fraud model client-side.
 
-## Tech Stack
+It is a learning and portfolio project. It is correct on the models it
+supports and honest about what it doesn't support, but it is **not fast**: it
+is single-threaded and several times slower than ONNX Runtime (see
+[Benchmarks](#benchmarks)).
 
-| Layer | Technology |
+**Live demo:** <https://crucible-ivory-three.vercel.app> serves the frontend,
+which includes the in-browser WASM fraud demo and playground. The hosted API
+isn't deployed yet (see [Deployment](#deployment)), so the server-backed
+pages show "backend offline".
+
+![Playground running the fraud model in the browser](docs/screenshots/playground.png)
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Browser["Browser — web/ (React, TanStack)"]
+    UI[UI] --> WASM["crucible-wasm<br/>Rust interpreter, 5 ops"]
+  end
+  subgraph API["server/ — FastAPI"]
+    Auth[JWT / API-key auth] --> PY[crucible_py<br/>pybind11]
+    Auth --> DB[(SQLite / Postgres)]
+  end
+  subgraph Engine["engine/ — C++17"]
+    Parser[ONNX parser] --> Exec[Graph executor] --> Ops[20 ops, Eigen GEMM]
+    CABI[C ABI]
+  end
+  UI -- "/convert /infer" --> Auth
+  PY --> Exec
+  CLI[cli/ — Rust] --> CABI --> Exec
+```
+
+Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### What I wrote vs. what is third-party
+
+| Written for this project | Third-party |
 |---|---|
-| **Backend** | FastAPI, SQLAlchemy 2.0 (async), Alembic, Prometheus Client, structlog |
-| **Frontend** | TanStack Start, React, TanStack Router, Tailwind CSS, shadcn/ui, Chart.js |
-| **Database** | Supabase (PostgreSQL) with asyncpg; SQLite for local development |
-| **ML Training** | scikit-learn, XGBoost, PyTorch (model export), imbalanced-learn (SMOTE) |
-| **Inference Engine** | C++17 core with Eigen, protobuf ONNX parser, pybind11 Python bindings |
-| **WASM Runtime** | Pure Rust WASM reimplementation for browser-side inference |
-| **CLI** | Rust + Clap (FFI bridge to C++ engine) |
-| **Deployment** | Render (API), Vercel (frontend), Supabase (DB + Storage) |
+| Protobuf wire-format parser for ONNX (no libprotobuf) | Eigen 3.4 (dense matrix multiply) |
+| Graph executor: topological order, zero-copy weights, intermediates freed after last use, static support checks | pybind11, GoogleTest |
+| Operators: Conv (im2col + GEMM, 1×1 and depthwise fast paths), pooling, BatchNorm, numpy-broadcast Add, Softmax, Gemm, … | ONNX Runtime and `onnx`, used only as the test reference and validator |
+| C ABI, Rust CLI, Rust/WASM interpreter | FastAPI, SQLAlchemy, React, wasm-bindgen |
+| API: auth, model ownership, upload validation, limits | |
 
-## Features
+## Supported ONNX operators
 
-- Upload and serve ONNX models via REST API with multipart upload
-- Real-time inference through a custom C++ execution engine (numpy fallback available)
-- Fraud detection model trained on the Kaggle CreditCard dataset (GradientBoosting / XGBoost)
-- Image classification support (MobileNetV2, ResNet18)
-- JWT-based authentication with user registration, login, and API key management
-- Analytics dashboard with inference history, fraud transaction logs, and benchmark results
-- Model management: upload, list, validate, and delete ONNX models
-- Prometheus metrics endpoint (`GET /metrics`)
-- Supabase Storage integration for model file persistence
-- Batch inference (up to 100 requests per call)
-- Structured logging with structlog
-- Comprehensive input validation and size limits to prevent abuse
+**Native engine (20):** Add, AveragePool, BatchNormalization, Concat, Conv,
+Dropout, Elu, Flatten, Gelu, Gemm, GlobalAveragePool, Identity, LeakyRelu,
+MatMul, MaxPool, Relu, Reshape, Sigmoid, Softmax, Tanh.
 
-## Quick Start
+The following are **rejected with an error that names the node and the
+attribute**, rather than being computed incorrectly:
 
-### Prerequisites
+* other operators and non-default domains;
+* `dilations ≠ 1`, asymmetric `pads`, `auto_pad=SAME_*`, `ceil_mode`, and 3-D or 1-D windows;
+* MaxPool `Indices` output, BatchNorm training mode;
+* MatMul on tensors that aren't rank 2;
+* non-float32 graph inputs, initializers stored as external data, and inputs that contradict the model's declared static shape.
 
-- Python 3.11+
-- Node.js 20+ (npm or pnpm)
-- Supabase account (for production database)
-- CMake 3.25+ and Ninja (optional, for C++ engine build)
-- Rust 1.78+ and wasm-pack (optional, for WASM engine)
+Semantics that depend on the opset are handled: Softmax before and after
+opset 13, Gelu `approximate`, and AveragePool `count_include_pad`. Only the
+first graph output is returned.
 
-### Setup
+**WASM runtime (5):** MatMul, Add, Relu, Sigmoid, Softmax. That's enough for
+the fraud model but not for any CNN, and the UI says so.
+
+### Models verified against ONNX Runtime
+
+| Model | Opset | Result |
+|---|---|---|
+| `models/fraud/fraud_detector.onnx` (MatMul → Add → Sigmoid) | 13 | max abs diff ≤ 1e-5 |
+| `models/resnet18.onnx` (ONNX model zoo) | 7 | rtol/atol 1e-3, same top-1 |
+| `models/mobilenet_v2.onnx` (ONNX model zoo) | 7 | rtol/atol 1e-3, same top-1 |
+| 67 single-operator graphs (broadcasting, groups, padding, axes, opsets) | 11–20 | rtol 1e-4, atol 1e-5 |
+
+These are all in `engine/tests/python/test_parity.py`. Models that aren't
+listed haven't been tested.
+
+## Testing
+
+| Suite | What it checks | Count |
+|---|---|---|
+| `ctest` (GoogleTest) | Tensor, parser, each operator, executor | 143 |
+| `engine/tests/python/test_parity.py` | Native engine vs ONNX Runtime | 70 |
+| `server/tests` | API, auth, ownership, limits; `/infer` output vs onnxruntime | 61 |
+| `wasm/` `cargo test` | WASM kernels and 12 ORT-generated fixtures | 22 |
+| `cli/` `cargo test` | CLI argument handling | 2 |
+
+CI ([`ci-engine.yml`](.github/workflows/ci-engine.yml)):
+
+* builds the engine and Python module on Ubuntu (GCC, `-Werror`) and Windows (MSVC);
+* runs `ctest` and the parity suite on both;
+* on Linux, also runs the server tests against the **real** native module (`CRUCIBLE_REQUIRE_NATIVE=1`, so a missing build fails instead of skipping), then builds and smoke-tests the CLI.
+
+`ci-rust.yml` runs the WASM tests and clippy; `ci-web.yml` runs type-check,
+lint and build.
+
+## Benchmarks
+
+The numbers come from `web/public/benchmarks/results.json`, written by
+`python benchmarks/run_all.py`. The method, environment and full table are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+Median latency in ms, batch 1, i7-14650HX laptop, Docker (WSL2), 20 warmup +
+200 timed calls:
+
+| Model | Crucible (portable, 1 thread) | ONNX Runtime (1 thread) | ONNX Runtime (default threads) |
+|---|---:|---:|---:|
+| ResNet18 | 107.6 | 26.9 | 5.9 |
+| MobileNetV2 | 48.8 | 8.1 | 2.2 |
+
+That makes Crucible **4.0× (ResNet18) and 6.0× (MobileNetV2) slower** than
+single-thread ONNX Runtime, and 18–22× slower than ORT's default thread pool.
+Its outputs match ORT within 1.4e-5 with the same top-1 class. Engine
+optimisations in this repo took ResNet18 from 169 ms to about 100 ms and
+MobileNetV2 from 196 ms to about 50 ms: weights are no longer copied per run,
+conv results are written straight to the output, and 1×1 and depthwise convs
+have fast paths. The tiny fraud MLP runs in microseconds on every runtime,
+so those numbers measure call overhead, not kernel speed.
+
+## Quick start (Linux / macOS)
 
 ```bash
-# 1. Clone the repository (include submodules for C++ deps)
-git clone --recursive https://github.com/tanmay-alpha/onnx-inference-engine.git
+git clone https://github.com/tanmay-alpha/onnx-inference-engine.git
 cd onnx-inference-engine
+git submodule update --init --depth 1 engine/third_party/eigen \
+    engine/third_party/googletest engine/third_party/pybind11
 
-# If cloned without --recursive, fetch submodules:
-git submodule update --init --recursive
+# Engine, tests and Python module
+cmake -S engine -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCRUCIBLE_ENABLE_TESTS=ON -DCRUCIBLE_ENABLE_PYTHON_BINDINGS=ON \
+      -DCRUCIBLE_BUILD_SHARED=ON
+cmake --build build/release
+ctest --test-dir build/release --output-on-failure
 
-# 2. Copy environment template and configure
-cp server/.env.example server/.env
-# Edit server/.env with your Supabase credentials and settings
-
-# 3. Install Python dependencies
-pip install -r server/requirements.txt
-
-# 4. Install frontend dependencies
-cd web && npm install
-cd ..
-
-# 5. Apply database migrations
-cd server && alembic upgrade head && cd ..
-
-# 6. (Optional) Seed the database with demo data
-cd server && python seed_db.py && cd ..
-
-# 7. Start the backend server
-cd server && uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-# 8. In a new terminal, start the frontend dev server
-cd web && npm run dev
+pip install numpy onnx onnxruntime pytest
+CRUCIBLE_PY_DIR=build/release/python python -m pytest engine/tests/python/test_parity.py
 ```
 
-The frontend will be available at `http://localhost:5173` and the API at `http://localhost:8000`.
+`make install-engine`, `make test-engine` and `make test-server` wrap these
+steps.
 
-## Supabase Setup
+### Windows
 
-1. Create a new project at [supabase.com](https://supabase.com)
-2. Enable the `pgcrypto` extension in the SQL Editor:
-   ```sql
-   CREATE EXTENSION IF NOT EXISTS pgcrypto;
-   ```
-3. Run the Alembic migrations against your Supabase database (set `DATABASE_URL` in `.env` to your Supabase connection string):
-   ```bash
-   cd server && alembic upgrade head
-   ```
-4. Create a Storage bucket named `models` in the Supabase dashboard (optional, for Supabase Storage integration)
-5. Set the following environment variables:
-   - `DATABASE_URL` — Supabase PostgreSQL connection string
-   - `SUPABASE_URL` — Your Supabase project URL (e.g. `https://xxx.supabase.co`)
-   - `SUPABASE_SERVICE_ROLE_KEY` — Supabase service role key
-   - `CRUCIBLE_SECRET_KEY` — A random 32+ character string for JWT signing
-   - `CRUCIBLE_API_KEY` — Master API key for protected endpoints
+Install **Visual Studio 2022 Build Tools** (the "Desktop development with C++"
+workload), CMake ≥ 3.25 and Python 3.11. Then, from a *Developer PowerShell*:
 
-## API Endpoints
-
-All endpoints are prefixed with the server base URL (default `http://localhost:8000`).
-
-### Health & Info
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `GET` | `/health` | No | Liveness probe; returns engine name and version |
-| `GET` | `/operators` | No | Catalogue of supported ONNX operator types |
-| `GET` | `/metrics` | No | Prometheus metrics exposition |
-
-### Authentication
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/auth/register` | No | Register a new user account |
-| `POST` | `/auth/login` | No | Authenticate and receive a JWT bearer token |
-| `GET` | `/auth/me` | JWT | Get current authenticated user info |
-| `POST` | `/auth/api-key` | JWT | Generate a new API key |
-| `GET` | `/auth/api-keys` | JWT | List all API keys for the current user |
-| `DELETE` | `/auth/api-key/{key_id}` | JWT | Revoke an API key |
-
-### Model Management
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/convert` | API Key | Upload and validate an ONNX model file |
-| `GET` | `/models` | No | List all registered models |
-| `GET` | `/models/{model_id}` | No | Get metadata for a specific model |
-| `DELETE` | `/models/{model_id}` | API Key | Delete a registered model |
-| `POST` | `/validate` | API Key | Validate operator support for an ONNX model (file or model_id) |
-
-### Inference
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/infer` | API Key | Run single-model inference |
-| `POST` | `/inference/batch` | JWT | Run batch inference (up to 100 requests) |
-| `GET` | `/inference/logs` | No | Get recent inference execution logs |
-
-### Fraud Detection
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/fraud/log` | No | Log a fraud detection evaluation |
-| `GET` | `/fraud/history` | No | Retrieve fraud transaction history |
-
-### Benchmarks
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/benchmarks` | No | Log a benchmark result |
-| `GET` | `/benchmarks` | No | Retrieve recorded benchmarks |
-
-### Analytics
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `GET` | `/analytics/inference` | JWT | Inference volume and latency trends (1–90 days) |
-| `GET` | `/analytics/fraud` | JWT | Fraud detection statistics (1–90 days) |
-| `GET` | `/analytics/models` | JWT | Per-model usage and latency statistics |
-
-## Frontend Routes
-
-| Route | Description |
-|---|---|
-| `/` | Home page with live inference demo and recent fraud alerts |
-| `/architecture` | Interactive architecture overview with animated computation graph |
-| `/docs` | API documentation and usage guide |
-| `/roadmap` | Project roadmap with shipped, in-progress, and planned features |
-| `/story` | Project story and background |
-| `/fraud` | Fraud detection history and real-time alerts |
-| `/benchmark` | Benchmark comparison (Crucible vs ONNX Runtime vs PyTorch) |
-| `/playground` | ONNX model playground with WASM-powered in-browser inference |
-
-## Project Structure
-
-```
-onnx-inference-engine/
-├── server/                          # FastAPI backend
-│   ├── main.py                      # Application entry point, all route handlers
-│   ├── auth.py                      # JWT + API key authentication
-│   ├── database.py                  # SQLAlchemy ORM models and CRUD operations
-│   ├── config.py                    # Pydantic Settings with all env vars
-│   ├── schemas.py                   # Pydantic v2 request/response models
-│   ├── validator.py                 # ONNX validation and operator extraction
-│   ├── converter.py                 # ONNX upload acceptance and validation
-│   ├── metrics.py                   # Prometheus metrics collection
-│   ├── logging_config.py            # Structlog configuration
-│   ├── webhooks.py                  # Webhook notification system
-│   ├── seed_db.py                   # Database seeder for demo data
-│   ├── requirements.txt             # Pinned Python dependencies
-│   ├── alembic.ini                  # Alembic configuration
-│   ├── .env.example                 # Environment variable template
-│   ├── Dockerfile                   # Production Docker image
-│   ├── alembic/                     # Database migration scripts
-│   │   └── versions/
-│   ├── ml/                          # ML training utilities and pipeline
-│   └── tests/                       # Server unit and integration tests
-├── engine/                          # C++17 inference engine
-│   ├── CMakeLists.txt               # Top-level CMake build configuration
-│   ├── CMakePresets.json            # Debug & Release presets
-│   ├── include/crucible/            # Public C++ headers
-│   │   ├── tensor.hpp               # Row-major float32 Tensor class
-│   │   ├── onnx_parser.hpp          # Protobuf ONNX compute graph decoder
-│   │   ├── executor.hpp             # Kahn's algorithm DAG executor
-│   │   ├── c_api.h                  # C-FFI export boundary (for Rust CLI / WASM)
-│   │   └── ops/                     # Operator kernels (Conv2D, MatMul, Gemm, ReLU, etc.)
-│   ├── src/                         # C++ source code
-│   │   ├── tensor.cpp               # Core tensor implementation
-│   │   ├── onnx_parser.cpp          # ONNX protobuf decoder
-│   │   ├── executor.cpp             # DAG executor
-│   │   ├── c_api.cpp                # C ABI for FFI consumers
-│   │   └── ops/                     # Operator implementations
-│   │       ├── linear.cpp           # MatMul, Gemm
-│   │       ├── activations.cpp      # Relu, Sigmoid, etc.
-│   │       ├── conv2d.cpp           # Convolution
-│   │       ├── pooling.cpp          # MaxPool, AvgPool
-│   │       └── norm.cpp             # BatchNormalization
-│   ├── bindings/python/             # pybind11 Python bindings (crucible_py)
-│   ├── tests/                       # C++ unit tests (GoogleTest)
-│   │   └── fixtures/                # ONNX test model fixtures
-│   └── third_party/                 # Git submodule dependencies
-│       ├── eigen/                   # Eigen linear algebra
-│       ├── protobuf/                # Protocol Buffers (ONNX wire format)
-│       ├── googletest/              # GoogleTest framework
-│       ├── google-benchmark/        # Google Benchmark
-│       └── pybind11/                # pybind11 bindings library
-├── cli/                             # Rust CLI binary (FFI bridge to C++ engine)
-│   ├── Cargo.toml
-│   └── src/                         # Clap CLI commands (run, bench, info)
-├── wasm/                            # Pure-Rust WebAssembly module
-│   ├── Cargo.toml
-│   └── src/lib.rs                   # In-browser WASM inference engine
-├── models/                          # ML model assets and training code
-│   ├── mobilenet_v2.onnx            # Pre-trained MobileNetV2
-│   ├── resnet18.onnx                # Pre-trained ResNet18
-│   ├── fraud/
-│   │   ├── fraud_detector.onnx      # Production fraud detection model
-│   │   ├── config.yaml              # Training configuration
-│   │   ├── train_fraud_model.py     # Training script
-│   │   ├── evaluate.py              # Model evaluation
-│   │   ├── features.py              # Feature engineering
-│   │   └── experiments/             # Experiment tracking
-│   ├── image_classifier/
-│   │   ├── config.yaml
-│   │   ├── train.py                 # Image classifier training
-│   │   └── evaluate.py
-│   ├── data/                        # Raw and processed datasets
-│   ├── registry/                    # Production model registry metadata
-│   └── scripts/                     # Retraining and model comparison scripts
-├── web/                             # TanStack Start frontend
-│   ├── src/
-│   │   ├── routes/                  # TanStack Router file-based routes
-│   │   │   ├── __root.tsx           # Root layout
-│   │   │   ├── index.tsx            # Home page
-│   │   │   ├── fraud.tsx            # Fraud detection page
-│   │   │   ├── benchmark.tsx        # Benchmark comparison page
-│   │   │   ├── playground.tsx       # ONNX model playground
-│   │   │   ├── docs.tsx             # Documentation page
-│   │   │   ├── architecture.tsx     # Architecture visualization
-│   │   │   ├── roadmap.tsx          # Roadmap page
-│   │   │   └── story.tsx            # Project story
-│   │   ├── components/              # Reusable UI components
-│   │   │   ├── crucible/            # Layout and shared components
-│   │   │   └── ui/                  # shadcn/ui primitives
-│   │   ├── lib/                     # API client, utilities, WASM loader
-│   │   │   ├── crucible-wasm.ts     # WASM inference bindings
-│   │   │   └── utils.ts             # Helper functions
-│   │   ├── data/                    # Static typed data
-│   │   │   ├── graph.ts             # Computation graph for visualization
-│   │   │   └── roadmap.ts           # Roadmap data
-│   │   └── styles/                  # Global styles
-│   ├── public/
-│   │   ├── wasm/                    # Compiled WASM artifacts
-│   │   └── models/                  # Bundled ONNX model files
-│   ├── package.json                 # Frontend dependencies and scripts
-│   ├── tsconfig.json                # TypeScript configuration
-│   └── vite.config.ts               # Vite build configuration
-├── benchmarks/                      # Benchmark result storage
-├── scripts/                         # Helper build scripts (build-wasm.sh)
-├── docker-compose.yml               # Full-stack Docker Compose setup
-├── Makefile                         # Build automation and dev shortcuts
-├── render.yaml                      # Render deployment configuration
-├── Dockerfile                       # Multi-stage container build
-├── .env.example                     # (in server/) Environment variable template
-├── LICENSE                          # MIT License
-└── README.md                        # This file
+```powershell
+cmake -S engine -B build\release -DCRUCIBLE_ENABLE_TESTS=ON -DCRUCIBLE_ENABLE_PYTHON_BINDINGS=ON
+cmake --build build\release --config Release
+ctest --test-dir build\release -C Release --output-on-failure
+$env:CRUCIBLE_PY_DIR = "build\release\python\Release"
+python -m pytest engine\tests\python\test_parity.py
 ```
 
-## Environment Variables
+The same steps run in CI on `windows-latest`. If you don't have the C++
+toolchain, run the Linux steps in Docker (`python:3.11-bookworm` plus
+`cmake ninja-build g++`). The WASM package builds without MSVC through the
+GNU toolchain:
+`rustup run stable-x86_64-pc-windows-gnu wasm-pack build wasm --release --target web --out-dir ../web/public/wasm`.
 
-All server-side configuration is managed through environment variables. See `server/.env.example` for the full template.
+### Python API
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DATABASE_URL` | No | `sqlite+aiosqlite:///./crucible.db` | Async SQLAlchemy database URL (Supabase Postgres in production) |
-| `ENVIRONMENT` | No | `development` | App environment: `development`, `staging`, `production` |
-| `APP_NAME` | No | `Crucible AI Inference Engine` | Application display name |
-| `APP_VERSION` | No | `1.0.0` | Application version |
-| `HOST` | No | `0.0.0.0` | Server bind host |
-| `PORT` | No | `8000` | Server port |
-| `DEBUG` | No | `False` | Enable debug mode |
-| `CRUCIBLE_SECRET_KEY` | Yes | `dev-secret-key-...` | JWT signing secret (32+ chars in production) |
-| `CRUCIBLE_API_KEY` | Yes | `crucible-development-api-key` | Master API key for `X-API-Key` header |
-| `CRUCIBLE_CORS_ORIGINS` | No | `http://localhost:3000,http://localhost:5173` | Comma-separated allowed CORS origins |
-| `CRUCIBLE_MODEL_DIR` | No | `/tmp/models` | Directory for ONNX model file storage |
-| `CRUCIBLE_LOG_LEVEL` | No | `INFO` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `CRUCIBLE_LOG_FORMAT` | No | `console` | Log format: `console` or `json` |
-| `CRUCIBLE_TOKEN_EXPIRE_MINUTES` | No | `60` | JWT token validity duration |
-| `INFERENCE_TIMEOUT_SEC` | No | `60` | Hard timeout for model inference execution |
-| `MAX_UPLOAD_BYTES` | No | `209715200` (200 MB) | Maximum ONNX model file upload size |
-| `MAX_REQUEST_BODY_BYTES` | No | `10485760` (10 MB) | Maximum JSON request body size |
-| `MAX_INPUT_ELEMENTS` | No | `50000000` (50M) | Maximum product of input tensor dimensions |
-| `SUPABASE_URL` | Production | — | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Production | — | Supabase service-role key (bypasses RLS) |
-| `SUPABASE_STORAGE_BUCKET` | No | `models` | Supabase Storage bucket name for model files |
-| `WEBHOOK_TIMEOUT_SEC` | No | `10` | Webhook HTTP request timeout |
-| `WEBHOOK_MAX_RETRIES` | No | `3` | Maximum webhook delivery retries |
-| `FRAUD_HIGH_RISK_THRESHOLD` | No | `0.7` | High-risk fraud probability threshold |
-| `FRAUD_CRITICAL_RISK_THRESHOLD` | No | `0.9` | Critical-risk fraud probability threshold |
+```python
+import numpy as np, crucible_py
 
-### Security Notes
+m = crucible_py.load_model("models/resnet18.onnx")
+print(crucible_py.check_model(m))          # [] -> every node is supported
+print(crucible_py.get_model_info(m)["inputs"])
+# [{'name': 'data', 'elem_type': 1, 'shape': [-1, 3, 224, 224]}]
+y = crucible_py.run(m, {"data": np.random.rand(1, 3, 224, 224).astype(np.float32)})
+print(y.shape)                              # (1, 1000)
+```
 
-- Never commit `.env` to version control.
-- In production, `CRUCIBLE_SECRET_KEY` must be at least 32 random characters.
-- The server performs fail-fast validation on startup and will refuse to start if production defaults are detected.
-
-## Building the C++ Engine
-
-The C++ inference engine (`engine/`) is optional. The Python server falls back to a numpy-based inference stub if the native bindings are unavailable. To build the full engine:
+### API server
 
 ```bash
-# Initialize git submodules (Eigen, protobuf, googletest, google-benchmark, pybind11)
-git submodule update --init --recursive
-
-# Configure and build in Release mode
-cd engine
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release \
-         -DCRUCIBLE_ENABLE_PYTHON_BINDINGS=ON \
-         -DCRUCIBLE_ENABLE_TESTS=ON
-cmake --build . -j$(nproc)
-
-# Run C++ tests
-ctest --output-on-failure
+pip install -r server/requirements.txt -r server/requirements-dev.txt
+PYTHONPATH=build/release/python:. uvicorn server.main:app --port 8000
 ```
-
-The Python bindings (`crucible_py`) will be built into `engine/build/`. Add the build directory to your `PYTHONPATH` before starting the server:
 
 ```bash
-export PYTHONPATH="/path/to/engine/build:$PYTHONPATH"
+API=http://localhost:8000
+curl -s -X POST $API/auth/register -H 'content-type: application/json' \
+     -d '{"email":"me@example.com","password":"correct-horse-1"}'
+TOKEN=$(curl -s -X POST $API/auth/login -H 'content-type: application/json' \
+     -d '{"email":"me@example.com","password":"correct-horse-1"}' | jq -r .access_token)
+
+# Upload: the model is validated and its inputs/opset/unsupported nodes are reported
+ID=$(curl -s -X POST $API/convert -H "Authorization: Bearer $TOKEN" \
+     -F model_file=@models/fraud/fraud_detector.onnx | jq -r .onnx_model_id)
+
+# Inference on the native engine
+curl -s -X POST $API/infer -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d "{\"model_id\":\"$ID\",\"input\":[0.1,0.2,0.3,0.4,0.5,0.6,0.7],\"input_shape\":[1,7]}"
+# {"model_id":"…","output":[…],"output_shape":[1,1],"inference_time_ms":…,"backend":"crucible-native",…}
 ```
 
-## Building the WASM Engine
+`inference_time_ms` measures only the engine call; network time isn't
+included. If the native module isn't available, `/infer` returns **503**.
+There is no fallback that fakes results. Endpoint reference:
+[docs/API_REFERENCE.md](docs/API_REFERENCE.md).
 
-A pure-Rust WASM reimplementation of the inference engine is available for browser-side execution:
+### Web app
 
 ```bash
-cd wasm
-wasm-pack build --target web --out-dir ../web/public/wasm
+cd web && npm ci
+VITE_API_URL=http://localhost:8000 npm run dev
 ```
 
-The compiled artifact (`crucible_wasm_bg.wasm`) is loaded by the frontend at `web/src/lib/crucible-wasm.ts`.
-
-## Building the Rust CLI
+### CLI
 
 ```bash
-cd cli
-cargo build --release
+cd cli && CRUCIBLE_LIB_DIR=../build/release cargo build --release
+export LD_LIBRARY_PATH=../build/release
+./target/release/crucible info --model ../models/resnet18.onnx
+./target/release/crucible benchmark --model ../models/resnet18.onnx --input input.json --runs 50
 ```
-
-The CLI communicates with the C++ engine via the C ABI exported in `engine/src/c_api.cpp`.
 
 ## Deployment
 
-### Render (Backend API)
+* **Frontend (Vercel):** project `crucible`, built from `web/` on every push
+  to `main` (`vercel.json`). Set `VITE_API_URL` to the API URL; it is baked in
+  at build time.
+* **API (Render):** `render.yaml` defines `crucible-onnx-api`, which builds
+  `server/Dockerfile` (a portable engine build that is checked to import at
+  build time). It needs `DATABASE_URL` (Postgres) and generates a JWT secret.
+  On the free plan, uploaded model files live on ephemeral disk, so they are
+  lost on restart, and `/infer` then returns 410 until the model is uploaded
+  again.
 
-1. Connect your GitHub repository to Render.
-2. Render will detect `render.yaml` and set up two services automatically:
-   - **crucible-api**: Docker-based FastAPI server
-   - **crucible-web**: Static site from Vite/TanStack Start build output
-3. Set required environment variables (`DATABASE_URL`, `CRUCIBLE_SECRET_KEY`, `CRUCIBLE_API_KEY`, `CRUCIBLE_CORS_ORIGINS`).
-4. The API service will be reachable at the Render-assigned domain.
+## Engineering trade-offs
 
-### Vercel (Frontend)
+* **Hand-written protobuf parser instead of libprotobuf.** The build stays
+  small, needs no `protoc`, and adds no protobuf/abseil dependency. The cost
+  is that only the ONNX fields the engine needs are decoded.
+* **Interpreter, not a compiler.** There's no fusion, memory planning or
+  threading. That keeps the executor short and easy to check against the spec,
+  and it is the main reason Crucible is slower than ORT.
+* **Reject instead of approximate.** Unsupported attributes fail loudly, both
+  at upload time (`check_model`) and at run time, so a wrong result is never
+  passed off as a supported one.
+* **Two runtimes.** The browser runtime is a separate Rust implementation
+  rather than the C++ engine compiled with Emscripten. That keeps the bundle
+  under 100 KB, but its op set is much smaller, and the UI labels which
+  backend produced every result.
 
-1. Import the `web/` directory as a new Vercel project.
-2. Set `VITE_API_URL` to your Render API service URL.
-3. Set `NODE_VERSION` to `20`.
-4. Deploy. Vercel will run `npm install && npm run build` automatically.
+## Repository layout
 
-### Docker Compose (Full Stack Locally)
-
-```bash
-docker compose up -d
-# Frontend: http://localhost:3000
-# API: http://localhost:8000
 ```
-
-### Makefile Shortcuts
-
-```bash
-make help            # Show all available targets
-make install         # Install all dependencies (server + web)
-make install-server  # Install Python dependencies
-make install-web     # Install frontend dependencies
-make install-engine  # Build C++ engine
-make dev-server      # Run FastAPI dev server (port 8000)
-make dev-web         # Run frontend dev server (port 5173)
-make dev-all         # Run both dev servers concurrently
-make test            # Run all tests
-make test-server     # Run Python server tests
-make test-engine     # Run C++ engine tests
-make db-upgrade      # Apply Alembic migrations
-make docker-up       # Start full stack with Docker Compose
+engine/     C++ engine, pybind11 bindings, C ABI, GoogleTest + ORT parity tests
+server/     FastAPI service, Alembic migrations, tests
+cli/        Rust CLI over the C ABI
+wasm/       Rust/WASM interpreter + ORT fixtures
+web/        React frontend (TanStack Start), deployed to Vercel
+benchmarks/ Benchmark harness (results -> web/public/benchmarks/results.json)
+models/     Fraud model (+ training scripts), ResNet18, MobileNetV2
+docs/       Architecture, API reference, benchmark methodology
 ```
-
-## Contributing
-
-Contributions are welcome. Please:
-
-1. Fork the repository and create a feature branch from `main`.
-2. Ensure all tests pass: `make test`.
-3. Run linters: `make lint` and `make format`.
-4. If your change touches the database schema, generate a new Alembic migration: `make db-migrate <description>`.
-5. If your change touches C++ code, ensure engine tests pass: `make test-engine`.
-6. Submit a pull request with a clear description of the change and any relevant issue references.
-
-## Roadmap
-
-See the `/roadmap` page in the frontend or `web/src/data/roadmap.ts` for the current roadmap. Key shipped milestones:
-
-- C++17 core with custom tensor class (row-major float32, Eigen-backed linear algebra)
-- Hand-written ONNX protobuf decoder (no protoc dependency)
-- Kahn's algorithm DAG executor with topological scheduling
-- Python pybind11 bindings and numpy fallback
-- Pure-Rust WASM reimplementation for browser inference
-- Full FastAPI backend with auth, analytics, and Prometheus metrics
-- TanStack Start frontend with interactive architecture visualization
 
 ## License
 
-MIT License — Copyright (c) 2025-2026 Tanmay
-
-See [LICENSE](LICENSE) for the full license text.
+MIT, see [LICENSE](LICENSE).
