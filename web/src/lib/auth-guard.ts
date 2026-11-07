@@ -1,8 +1,10 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
-import { getToken } from "../lib/api";
+import { redirect } from "@tanstack/react-router";
+import { getToken } from "./api";
 
 /**
- * Auth guard for protected routes. Redirects to /login if not authenticated.
+ * `beforeLoad` guard for protected routes: redirects to /login when no JWT
+ * is stored. Guarded routes set `ssr: false` so this runs in the browser,
+ * where the token (localStorage) lives.
  */
 export function requireAuth() {
   if (!getToken()) {

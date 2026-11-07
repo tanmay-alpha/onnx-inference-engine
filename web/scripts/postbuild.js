@@ -1,26 +1,19 @@
+// When Vercel builds from the repository root (`cd web && npm run build`), it
+// looks for the Build Output API directory at <repo>/.vercel/output. Nitro's
+// vercel preset (auto-selected on Vercel, or NITRO_PRESET=vercel locally)
+// writes it to web/.vercel/output, so mirror it to the repo root.
+// Other presets produce no web/.vercel/output and this script does nothing.
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Copy .output/public -> repo root public/
-const src = path.resolve(__dirname, "../.output/public");
-const dest = path.resolve(__dirname, "../../public");
+const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const src = path.join(webDir, ".vercel/output");
+const dest = path.resolve(webDir, "../.vercel/output");
 
 if (fs.existsSync(src)) {
-  fs.mkdirSync(dest, { recursive: true });
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.cpSync(src, dest, { recursive: true });
-  console.log(`Successfully copied ${src} -> ${dest}`);
-}
-
-// Copy .vercel/output -> repo root .vercel/output for Vercel deployment
-const vercelSrc = path.resolve(__dirname, "../.vercel/output");
-const vercelDest = path.resolve(__dirname, "../../.vercel/output");
-
-if (fs.existsSync(vercelSrc)) {
-  fs.mkdirSync(vercelDest, { recursive: true });
-  fs.cpSync(vercelSrc, vercelDest, { recursive: true });
-  console.log(`Successfully copied ${vercelSrc} -> ${vercelDest}`);
+  console.log(`Copied ${src} -> ${dest}`);
 }

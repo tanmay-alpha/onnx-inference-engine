@@ -1,4 +1,4 @@
-// Roadmap items are typed so real data can swap in later.
+// Roadmap items reflect the repository state; "shipped" means it is in the code today.
 export type RoadmapStatus = "shipped" | "in-progress" | "planned";
 
 export interface RoadmapItem {
@@ -26,20 +26,37 @@ export const ROADMAP: RoadmapItem[] = [
   },
   {
     status: "shipped",
-    title: "Pure-Rust WASM reimplementation",
+    title: "20-operator native engine, checked against ONNX Runtime",
     detail:
-      "Second implementation of the kernels in Rust, compiled to wasm-simd128, no Eigen dependency.",
+      "Conv, pooling, BatchNormalization, Gemm and activations — enough for ResNet18 and MobileNetV2 — with a 70-case parity suite against ONNX Runtime.",
   },
   {
-    status: "in-progress",
-    title: "Kernel parity harness",
+    status: "shipped",
+    title: "Small Rust WASM runtime",
     detail:
-      "Fixed-seed golden tests comparing every C++ kernel output against the Rust kernel bit-for-bit.",
+      "A separate pure-Rust interpreter (MatMul, Add, Relu, Sigmoid, Softmax) built with wasm-bindgen; runs the fraud model in the browser.",
   },
   {
-    status: "in-progress",
+    status: "shipped",
+    title: "C ABI, Python module and HTTP server",
+    detail:
+      "Shared library with a C interface (used by the Rust CLI), a pybind11 module, and a FastAPI server with per-user model registry.",
+  },
+  {
+    status: "planned",
+    title: "Close the performance gap with ONNX Runtime",
+    detail:
+      "Single-threaded, Crucible is currently several times slower than ONNX Runtime on ResNet18 / MobileNetV2. Threading and faster conv paths are next.",
+  },
+  {
+    status: "planned",
+    title: "Native ↔ WASM parity harness",
+    detail: "Automatically compare the two runtimes' outputs on the models they both support.",
+  },
+  {
+    status: "planned",
     title: "Quantized int8 MatMul path",
-    detail: "Symmetric per-tensor quantization to shrink the fraud model from 220 B to ~64 B.",
+    detail: "Symmetric per-tensor quantization for smaller models.",
   },
   {
     status: "planned",
@@ -63,11 +80,5 @@ export const ROADMAP: RoadmapItem[] = [
     status: "planned",
     title: "Streaming model loader",
     detail: "Range-request the .onnx from CDN and start executing before the full file has landed.",
-  },
-  {
-    status: "planned",
-    title: "Native binary distribution",
-    detail:
-      "Ship the C++ engine as a static library for edge / embedded targets outside the browser.",
   },
 ];

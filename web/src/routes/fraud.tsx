@@ -1,9 +1,10 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { Shield, Lock, AlertTriangle, Inbox } from "lucide-react";
 import { CrucibleLayout } from "../components/crucible/Layout";
-import { runFraudDetection } from "../lib/crucible-wasm";
-import { logFraudTxToDB } from "../lib/api";
+import { runFraudDetection, type FraudDetectionResult } from "../lib/crucible-wasm";
+import { logFraudDetection } from "../lib/api";
+import { useIsLoggedIn } from "../lib/use-backend-health";
 
 export const Route = createFileRoute("/fraud")({
   head: () => ({
@@ -34,12 +35,12 @@ interface Tx {
   destAfter: number;
 }
 interface Result {
-  fraud: boolean;
   probability: number;
   latencyMs: number;
   modelBytes: number;
+  /** "saved", "not-saved", or the server error message when saving failed. */
+  saved: string;
 }
-
 const PRESETS: { label: string; tone: "success" | "danger" | "warn"; tx: Tx }[] = [
   {
     label: "Everyday transfer · ₹4,850",
@@ -85,28 +86,13 @@ function verdict(p: number): { label: string; tone: "ok" | "warn" | "err" } {
   return { label: "Low risk", tone: "ok" };
 }
 
-function heuristicScore(tx: Tx): number {
-  // Deterministic fallback based on structural signals:
-  // drained account, large amount, zeroed destination, type mismatch.
-  const drained = tx.origBefore > 0 && tx.origAfter / tx.origBefore < 0.02;
-  const bigAmount = tx.amount >= 100000;
-  const zeroedDest = tx.destBefore + tx.destAfter === 0 && tx.amount > 1000;
-  const mismatch = Math.abs(tx.origBefore - tx.origAfter - tx.amount) > 1;
-  let s = 0.02;
-  if (drained) s += 0.55;
-  if (bigAmount) s += 0.22;
-  if (zeroedDest) s += 0.18;
-  if (mismatch) s += 0.12;
-  if (tx.type === "CASH_OUT") s += 0.08;
-  // Deterministic heuristic: same input always produces the same score.
-  // No Math.random() — repeated calls with identical transactions must agree.
-  return Math.min(0.995, Math.max(0.005, s));
-}
-
 function FraudPage() {
+  const loggedIn = useIsLoggedIn();
   const [tx, setTx] = useState<Tx>(PRESETS[0].tx);
-  const [status, setStatus] = useState<"idle" | "running" | "done">("idle");
+  const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [result, setResult] = useState<Result | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saveToHistory, setSaveToHistory] = useState(false);
 
   const update = <K extends keyof Tx>(k: K, v: Tx[K]) => setTx((t) => ({ ...t, [k]: v }));
 
@@ -119,18 +105,18 @@ function FraudPage() {
       "Dest balance before",
       "Dest balance after",
     ];
-    for (let i = 0; i < vals.length; i++) {
-      if (!Number.isFinite(vals[i]) || vals[i] < 0) {
-        alert(labels[i] + " must be a non-negative number.");
-        return;
-      }
+    const bad = vals.findIndex((v) => !Number.isFinite(v) || v < 0);
+    if (bad >= 0) {
+      setStatus("error");
+      setError(`${labels[bad]} must be a non-negative number.`);
+      return;
     }
     setStatus("running");
     setResult(null);
-    const start = performance.now();
+    setError(null);
+    let r: FraudDetectionResult;
     try {
-      // Map form fields to FraudDetectionParams
-      const wasmResult = await runFraudDetection({
+      r = await runFraudDetection({
         type: tx.type,
         amount: tx.amount,
         oldBalanceOrig: tx.origBefore,
@@ -138,47 +124,34 @@ function FraudPage() {
         oldBalanceDest: tx.destBefore,
         newBalanceDest: tx.destAfter,
       });
-      const latency = Number((performance.now() - start).toFixed(2));
-      const prob = wasmResult.probability;
-      const verd = verdict(prob).label;
-      setResult({
-        fraud: prob >= 0.5,
-        probability: prob,
-        latencyMs: latency,
-        modelBytes: 220,
-      });
-      logFraudTxToDB({
-        tx_type: tx.type,
-        amount: tx.amount,
-        orig_before: tx.origBefore,
-        orig_after: tx.origAfter,
-        dest_before: tx.destBefore,
-        dest_after: tx.destAfter,
-        probability: prob,
-        verdict: verd,
-        execution_mode: "wasm",
-        latency_ms: latency,
-      });
     } catch (err) {
-      // WASM unavailable — use heuristic fallback
-      console.warn("WASM inference failed, using heuristic fallback:", err);
-      const p = heuristicScore(tx);
-      const latency = Number((performance.now() - start).toFixed(2));
-      const verd = verdict(p).label;
-      setResult({ fraud: p >= 0.5, probability: p, latencyMs: latency, modelBytes: 0 });
-      logFraudTxToDB({
-        tx_type: tx.type,
-        amount: tx.amount,
-        orig_before: tx.origBefore,
-        orig_after: tx.origAfter,
-        dest_before: tx.destBefore,
-        dest_after: tx.destAfter,
-        probability: p,
-        verdict: verd,
-        execution_mode: "heuristic-fallback",
-        latency_ms: latency,
-      });
+      setError(`WebAssembly inference failed: ${err instanceof Error ? err.message : String(err)}`);
+      setStatus("error");
+      return;
     }
+    const latency = Number(r.latencyMs.toFixed(3));
+    let saved: Result["saved"] = "not-saved";
+    // Opt-in only: saving sends this transaction to the Crucible API under your account.
+    if (loggedIn && saveToHistory) {
+      try {
+        await logFraudDetection({
+          tx_type: tx.type,
+          amount: tx.amount,
+          orig_before: tx.origBefore,
+          orig_after: tx.origAfter,
+          dest_before: tx.destBefore,
+          dest_after: tx.destAfter,
+          probability: r.probability,
+          verdict: verdict(r.probability).label,
+          execution_mode: "wasm",
+          latency_ms: latency,
+        });
+        saved = "saved";
+      } catch (err) {
+        saved = `Could not save to history: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    setResult({ probability: r.probability, latencyMs: latency, modelBytes: r.modelBytes, saved });
     setStatus("done");
   };
 
@@ -197,9 +170,10 @@ function FraudPage() {
             Browser-based transaction analysis
           </h1>
           <p className="c-muted">
-            A mock banking portal running Crucible's ONNX runtime in WebAssembly. Customer records
-            never leave the tab — the model is fetched once, then evaluated locally against every
-            transaction you enter below.
+            A mock banking form scored by a small ONNX model (logistic regression: MatMul → Add →
+            Sigmoid over 7 normalised features) running in Crucible's Rust WebAssembly runtime. The
+            model file is fetched once; scoring happens in this tab and sends nothing over the
+            network.
           </p>
         </div>
 
@@ -316,12 +290,44 @@ function FraudPage() {
               <Shield size={16} />{" "}
               {status === "running" ? "Analysing transaction…" : "Analyse transaction"}
             </button>
+            {loggedIn && (
+              <label
+                className="c-muted"
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "flex-start",
+                  fontSize: 12,
+                  marginTop: 12,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={saveToHistory}
+                  onChange={(e) => setSaveToHistory(e.target.checked)}
+                  style={{ marginTop: 2 }}
+                />
+                <span>
+                  Save this check to my history. This sends the transaction and score to the
+                  Crucible API under your account (shown on the{" "}
+                  <Link to="/dashboard" style={{ color: "var(--trace)" }}>
+                    dashboard
+                  </Link>
+                  ).
+                </span>
+              </label>
+            )}
             {status === "running" && (
               <div style={{ marginTop: 14 }}>
                 <div className="c-loading-bar" />
                 <p className="c-muted" style={{ marginTop: 8, fontSize: 12 }}>
-                  Executing WASM kernels · no network activity.
+                  Executing the model in WebAssembly…
                 </p>
+              </div>
+            )}
+            {status === "error" && error && (
+              <div role="alert" style={{ marginTop: 14, color: "var(--risk)", fontSize: 13 }}>
+                {error}
               </div>
             )}
           </div>
@@ -342,8 +348,8 @@ function FraudPage() {
                 </div>
                 <h3 className="c-h3">No inference yet</h3>
                 <p className="c-muted">
-                  Fill the fields and press <em>Run local fraud check</em>. The ONNX model executes
-                  inside this tab; no transaction data leaves the browser.
+                  Fill the fields and press <em>Analyse transaction</em>. The ONNX model executes
+                  inside this tab.
                 </p>
               </div>
             )}
@@ -401,9 +407,9 @@ function FraudPage() {
 
                 <div className="c-grid-3" style={{ gap: 10 }}>
                   <div className="c-metric" style={{ padding: 14 }}>
-                    <div className="c-metric-label">Warm latency</div>
+                    <div className="c-metric-label">WASM call time</div>
                     <div className="c-metric-value" style={{ fontSize: 20 }}>
-                      {result.latencyMs} ms
+                      {result.latencyMs === 0 ? "<0.1" : result.latencyMs} ms
                     </div>
                   </div>
                   <div className="c-metric" style={{ padding: 14 }}>
@@ -413,7 +419,7 @@ function FraudPage() {
                     </div>
                   </div>
                   <div className="c-metric" style={{ padding: 14 }}>
-                    <div className="c-metric-label">Bytes sent</div>
+                    <div className="c-metric-label">Bytes sent to score</div>
                     <div className="c-metric-value" style={{ fontSize: 20, color: "var(--ok)" }}>
                       0
                     </div>
@@ -422,7 +428,13 @@ function FraudPage() {
 
                 <div className="c-privacy-note" style={{ marginTop: 18 }}>
                   <Lock size={16} style={{ marginTop: 2 }} />
-                  <div>Inference completed locally. No transaction data left the browser tab.</div>
+                  <div>
+                    {result.saved === "saved"
+                      ? "Scored locally. You chose to save it, so this transaction and its score were sent to the Crucible API."
+                      : result.saved === "not-saved"
+                        ? "Scored locally. No transaction data left the browser tab."
+                        : `Scored locally. ${result.saved}`}
+                  </div>
                 </div>
               </div>
             )}
@@ -441,10 +453,9 @@ function FraudPage() {
                 in-scope service provider, and cross-border transfer obligations follow.
               </p>
               <p className="c-muted">
-                Crucible flips the topology. The model ships as static assets, is evaluated in a
-                WebAssembly sandbox with no network access, and only a low-cardinality risk score
-                crosses the boundary. Compliance surface collapses; latency drops from a round-trip
-                to sub-millisecond kernel time.
+                This demo shows the alternative topology: the model ships as a static file, is
+                evaluated in the browser's WebAssembly sandbox, and the app only needs the resulting
+                score. Scoring involves no network round trip.
               </p>
             </div>
           </div>

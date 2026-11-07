@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -8,12 +9,10 @@ import {
   Tooltip,
   XAxis,
   YAxis,
-  Cell,
 } from "recharts";
+import { Check, X, ExternalLink } from "lucide-react";
 import { CrucibleLayout } from "../components/crucible/Layout";
-import { Check, X } from "lucide-react";
-import { getBenchmarkResults, getChartData } from "../lib/api";
-import { useState, useMemo } from "react";
+import { getBenchmarkFile, type BenchmarkFile, type BenchmarkResult } from "../lib/api";
 
 export const Route = createFileRoute("/benchmark")({
   head: () => ({
@@ -21,31 +20,38 @@ export const Route = createFileRoute("/benchmark")({
       { title: "Benchmark · Crucible" },
       {
         name: "description",
-        content: "Head-to-head benchmarks: Crucible vs ONNX Runtime vs PyTorch across model sizes.",
+        content:
+          "Measured latency of the Crucible native engine against ONNX Runtime and PyTorch, with environment and methodology.",
       },
-      { property: "og:title", content: "Crucible Benchmark Console" },
+      { property: "og:title", content: "Crucible Benchmarks" },
       {
         property: "og:description",
-        content: "Latency, footprint, cold-start — all measured, all in your browser.",
+        content: "Measured results from benchmarks/run_all.py — nothing estimated.",
       },
     ],
   }),
   component: BenchmarkPage,
 });
 
-// Static reference data (independent of fetched benchmark results)
-const FOOTPRINT = [
-  { runtime: "Crucible WASM", binaryMB: 3.1, coldMs: 48, browser: true },
-  { runtime: "Crucible Native", binaryMB: 1.4, coldMs: 12, browser: false },
-  { runtime: "TFLite", binaryMB: 2.1, coldMs: 35, browser: true },
-  { runtime: "ONNX Runtime", binaryMB: 51.2, coldMs: 820, browser: false },
-  { runtime: "PyTorch", binaryMB: 756.0, coldMs: 2100, browser: false },
-];
+const METHODOLOGY_URL =
+  "https://github.com/tanmay-alpha/onnx-inference-engine/blob/main/docs/BENCHMARKS.md";
 
-const COLORS = {
-  "Crucible Native": "#152A66",
-  "ONNX Runtime": "#7A7A73",
-  PyTorch: "#B45309",
+const RUNTIME_LABEL: Record<string, string> = {
+  "crucible-native": "Crucible native (C++)",
+  "crucible-native-avx2": "Crucible native (C++, AVX2)",
+  "onnxruntime-cpu": "ONNX Runtime CPU",
+  "onnxruntime-cpu-1t": "ONNX Runtime CPU (1 thread)",
+  "pytorch-cpu": "PyTorch CPU",
+  "crucible-wasm": "Crucible WASM (Rust)",
+};
+
+const RUNTIME_COLOR: Record<string, string> = {
+  "crucible-native": "#152A66",
+  "crucible-native-avx2": "#1F3A8A",
+  "onnxruntime-cpu": "#7A7A73",
+  "onnxruntime-cpu-1t": "#A8A89E",
+  "pytorch-cpu": "#B45309",
+  "crucible-wasm": "#C2410C",
 };
 
 const tooltipStyle = {
@@ -57,296 +63,323 @@ const tooltipStyle = {
   fontFamily: "JetBrains Mono, monospace",
 } as const;
 
-function BenchmarkPage() {
-  const _bdata = useMemo(() => getBenchmarkResults(), []);
-  const _crucible = _bdata?.results?.find((r: { engine: string }) => r.engine === "crucible");
-  const _ort = _bdata?.results?.find((r: { engine: string }) => r.engine === "onnxruntime");
-  const _torch = _bdata?.results?.find((r: { engine: string }) => r.engine === "pytorch");
+const label = (runtime: string) => RUNTIME_LABEL[runtime] ?? runtime;
+const ms = (v: number | null) => (v === null ? "—" : v < 1 ? v.toFixed(3) : v.toFixed(2));
+const fmtBytes = (b: number) =>
+  b < 1024
+    ? `${b} B`
+    : b < 1024 * 1024
+      ? `${(b / 1024).toFixed(1)} KB`
+      : `${(b / 1048576).toFixed(2)} MB`;
 
-  if (!_crucible || !_ort || !_torch) {
-    return (
-      <CrucibleLayout>
-        <section className="c-container">
-          <h1 className="c-h2">Benchmark Console</h1>
-          <p className="c-muted">No benchmark data available. Run the benchmark suite first.</p>
-        </section>
-      </CrucibleLayout>
-    );
+/** One row group per (model, input_shape). */
+function groupResults(results: BenchmarkResult[]) {
+  const groups = new Map<string, { model: string; shape: number[]; rows: BenchmarkResult[] }>();
+  for (const r of results) {
+    const key = `${r.model} [${r.input_shape.join("×")}]`;
+    if (!groups.has(key)) groups.set(key, { model: r.model, shape: r.input_shape, rows: [] });
+    groups.get(key)!.rows.push(r);
   }
+  return Array.from(groups, ([key, g]) => ({ key, ...g }));
+}
 
-  // Chart data — latency vs model size from api.ts (depends on engine results)
-  const LATENCY = getChartData().map((d) => ({
-    size: d.size,
-    "Crucible Native": d.crucible,
-    "ONNX Runtime": d.onnxruntime,
-    PyTorch: d.pytorch,
-  }));
+/** Sentence comparing Crucible native with ONNX Runtime, built only from measured medians. */
+function comparison(rows: BenchmarkResult[]): string | null {
+  const ok = (rt: string) =>
+    rows.find((r) => r.runtime === rt && r.status === "ok" && r.median_ms !== null);
+  const crucible = ok("crucible-native-avx2") ?? ok("crucible-native");
+  const ort = ok("onnxruntime-cpu-1t") ?? ok("onnxruntime-cpu");
+  if (!crucible || !ort) return null;
+  const ratio = crucible.median_ms! / ort.median_ms!;
+  const rel =
+    ratio >= 1 ? `${ratio.toFixed(1)}× slower than` : `${(1 / ratio).toFixed(1)}× faster than`;
+  const threads =
+    crucible.threads === ort.threads
+      ? `both ${ort.threads} thread${ort.threads === 1 ? "" : "s"}`
+      : `${crucible.threads} vs ${ort.threads} threads`;
+  return `${label(crucible.runtime)} median ${ms(crucible.median_ms)} ms is ${rel} ${label(ort.runtime)} at ${ms(ort.median_ms)} ms (${threads}).`;
+}
 
-  // Distribution table built from real stats
-  const STATS = [
-    {
-      runtime: "Crucible Native (C++/Eigen)",
-      min: _crucible.stats.min_ms,
-      max: _crucible.stats.max_ms,
-      median: _crucible.stats.median_ms,
-      p95: _crucible.stats.p95_ms,
-      p99: _crucible.stats.p99_ms,
-      mean: _crucible.stats.mean_ms,
-      throughput: _crucible.stats.throughput_inf_per_sec,
-    },
-    {
-      runtime: "ONNX Runtime (CPU / MLAS)",
-      min: _ort.stats.min_ms,
-      max: _ort.stats.max_ms,
-      median: _ort.stats.median_ms,
-      p95: _ort.stats.p95_ms,
-      p99: _ort.stats.p99_ms,
-      mean: _ort.stats.mean_ms,
-      throughput: _ort.stats.throughput_inf_per_sec,
-    },
-    {
-      runtime: "PyTorch (CPU / ATen)",
-      min: _torch.stats.min_ms,
-      max: _torch.stats.max_ms,
-      median: _torch.stats.median_ms,
-      p95: _torch.stats.p95_ms,
-      p99: _torch.stats.p99_ms,
-      mean: _torch.stats.mean_ms,
-      throughput: _torch.stats.throughput_inf_per_sec,
-    },
-  ];
+function BenchmarkPage() {
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "missing" }
+    | { kind: "error"; message: string }
+    | { kind: "ok"; data: BenchmarkFile }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    getBenchmarkFile().then(
+      (data) => setState(data ? { kind: "ok", data } : { kind: "missing" }),
+      (e: unknown) =>
+        setState({ kind: "error", message: e instanceof Error ? e.message : String(e) }),
+    );
+  }, []);
+
+  const data = state.kind === "ok" ? state.data : null;
+  const groups = useMemo(() => (data ? groupResults(data.results) : []), [data]);
+  const runtimes = useMemo(
+    () => (data ? Array.from(new Set(data.results.map((r) => r.runtime))) : []),
+    [data],
+  );
+  const chartData = useMemo(
+    () =>
+      groups.map((g) => {
+        const point: Record<string, string | number | null> = { name: g.key };
+        for (const r of g.rows) point[r.runtime] = r.status === "ok" ? r.median_ms : null;
+        return point;
+      }),
+    [groups],
+  );
 
   return (
     <CrucibleLayout>
       <section className="c-container">
-        <div style={{ marginBottom: 32, maxWidth: 720 }}>
+        <div style={{ marginBottom: 32, maxWidth: 760 }}>
           <span className="c-badge c-badge-info">Performance</span>
           <h1 className="c-h2" style={{ fontSize: 42, marginTop: 14 }}>
             Benchmark Console
           </h1>
           <p className="c-muted">
-            Head-to-head measurements across MLP model sizes. Mean of 1,000 warm iterations on a
-            Ryzen 7 7840U, single-threaded. Native numbers are the C++/Eigen build; WASM numbers are
-            the pure-Rust build compiled to <span className="mono">wasm-simd128</span> — the two are
-            separate implementations, reported separately.
+            Every number on this page comes from{" "}
+            <span className="mono">web/public/benchmarks/results.json</span>, written by{" "}
+            <span className="mono">python benchmarks/run_all.py</span>. Nothing is estimated or
+            hand-entered. Methodology and caveats:{" "}
+            <a
+              href={METHODOLOGY_URL}
+              target="_blank"
+              rel="noreferrer noopener"
+              style={{ color: "var(--trace)" }}
+            >
+              docs/BENCHMARKS.md <ExternalLink size={11} style={{ verticalAlign: -1 }} />
+            </a>
+            .
           </p>
         </div>
 
-        <div className="c-grid-4">
-          <div className="c-metric hl">
-            <div className="c-metric-label">Crucible Native (C++/Eigen)</div>
-            <div className="c-metric-value">{_crucible.stats.mean_ms.toFixed(1)} ms</div>
-            <div className="c-metric-sub">
-              mean · MobileNetV2 · {_crucible.stats.throughput_inf_per_sec.toFixed(0)} inf/s
-            </div>
-          </div>
-          <div className="c-metric">
-            <div className="c-metric-label">ONNX Runtime (CPU / MLAS)</div>
-            <div className="c-metric-value">{_ort.stats.mean_ms.toFixed(1)} ms</div>
-            <div className="c-metric-sub">mean · MobileNetV2</div>
-          </div>
-          <div className="c-metric">
-            <div className="c-metric-label">PyTorch (CPU / ATen)</div>
-            <div className="c-metric-value">{_torch.stats.mean_ms.toFixed(1)} ms</div>
-            <div className="c-metric-sub">mean · MobileNetV2</div>
-          </div>
-          <div className="c-metric hl">
-            <div className="c-metric-label">Crucible WASM — Binary Size</div>
-            <div className="c-metric-value">3.1 MB</div>
-            <div className="c-metric-sub">16× smaller than ONNX Runtime</div>
-          </div>
-        </div>
+        {state.kind === "loading" && <div className="c-loading-bar" />}
 
-        <div className="c-card" style={{ marginTop: 28 }}>
-          <h3 className="c-h3">Latency by Model Size</h3>
-          <p className="c-muted" style={{ marginBottom: 18 }}>
-            Lower is better. Milliseconds per forward pass.
-          </p>
-          <div style={{ width: "100%", height: 340 }}>
-            <ResponsiveContainer>
-              <BarChart data={LATENCY} margin={{ top: 8, right: 12, left: 0, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#DCDCD3" />
-                <XAxis dataKey="size" stroke="#5A5A55" style={{ fontSize: 12 }} />
-                <YAxis
-                  stroke="#5A5A55"
-                  style={{ fontSize: 12 }}
-                  label={{
-                    value: "ms",
-                    angle: -90,
-                    position: "insideLeft",
-                    fill: "#5A5A55",
-                    fontSize: 11,
-                  }}
-                />
-                <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "rgba(31,58,138,.08)" }} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar
-                  dataKey="Crucible Native"
-                  fill={COLORS["Crucible Native"]}
-                  radius={[2, 2, 0, 0]}
-                />
-                <Bar dataKey="ONNX Runtime" fill={COLORS["ONNX Runtime"]} radius={[2, 2, 0, 0]} />
-                <Bar dataKey="PyTorch" fill={COLORS.PyTorch} radius={[2, 2, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+        {state.kind === "error" && (
+          <div role="alert" className="c-card" style={{ color: "var(--risk)" }}>
+            {state.message}
           </div>
-        </div>
+        )}
 
-        <div className="c-two-col" style={{ marginTop: 28 }}>
-          <div className="c-card">
-            <h3 className="c-h3">Binary Size</h3>
-            <p className="c-muted" style={{ marginBottom: 12 }}>
-              MB shipped to the client.
+        {state.kind === "missing" && (
+          <div className="c-card c-card-dashed" style={{ padding: 40, textAlign: "center" }}>
+            <h3 className="c-h3">No benchmark results published yet</h3>
+            <p className="c-muted" style={{ maxWidth: 560, margin: "10px auto 0" }}>
+              This deployment has no <span className="mono">/benchmarks/results.json</span>. Build
+              the native engine, then run the suite from the repository root:
             </p>
-            <div style={{ width: "100%", height: 260 }}>
-              <ResponsiveContainer>
-                <BarChart
-                  data={FOOTPRINT}
-                  layout="vertical"
-                  margin={{ top: 8, right: 12, left: 20, bottom: 8 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#DCDCD3" horizontal={false} />
-                  <XAxis type="number" stroke="#5A5A55" style={{ fontSize: 12 }} />
-                  <YAxis
-                    type="category"
-                    dataKey="runtime"
-                    stroke="#5A5A55"
-                    style={{ fontSize: 12 }}
-                    width={120}
-                  />
-                  <Tooltip
-                    contentStyle={tooltipStyle}
-                    cursor={{ fill: "rgba(31,58,138,.08)" }}
-                    formatter={(v: number) => `${v} MB`}
-                  />
-                  <Bar dataKey="binaryMB" radius={[0, 2, 2, 0]}>
-                    {FOOTPRINT.map((f) => (
-                      <Cell
-                        key={f.runtime}
-                        fill={f.runtime.startsWith("Crucible") ? "#1F3A8A" : "#B8B8AE"}
-                      />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-          <div className="c-card">
-            <h3 className="c-h3">Cold-Start Time</h3>
-            <p className="c-muted" style={{ marginBottom: 12 }}>
-              Milliseconds to first inference.
+            <pre className="c-code" style={{ display: "inline-block", marginTop: 14 }}>
+              python benchmarks/run_all.py
+            </pre>
+            <p className="c-muted" style={{ marginTop: 10, fontSize: 13 }}>
+              See{" "}
+              <a
+                href={METHODOLOGY_URL}
+                target="_blank"
+                rel="noreferrer noopener"
+                style={{ color: "var(--trace)" }}
+              >
+                docs/BENCHMARKS.md
+              </a>{" "}
+              for the methodology.
             </p>
-            <div style={{ width: "100%", height: 260 }}>
-              <ResponsiveContainer>
-                <BarChart
-                  data={FOOTPRINT}
-                  layout="vertical"
-                  margin={{ top: 8, right: 12, left: 20, bottom: 8 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#DCDCD3" horizontal={false} />
-                  <XAxis type="number" stroke="#5A5A55" style={{ fontSize: 12 }} />
-                  <YAxis
-                    type="category"
-                    dataKey="runtime"
-                    stroke="#5A5A55"
-                    style={{ fontSize: 12 }}
-                    width={120}
-                  />
-                  <Tooltip
-                    contentStyle={tooltipStyle}
-                    cursor={{ fill: "rgba(31,58,138,.08)" }}
-                    formatter={(v: number) => `${v} ms`}
-                  />
-                  <Bar dataKey="coldMs" radius={[0, 2, 2, 0]}>
-                    {FOOTPRINT.map((f) => (
-                      <Cell
-                        key={f.runtime}
-                        fill={f.runtime.startsWith("Crucible") ? "#152A66" : "#B8B8AE"}
-                      />
+          </div>
+        )}
+
+        {data && (
+          <>
+            <div className="c-two-col">
+              <div className="c-card">
+                <h3 className="c-h3">Environment</h3>
+                <div className="c-spec" style={{ marginTop: 12 }}>
+                  {(
+                    [
+                      ["cpu", `${data.environment.cpu} (${data.environment.cores} cores)`],
+                      ["os", data.environment.os],
+                      ["python", data.environment.python],
+                      ["compiler", data.environment.compiler],
+                      ["crucible build", data.environment.crucible_build],
+                      ["onnxruntime", data.environment.onnxruntime],
+                      ["torch", data.environment.torch ?? "not installed"],
+                      ["git commit", data.git_commit],
+                      ["generated", new Date(data.generated_at).toLocaleString()],
+                    ] as [string, string][]
+                  ).map(([k, v]) => (
+                    <div className="c-spec-row" key={k}>
+                      <div className="k">{k}</div>
+                      <div className="v">{v}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="c-card">
+                <h3 className="c-h3">Methodology</h3>
+                <p className="c-muted" style={{ marginTop: 12 }}>
+                  {data.methodology.warmup} warm-up runs, then {data.methodology.iterations} timed
+                  iterations per configuration. Timer:{" "}
+                  <span className="mono">{data.methodology.timer}</span>.
+                </p>
+                {data.methodology.notes.length > 0 && (
+                  <ul className="c-muted" style={{ margin: "10px 0 0 18px", fontSize: 13 }}>
+                    {data.methodology.notes.map((n) => (
+                      <li key={n} style={{ marginTop: 4 }}>
+                        {n}
+                      </li>
                     ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+                  </ul>
+                )}
+              </div>
             </div>
-          </div>
-        </div>
 
-        <div className="c-card" style={{ marginTop: 28 }}>
-          <h3 className="c-h3">Runtime Footprint</h3>
-          <table className="c-table" style={{ marginTop: 12 }}>
-            <thead>
-              <tr>
-                <th>Runtime</th>
-                <th>Binary Size</th>
-                <th>Cold-Start</th>
-                <th>Browser Capable</th>
-              </tr>
-            </thead>
-            <tbody>
-              {FOOTPRINT.map((f) => (
-                <tr key={f.runtime} className={f.runtime.startsWith("Crucible") ? "hl" : ""}>
-                  <td
-                    style={{ color: f.runtime.startsWith("Crucible") ? "var(--trace)" : undefined }}
-                  >
-                    {f.runtime}
-                  </td>
-                  <td>{f.binaryMB.toFixed(1)} MB</td>
-                  <td>{f.coldMs} ms</td>
-                  <td>
-                    {f.browser ? (
-                      <Check className="c-check" size={18} />
-                    ) : (
-                      <X className="c-cross" size={18} />
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+            {chartData.length > 0 && (
+              <div className="c-card" style={{ marginTop: 28 }}>
+                <h3 className="c-h3">Median latency by model</h3>
+                <p className="c-muted" style={{ marginBottom: 18 }}>
+                  Milliseconds per forward pass, lower is better. Missing bars are unsupported
+                  configurations.
+                </p>
+                <div style={{ width: "100%", height: 340 }}>
+                  <ResponsiveContainer>
+                    <BarChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 8 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#DCDCD3" />
+                      <XAxis dataKey="name" stroke="#5A5A55" style={{ fontSize: 11 }} />
+                      <YAxis stroke="#5A5A55" style={{ fontSize: 12 }} />
+                      <Tooltip
+                        contentStyle={tooltipStyle}
+                        cursor={{ fill: "rgba(31,58,138,.08)" }}
+                        formatter={(v: number, name: string) => [`${ms(v)} ms`, label(name)]}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 12 }} formatter={(v: string) => label(v)} />
+                      {runtimes.map((rt) => (
+                        <Bar
+                          key={rt}
+                          dataKey={rt}
+                          fill={RUNTIME_COLOR[rt] ?? "#888"}
+                          radius={[2, 2, 0, 0]}
+                        />
+                      ))}
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
 
-        <div className="c-card" style={{ marginTop: 28 }}>
-          <h3 className="c-h3">Latency Distribution — Medium MLP</h3>
-          <p className="c-muted" style={{ marginBottom: 12 }}>
-            1,000 warm iterations. Milliseconds unless noted.
-          </p>
-          <div style={{ overflowX: "auto" }}>
-            <table className="c-table">
-              <thead>
-                <tr>
-                  <th>Runtime</th>
-                  <th>Min</th>
-                  <th>Median</th>
-                  <th>Mean</th>
-                  <th>P95</th>
-                  <th>P99</th>
-                  <th>Max</th>
-                  <th>Throughput (inf/s)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {STATS.map((s) => (
-                  <tr key={s.runtime} className={s.runtime.startsWith("Crucible") ? "hl" : ""}>
-                    <td
-                      style={{
-                        color: s.runtime.startsWith("Crucible") ? "var(--trace)" : undefined,
-                      }}
-                    >
-                      {s.runtime}
-                    </td>
-                    <td>{s.min}</td>
-                    <td>{s.median}</td>
-                    <td>{s.mean}</td>
-                    <td>{s.p95}</td>
-                    <td>{s.p99}</td>
-                    <td>{s.max}</td>
-                    <td>{s.throughput.toFixed(1)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+            {groups.map((g) => {
+              const summary = comparison(g.rows);
+              return (
+                <div className="c-card" style={{ marginTop: 28 }} key={g.key}>
+                  <h3 className="c-h3">
+                    <span className="mono">{g.model}</span>{" "}
+                    <span className="c-muted" style={{ fontSize: 14 }}>
+                      input [{g.shape.join(", ")}]
+                    </span>
+                  </h3>
+                  {summary && (
+                    <p className="c-muted" style={{ marginTop: 6 }}>
+                      {summary}
+                    </p>
+                  )}
+                  <div style={{ overflowX: "auto" }}>
+                    <table className="c-table" style={{ marginTop: 12 }}>
+                      <thead>
+                        <tr>
+                          <th>Runtime</th>
+                          <th>Threads</th>
+                          <th>Mean</th>
+                          <th>Median</th>
+                          <th>p95</th>
+                          <th>Min</th>
+                          <th>Std</th>
+                          <th>Throughput</th>
+                          <th>Load</th>
+                          <th>Max |Δ| vs ORT</th>
+                          <th>Top-1 match</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {g.rows.map((r) => (
+                          <tr
+                            key={`${r.runtime}-${r.threads}`}
+                            className={r.runtime.startsWith("crucible") ? "hl" : ""}
+                          >
+                            <td>
+                              {label(r.runtime)}
+                              {r.note && (
+                                <div className="c-muted" style={{ fontSize: 11 }}>
+                                  {r.note}
+                                </div>
+                              )}
+                            </td>
+                            <td>{r.threads}</td>
+                            {r.status === "unsupported" ? (
+                              <td colSpan={9} className="c-muted">
+                                unsupported
+                              </td>
+                            ) : (
+                              <>
+                                <td>{ms(r.mean_ms)} ms</td>
+                                <td>{ms(r.median_ms)} ms</td>
+                                <td>{ms(r.p95_ms)} ms</td>
+                                <td>{ms(r.min_ms)} ms</td>
+                                <td>{ms(r.std_ms)}</td>
+                                <td>
+                                  {r.throughput_ips === null
+                                    ? "—"
+                                    : `${r.throughput_ips.toFixed(1)} /s`}
+                                </td>
+                                <td>{r.load_ms === null ? "—" : `${ms(r.load_ms)} ms`}</td>
+                                <td>
+                                  {r.max_abs_diff_vs_ort === null
+                                    ? "—"
+                                    : r.max_abs_diff_vs_ort.toExponential(2)}
+                                </td>
+                                <td>
+                                  {r.top1_match === null ? (
+                                    "—"
+                                  ) : r.top1_match ? (
+                                    <Check className="c-check" size={16} />
+                                  ) : (
+                                    <X className="c-cross" size={16} />
+                                  )}
+                                </td>
+                              </>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+
+            {data.artifacts.length > 0 && (
+              <div className="c-card" style={{ marginTop: 28 }}>
+                <h3 className="c-h3">Artifact sizes</h3>
+                <table className="c-table" style={{ marginTop: 12 }}>
+                  <thead>
+                    <tr>
+                      <th>Artifact</th>
+                      <th>Size</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.artifacts.map((a) => (
+                      <tr key={a.name}>
+                        <td className="mono">{a.name}</td>
+                        <td>{fmtBytes(a.bytes)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
       </section>
     </CrucibleLayout>
   );

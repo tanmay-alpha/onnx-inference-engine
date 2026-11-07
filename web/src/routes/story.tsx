@@ -8,15 +8,14 @@ export const Route = createFileRoute("/story")({
       {
         name: "description",
         content:
-          "Why Crucible exists: ONNX Runtime is 50MB+, PyTorch is 750MB+, and neither fits in a browser tab. So I wrote it from scratch.",
+          "Why Crucible exists: a from-scratch ONNX engine in C++17, plus a small Rust/WASM runtime so a fraud model can be scored inside a browser tab.",
       },
       { property: "og:title", content: "Crucible — Why This Exists" },
       {
         property: "og:description",
         content:
-          "A first-person build story: hand-writing an ONNX protobuf decoder and keeping a C++ engine and a Rust engine bit-for-bit identical.",
+          "A first-person build story: hand-writing an ONNX protobuf decoder, a C++ engine checked against ONNX Runtime, and a tiny WASM runtime for the browser.",
       },
-      { property: "og:url", content: "/story" },
     ],
     links: [{ rel: "canonical", href: "/story" }],
   }),
@@ -35,7 +34,7 @@ function StoryPage() {
           I wanted to run a fraud model inside a browser tab.
         </h1>
         <p className="c-muted" style={{ fontSize: 16, marginTop: 12 }}>
-          The existing runtimes couldn't. So I wrote a new one — twice.
+          So I wrote an ONNX runtime from scratch — a C++ engine, and a tiny Rust one for the tab.
         </p>
 
         <div className="c-divider" style={{ margin: "32px 0" }} />
@@ -48,10 +47,9 @@ function StoryPage() {
         </p>
 
         <p style={{ fontSize: 17, lineHeight: 1.7, color: "var(--ink)", marginTop: 18 }}>
-          I tried the obvious thing first: use ONNX Runtime Web. The distributable is over 50 MB
-          before I've loaded a single model. PyTorch's mobile export is 750 MB+ on disk before you
-          strip anything out. Neither is a serious answer for a fraud check that has to fit on a
-          banking landing page. So I stopped looking for a runtime to wrap and started writing one.
+          The obvious answer is to wrap an existing runtime. I wanted to understand what a runtime
+          actually does — parse the graph, order it, run the kernels — so I wrote one instead, and
+          kept the browser part as small as the fraud model allows.
         </p>
 
         <div
@@ -67,8 +65,8 @@ function StoryPage() {
             Constraint
           </div>
           <div style={{ fontSize: 18, color: "var(--ink)", lineHeight: 1.5 }}>
-            A runtime the browser will actually download. Under 5 MB compressed. No native
-            dependencies at load time. Deterministic output.
+            A runtime small enough to ship on a landing page. No native dependencies at load time.
+            Every result is either correct or an explicit error.
           </div>
         </div>
 
@@ -91,16 +89,16 @@ function StoryPage() {
         </p>
 
         <h3 className="c-h3" style={{ marginTop: 24, fontSize: 17 }}>
-          Keeping two implementations identical.
+          Two runtimes, honestly scoped.
         </h3>
         <p style={{ fontSize: 16, lineHeight: 1.7, color: "var(--ink-default)", marginTop: 8 }}>
-          The C++ core uses Eigen for its matmul path. The Rust build for the browser can't rely on
-          Eigen — it's a pure-Rust kernel set that lowers to{" "}
-          <span className="mono">wasm-simd128</span>. Two implementations means two chances for the
-          numbers to drift. I keep them honest with fixed-seed golden tests: the fraud model gets a
-          fixed input tensor, both implementations execute the graph, and every intermediate tensor
-          is compared bit-for-bit at the representation level for integer tensors and inside a tight
-          epsilon for floats. When the test fails I know before I ship.
+          The C++ core uses Eigen for its matrix products and im2col convolutions and implements 20
+          ONNX operators — enough for ResNet18 and MobileNetV2. Its outputs are checked against ONNX
+          Runtime in a 70-case parity suite. It is not faster than ONNX Runtime: single-threaded it
+          is several times slower on those CNNs, and the benchmark page shows the measured gap. The
+          browser runtime is a separate, much smaller Rust interpreter with 5 operators (MatMul,
+          Add, Relu, Sigmoid, Softmax): it runs the fraud model, not CNNs, and rejects anything else
+          with a clear error.
         </p>
 
         <div
@@ -120,27 +118,27 @@ function StoryPage() {
                 className="mono"
                 style={{ fontSize: 22, color: "var(--ink)", letterSpacing: "-.02em" }}
               >
-                3.1 MB
+                &lt;100 KB
               </div>
-              <div className="c-metric-sub">runtime binary (wasm)</div>
+              <div className="c-metric-sub">WASM runtime binary</div>
             </div>
             <div>
               <div
                 className="mono"
                 style={{ fontSize: 22, color: "var(--ink)", letterSpacing: "-.02em" }}
               >
-                15
+                20 / 5
               </div>
-              <div className="c-metric-sub">operators implemented</div>
+              <div className="c-metric-sub">operators: native C++ / WASM</div>
             </div>
             <div>
               <div
                 className="mono"
                 style={{ fontSize: 22, color: "var(--ink)", letterSpacing: "-.02em" }}
               >
-                1.18 ms
+                70
               </div>
-              <div className="c-metric-sub">fraud inference, warm</div>
+              <div className="c-metric-sub">parity cases vs ONNX Runtime</div>
             </div>
           </div>
         </div>
@@ -149,10 +147,10 @@ function StoryPage() {
           What I'd do next.
         </h2>
         <p style={{ fontSize: 16, lineHeight: 1.7, color: "var(--ink-default)" }}>
-          Int8 quantization on the MatMul path, so the fraud model shrinks another 3–4×. A parity
-          harness in CI so the C++/Rust check runs on every commit, not just when I remember.
-          Biometric matching next — the same "features never leave the tab" argument holds even
-          harder for face embeddings.
+          Close the native performance gap with ONNX Runtime (threading, kernel fusion, faster
+          convolution paths). Grow the WASM runtime past five operators so more than the fraud model
+          runs in the browser, and add a parity check between the two runtimes on the models they
+          share.
         </p>
 
         <div style={{ marginTop: 36, display: "flex", gap: 12, flexWrap: "wrap" }}>

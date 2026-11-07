@@ -1,7 +1,6 @@
-import { createFileRoute, Link, redirect } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import {
-  LayoutDashboard,
   TrendingUp,
   Activity,
   Cpu,
@@ -29,46 +28,26 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { CrucibleLayout } from "../components/crucible/Layout";
+import { BackendOfflineNotice } from "../components/crucible/BackendStatus";
 import {
-  fetchFraudHistoryFromDB,
-  fetchBenchmarksFromDB,
+  getFraudAnalytics,
   getFraudHistory,
-  fetchModels,
+  getInferenceAnalytics,
+  getInferenceLogs,
+  getModelUsage,
 } from "../lib/api";
-import type { FraudHistoryRecord, BenchmarkRecord, RegisteredModel } from "../lib/api";
+import type {
+  FraudAnalytics,
+  FraudHistoryRecord,
+  InferenceAnalytics,
+  InferenceLog,
+  ModelUsage,
+} from "../lib/api";
+import { requireAuth } from "../lib/auth-guard";
+import { useBackendHealth } from "../lib/use-backend-health";
 import { Button } from "../components/ui/button";
 
 const COLORS = ["#c2410c", "#152A66", "#166534", "#b45309", "#7c3aed", "#0891b2"];
-
-interface AnalyticsData {
-  inference: {
-    period_days: number;
-    data: {
-      date: string;
-      count: number;
-      avg_latency_ms: number;
-      min_latency_ms: number;
-      max_latency_ms: number;
-    }[];
-  };
-  fraud: {
-    period_days: number;
-    data: {
-      date: string;
-      total: number;
-      fraud_count: number;
-      avg_probability: number;
-    }[];
-  };
-  models: {
-    id: string;
-    name: string;
-    usage_count: number;
-    inference_count: number;
-    avg_latency_ms: number;
-    last_used: string | null;
-  }[];
-}
 
 export const Route = createFileRoute("/dashboard")({
   head: () => ({
@@ -76,21 +55,19 @@ export const Route = createFileRoute("/dashboard")({
       { title: "Analytics Dashboard · Crucible" },
       {
         name: "description",
-        content: "Real-time analytics dashboard for Crucible inference platform.",
+        content: "Your inference and fraud-check history on the Crucible server.",
       },
     ],
   }),
-  beforeLoad: () => {
-    if (!localStorage.getItem("crucible_token")) {
-      throw redirect({ to: "/login" });
-    }
-  },
+  ssr: false,
+  beforeLoad: requireAuth,
   component: DashboardPage,
 });
 
 const fmtNum = (n: number) =>
   new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(n);
-const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
+const dateLabel = (date: string) =>
+  new Date(date).toLocaleDateString("en", { month: "short", day: "numeric" });
 
 function StatCard({
   label,
@@ -137,123 +114,97 @@ function StatCard({
 }
 
 function DashboardPage() {
-  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
+  const health = useBackendHealth();
+  const [inference, setInference] = useState<InferenceAnalytics["data"]>([]);
+  const [fraud, setFraud] = useState<FraudAnalytics["data"]>([]);
+  const [models, setModels] = useState<ModelUsage[]>([]);
+  const [logs, setLogs] = useState<InferenceLog[]>([]);
   const [fraudHistory, setFraudHistory] = useState<FraudHistoryRecord[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState(7);
   const [refreshing, setRefreshing] = useState(false);
-  const [models, setModels] = useState<RegisteredModel[]>([]);
 
   const loadData = useCallback(async (days: number) => {
     setLoading(true);
+    setLoadError(null);
     try {
-      const [inf, fraud, mods] = await Promise.all([
-        fetch(`/analytics/inference?days=${days}`)
-          .then((r) => r.json())
-          .catch(() => null),
-        fetch(`/analytics/fraud?days=${days}`)
-          .then((r) => r.json())
-          .catch(() => null),
-        fetchModels(),
+      const [inf, fr, usage, recentLogs, history] = await Promise.all([
+        getInferenceAnalytics(days),
+        getFraudAnalytics(days),
+        getModelUsage(),
+        getInferenceLogs(200),
+        getFraudHistory(),
       ]);
-
-      if (inf) setAnalytics(inf);
-      else
-        setAnalytics({
-          inference: { period_days: days, data: [] },
-          fraud: { period_days: days, data: [] },
-          models: [],
-        });
-
-      setFraudHistory(fraud?.history || []);
-      setModels(mods);
-    } catch {
-      setAnalytics({
-        inference: { period_days: days, data: [] },
-        fraud: { period_days: days, data: [] },
-        models: [],
-      });
-      setFraudHistory([]);
+      setInference(inf.data);
+      setFraud(fr.data);
+      setModels(usage);
+      setLogs(recentLogs);
+      setFraudHistory(history);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+      setInference([]);
+      setFraud([]);
       setModels([]);
+      setLogs([]);
+      setFraudHistory([]);
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadData(period);
+    void loadData(period);
   }, [period, loadData]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
+    health.recheck();
     await loadData(period);
     setRefreshing(false);
   };
 
-  const totalInferences = analytics?.inference.data.reduce((s, d) => s + d.count, 0) || 0;
-  const totalFraud = fraudHistory.length;
-  const fraudCount = fraudHistory.filter((f) => f.probability >= 0.5).length;
-  const avgLatency = analytics?.inference.data.length
-    ? analytics.inference.data.reduce((s, d) => s + d.avg_latency_ms, 0) /
-      analytics.inference.data.length
-    : 0;
+  const totalInferences = inference.reduce((s, d) => s + d.count, 0);
+  const totalChecks = fraud.reduce((s, d) => s + d.total, 0);
+  const flaggedChecks = fraud.reduce((s, d) => s + d.fraud_count, 0);
+  // Count-weighted mean of the server's per-day engine latency.
+  const avgLatency = totalInferences
+    ? inference.reduce((s, d) => s + d.avg_latency_ms * d.count, 0) / totalInferences
+    : null;
 
-  // Build latency distribution bins from fraud history + analytics
+  // Distribution of per-run engine latency from the caller's own inference logs.
   const latencyBins = useMemo(() => {
     const bins = [
-      { range: "0-1ms", count: 0 },
-      { range: "1-5ms", count: 0 },
-      { range: "5-10ms", count: 0 },
-      { range: "10-50ms", count: 0 },
-      { range: "50ms+", count: 0 },
+      { range: "<1ms", max: 1, count: 0 },
+      { range: "1-5ms", max: 5, count: 0 },
+      { range: "5-10ms", max: 10, count: 0 },
+      { range: "10-50ms", max: 50, count: 0 },
+      { range: "50-200ms", max: 200, count: 0 },
+      { range: "200ms+", max: Infinity, count: 0 },
     ];
-
-    const latencies = fraudHistory.map((f) => f.latency_ms);
-    analytics?.inference.data.forEach((d) => {
-      latencies.push(d.avg_latency_ms);
-    });
-
-    latencies.forEach((ms) => {
-      if (ms < 1) bins[0].count++;
-      else if (ms < 5) bins[1].count++;
-      else if (ms < 10) bins[2].count++;
-      else if (ms < 50) bins[3].count++;
-      else bins[4].count++;
-    });
-
+    for (const l of logs) {
+      if (l.status !== "success") continue;
+      bins.find((b) => l.latency_ms < b.max)!.count++;
+    }
     return bins.filter((b) => b.count > 0);
-  }, [fraudHistory, analytics]);
+  }, [logs]);
 
-  // Model usage pie data
-  const modelPieData = useMemo(() => {
-    if (!models.length) return [];
-    return models
-      .map((m) => ({
-        name: m.name.replace(".onnx", ""),
-        value: m.usage_count,
-      }))
-      .filter((m) => (m as { name: string; value: number }).value > 0);
-  }, [models]);
+  const modelPieData = useMemo(
+    () =>
+      models
+        .map((m) => ({ name: m.name.replace(/\.onnx$/, ""), value: m.inference_count }))
+        .filter((m) => m.value > 0),
+    [models],
+  );
 
-  const inferenceChartData = useMemo(() => {
-    return (analytics?.inference.data || []).map((d) => ({
-      ...d,
-      dateLabel: new Date(d.date).toLocaleDateString("en", {
-        month: "short",
-        day: "numeric",
-      }),
-    }));
-  }, [analytics]);
-
-  const fraudChartData = useMemo(() => {
-    return (analytics?.fraud.data || []).map((d) => ({
-      ...d,
-      dateLabel: new Date(d.date).toLocaleDateString("en", {
-        month: "short",
-        day: "numeric",
-      }),
-    }));
-  }, [analytics]);
+  const inferenceChartData = useMemo(
+    () => inference.map((d) => ({ ...d, dateLabel: dateLabel(d.date) })),
+    [inference],
+  );
+  const fraudChartData = useMemo(
+    () => fraud.map((d) => ({ ...d, dateLabel: dateLabel(d.date) })),
+    [fraud],
+  );
 
   return (
     <CrucibleLayout>
@@ -318,12 +269,22 @@ function DashboardPage() {
           </div>
         </div>
 
+        <BackendOfflineNotice health={health} onRetry={handleRefresh} />
+
         {loading ? (
           <div style={{ textAlign: "center", padding: 40 }}>
             <div className="c-loading-bar" />
             <p className="c-muted" style={{ marginTop: 12 }}>
               Loading analytics...
             </p>
+          </div>
+        ) : loadError ? (
+          <div
+            role="alert"
+            className="c-card"
+            style={{ color: "var(--risk)", fontSize: 14, textAlign: "center", padding: 32 }}
+          >
+            Could not load analytics: {loadError}
           </div>
         ) : (
           <>
@@ -337,27 +298,27 @@ function DashboardPage() {
               }}
             >
               <StatCard
-                label="Total Inferences"
+                label="Server Inferences"
                 value={fmtNum(totalInferences)}
                 sub={`Last ${period} days`}
                 icon={<Activity size={16} />}
               />
               <StatCard
-                label="Fraud Detected"
-                value={fmtPct(fraudCount / Math.max(totalFraud, 1))}
-                sub={`${fraudCount} of ${totalFraud} checks`}
+                label="Fraud Checks Flagged"
+                value={totalChecks ? `${((flaggedChecks / totalChecks) * 100).toFixed(1)}%` : "—"}
+                sub={`${flaggedChecks} of ${totalChecks} saved checks`}
                 icon={<TrendingUp size={16} />}
               />
               <StatCard
-                label="Avg Latency"
-                value={`${avgLatency.toFixed(1)}ms`}
-                sub="Per inference"
+                label="Avg Engine Latency"
+                value={avgLatency === null ? "—" : `${avgLatency.toFixed(2)} ms`}
+                sub="Native engine, per server inference"
                 icon={<Zap size={16} />}
               />
               <StatCard
-                label="Active Models"
+                label="Registered Models"
                 value={fmtNum(models.length)}
-                sub="Registered"
+                sub="Owned by you"
                 icon={<Cpu size={16} />}
               />
             </div>
@@ -423,7 +384,8 @@ function DashboardPage() {
                   </div>
                 ) : (
                   <p className="c-muted" style={{ textAlign: "center", padding: 40 }}>
-                    No inference data for this period. Run some inferences to see stats.
+                    No server inferences in this period. Run a model from the Playground in server
+                    mode to see stats.
                   </p>
                 )}
               </div>
@@ -492,7 +454,8 @@ function DashboardPage() {
                   </div>
                 ) : (
                   <p className="c-muted" style={{ textAlign: "center", padding: 40 }}>
-                    No fraud data for this period. Run fraud checks to see trends.
+                    No saved fraud checks in this period. Fraud checks are only saved when you opt
+                    in on the Fraud Demo page while logged in.
                   </p>
                 )}
               </div>
@@ -514,7 +477,7 @@ function DashboardPage() {
                   style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}
                 >
                   <Zap size={16} style={{ color: "var(--forge)" }} />
-                  Latency Distribution
+                  Engine Latency (last {logs.length} server runs)
                 </h3>
                 {latencyBins.length > 0 ? (
                   <div style={{ width: "100%", height: 260 }}>
@@ -546,7 +509,7 @@ function DashboardPage() {
                   </div>
                 ) : (
                   <p className="c-muted" style={{ textAlign: "center", padding: 40 }}>
-                    No latency data available. Run inferences to see distribution.
+                    No server inference logs yet.
                   </p>
                 )}
               </div>
@@ -599,7 +562,7 @@ function DashboardPage() {
                   </div>
                 ) : (
                   <p className="c-muted" style={{ textAlign: "center", padding: 40 }}>
-                    No model usage data yet. Upload and run models to see analytics.
+                    No server inferences against your models yet.
                   </p>
                 )}
               </div>
@@ -608,7 +571,7 @@ function DashboardPage() {
             {/* Fraud history table */}
             <div className="c-card" style={{ marginBottom: 24 }}>
               <h3 className="c-h3" style={{ marginBottom: 16 }}>
-                Recent Fraud Checks
+                Recent Saved Fraud Checks
               </h3>
               {fraudHistory.length ? (
                 <div style={{ overflowX: "auto" }}>
@@ -757,7 +720,7 @@ function DashboardPage() {
                 </div>
               ) : (
                 <p className="c-muted" style={{ textAlign: "center", padding: 30 }}>
-                  No fraud detection history. Run fraud checks to see data here.
+                  No saved fraud checks.
                 </p>
               )}
             </div>

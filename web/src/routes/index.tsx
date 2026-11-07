@@ -1,6 +1,13 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 import { ArrowRight, Lock, Cpu, GitBranch } from "lucide-react";
 import { CrucibleLayout } from "../components/crucible/Layout";
+import {
+  getFraudModelBytes,
+  runFraudDetection,
+  type FraudDetectionParams,
+} from "../lib/crucible-wasm";
+import { parseOnnxModel } from "../lib/onnx-meta";
 
 export const Route = createFileRoute("/")({ component: Home });
 
@@ -9,26 +16,90 @@ const inr = new Intl.NumberFormat("en-IN", {
   currency: "INR",
   maximumFractionDigits: 0,
 });
-const fmt = (n: number) => inr.format(n).replace("₹", "₹");
 
-const RECENT: {
-  id: string;
-  kind: string;
-  amount: number;
-  verdict: string;
-  ms: number;
-  risk: "ok" | "warn";
-}[] = [
-  { id: "001", kind: "transfer", amount: 8151, verdict: "low risk", ms: 0.66, risk: "ok" },
-  { id: "002", kind: "transfer", amount: 201350, verdict: "elevated risk", ms: 0.61, risk: "warn" },
-  { id: "003", kind: "cash-out", amount: 154290, verdict: "elevated risk", ms: 0.83, risk: "warn" },
-  { id: "004", kind: "cash-out", amount: 7060, verdict: "low risk", ms: 1.32, risk: "ok" },
-  { id: "005", kind: "payment", amount: 5492, verdict: "low risk", ms: 1.05, risk: "ok" },
+/** Sample transactions scored live in the visitor's browser on page load. */
+const SAMPLES: { kind: string; tx: FraudDetectionParams }[] = [
+  {
+    kind: "transfer",
+    tx: {
+      type: "TRANSFER",
+      amount: 4850,
+      oldBalanceOrig: 42000,
+      newBalanceOrig: 37150,
+      oldBalanceDest: 12000,
+      newBalanceDest: 16850,
+    },
+  },
+  {
+    kind: "transfer",
+    tx: {
+      type: "TRANSFER",
+      amount: 201350,
+      oldBalanceOrig: 201350,
+      newBalanceOrig: 0,
+      oldBalanceDest: 0,
+      newBalanceDest: 0,
+    },
+  },
+  {
+    kind: "cash-out",
+    tx: {
+      type: "CASH_OUT",
+      amount: 154290,
+      oldBalanceOrig: 155000,
+      newBalanceOrig: 710,
+      oldBalanceDest: 5000,
+      newBalanceDest: 0,
+    },
+  },
 ];
 
-function InferenceTerminal() {
+interface LiveRun {
+  modelBytes: number;
+  nodes: string[];
+  wasmBytes: number | null;
+  rows: { kind: string; amount: number; probability: number; ms: number }[];
+}
+
+/** Runs the real fraud model through the WASM runtime and reports what actually happened. */
+function LiveInferenceConsole() {
+  const [run, setRun] = useState<LiveRun | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const bytes = await getFraudModelBytes();
+      const nodes = parseOnnxModel(bytes).nodes.map((n) => n.opType);
+      const rows: LiveRun["rows"] = [];
+      for (const s of SAMPLES) {
+        const r = await runFraudDetection(s.tx);
+        rows.push({
+          kind: s.kind,
+          amount: s.tx.amount,
+          probability: r.probability,
+          ms: r.latencyMs,
+        });
+      }
+      // Size of the .wasm the runtime actually downloaded (Resource Timing).
+      const wasmEntry = performance
+        .getEntriesByType("resource")
+        .find((e) => e.name.includes("crucible_wasm_bg.wasm")) as
+        PerformanceResourceTiming | undefined;
+      const len = wasmEntry?.decodedBodySize ?? 0;
+      if (!cancelled) {
+        setRun({ modelBytes: bytes.length, nodes, wasmBytes: len > 0 ? len : null, rows });
+      }
+    })().catch((e: unknown) => {
+      if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
-    <div className="c-console" style={{ height: "100%" }}>
+    <div className="c-console" style={{ height: "100%", width: "100%" }}>
       <div className="c-console-bar">
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div className="dots">
@@ -36,10 +107,10 @@ function InferenceTerminal() {
             <span className="dot" />
             <span className="dot on" />
           </div>
-          <span className="c-console-title">local inference session</span>
+          <span className="c-console-title">this tab · crucible-wasm</span>
         </div>
         <span className="c-console-title" style={{ color: "var(--console-accent)" }}>
-          ● live
+          {error ? "● error" : run ? "● measured" : "● running"}
         </span>
       </div>
       <div className="c-console-body" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -51,71 +122,62 @@ function InferenceTerminal() {
             lineHeight: 1.7,
           }}
         >
-          <span style={{ color: "var(--console-accent)" }}>$</span>{" "}
-          <span style={{ color: "var(--console-ink)" }}>crucible run</span>{" "}
-          <span style={{ color: "var(--console-ok)" }}>fraud_mlp_v3.onnx</span>{" "}
-          <span style={{ color: "var(--console-mute)" }}>--amount</span>{" "}
-          <span style={{ color: "var(--console-warn)" }}>₹51,610</span>{" "}
-          <span style={{ color: "var(--console-mute)" }}>--channel</span>{" "}
-          <span style={{ color: "var(--console-warn)" }}>transfer</span>
+          Scored just now in your browser — values below are live, not recorded.
         </div>
-
-        <div>
-          <div className="c-console-row">
-            <span className="c-console-key">model loaded</span>
-            <span className="c-console-val s">fraud_mlp_v3.onnx</span>
-          </div>
-          <div className="c-console-row">
-            <span className="c-console-key">runtime</span>
-            <span className="c-console-val">wasm-simd128</span>
-          </div>
-          <div className="c-console-row">
-            <span className="c-console-key">latency</span>
-            <span className="c-console-val n">1.18 ms</span>
-          </div>
-          <div className="c-console-row">
-            <span className="c-console-key">network sent</span>
-            <span className="c-console-val s">0 bytes</span>
-          </div>
-          <div className="c-console-row">
-            <span className="c-console-key">prediction</span>
-            <span className="c-console-val warn">elevated risk</span>
-          </div>
-          <div className="c-console-row">
-            <span className="c-console-key">probability</span>
-            <span className="c-console-val warn">82.4%</span>
-          </div>
-        </div>
-
-        <div>
-          <div className="c-console-title" style={{ marginBottom: 8 }}>
-            recent activity
-          </div>
-          <div className="c-console-log" style={{ maxHeight: "none" }}>
-            {RECENT.map((r) => (
-              <div
-                key={r.id}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "34px 68px 1fr 100px 62px",
-                  gap: 8,
-                  alignItems: "baseline",
-                }}
-              >
-                <span style={{ color: "var(--console-mute)" }}>{r.id}</span>
-                <span style={{ color: "var(--console-ink)" }}>{r.kind}</span>
-                <span style={{ color: "var(--console-warn)" }}>{fmt(r.amount)}</span>
-                <span className={r.risk === "ok" ? "ok" : "warn"}>{r.verdict}</span>
-                <span style={{ color: "var(--console-mute)", textAlign: "right" }}>
-                  {r.ms.toFixed(2)} ms
+        {error && <div className="c-console-val err">{error}</div>}
+        {!error && !run && <div className="c-console-val">loading model + runtime…</div>}
+        {run && (
+          <>
+            <div>
+              <div className="c-console-row">
+                <span className="c-console-key">model</span>
+                <span className="c-console-val s">fraud_detector.onnx · {run.modelBytes} B</span>
+              </div>
+              <div className="c-console-row">
+                <span className="c-console-key">graph</span>
+                <span className="c-console-val">{run.nodes.join(" → ")}</span>
+              </div>
+              <div className="c-console-row">
+                <span className="c-console-key">runtime</span>
+                <span className="c-console-val">
+                  Rust → WebAssembly
+                  {run.wasmBytes !== null && ` · ${(run.wasmBytes / 1024).toFixed(1)} KB binary`}
                 </span>
               </div>
-            ))}
-            <div style={{ marginTop: 8, color: "var(--console-accent)" }}>
-              $ <span className="c-console-caret" />
+              <div className="c-console-row">
+                <span className="c-console-key">network during scoring</span>
+                <span className="c-console-val s">none</span>
+              </div>
             </div>
-          </div>
-        </div>
+            <div>
+              <div className="c-console-title" style={{ marginBottom: 8 }}>
+                sample transactions
+              </div>
+              <div className="c-console-log" style={{ maxHeight: "none" }}>
+                {run.rows.map((r, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "68px 1fr 90px 80px",
+                      gap: 8,
+                      alignItems: "baseline",
+                    }}
+                  >
+                    <span style={{ color: "var(--console-ink)" }}>{r.kind}</span>
+                    <span style={{ color: "var(--console-warn)" }}>{inr.format(r.amount)}</span>
+                    <span className={r.probability >= 0.5 ? "warn" : "ok"}>
+                      p={(r.probability * 100).toFixed(1)}%
+                    </span>
+                    <span style={{ color: "var(--console-mute)", textAlign: "right" }}>
+                      {r.ms < 0.1 ? "<0.1" : r.ms.toFixed(2)} ms
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -128,13 +190,14 @@ function Home() {
       <section className="c-container" style={{ paddingTop: 72, paddingBottom: 48 }}>
         <div className="c-hero-split" style={{ gap: 56, alignItems: "center" }}>
           <div>
-            <div className="c-eyebrow">PRIVATE BROWSER INFERENCE</div>
+            <div className="c-eyebrow">ONNX INFERENCE, FROM SCRATCH</div>
             <h1 className="c-hero-title">
               Fraud checks that run <em>in the browser</em>.
             </h1>
             <p className="c-hero-lede">
-              Crucible runs a compact ONNX fraud model locally with WebAssembly. Transaction data
-              stays in the tab. No inference server, no raw features leaving the device.
+              Crucible is a hand-written ONNX inference engine: a C++17 core (20 operators, runs
+              ResNet18 and MobileNetV2) behind a FastAPI server, plus a small separate Rust runtime
+              compiled to WebAssembly that scores this fraud model inside your tab.
             </p>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               <Link to="/fraud" className="c-btn c-btn-primary c-btn-lg">
@@ -146,7 +209,7 @@ function Home() {
             </div>
           </div>
           <div style={{ display: "flex" }}>
-            <InferenceTerminal />
+            <LiveInferenceConsole />
           </div>
         </div>
       </section>
@@ -164,10 +227,10 @@ function Home() {
           className="c-proof-strip"
         >
           {[
-            { v: "3.1 MB", k: "runtime" },
-            { v: "1.18 ms", k: "sample inference" },
-            { v: "0 bytes", k: "sent during inference" },
-            { v: "8 nodes", k: "fraud graph" },
+            { v: "20", k: "ONNX ops · native C++" },
+            { v: "5", k: "ONNX ops · WASM runtime" },
+            { v: "70", k: "parity cases vs ONNX Runtime" },
+            { v: "0 bytes", k: "sent during WASM scoring" },
           ].map((m, i) => (
             <div
               key={m.k}
@@ -289,7 +352,8 @@ function Home() {
                 Benchmark
               </h3>
               <p className="c-muted">
-                Compare runtime size, latency, and cold-start against heavier runtimes.
+                Measured latency against ONNX Runtime and PyTorch — including where Crucible is
+                slower.
               </p>
             </div>
             <div

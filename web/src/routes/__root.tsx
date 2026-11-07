@@ -78,18 +78,18 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Crucible — ONNX inference engine for the browser" },
+      { title: "Crucible — a from-scratch ONNX inference engine" },
       {
         name: "description",
         content:
-          "A from-scratch ONNX runtime. C++17 core with a hand-written protobuf decoder and Kahn's-algorithm graph executor. Pure-Rust reimplementation compiled to WebAssembly. Fraud inference in the browser tab.",
+          "A from-scratch ONNX runtime: C++17 core (20 operators) with a hand-written protobuf decoder, served over FastAPI, plus a small separate Rust runtime compiled to WebAssembly for in-browser fraud scoring.",
       },
       { name: "author", content: "Crucible" },
-      { property: "og:title", content: "Crucible — ONNX inference engine for the browser" },
+      { property: "og:title", content: "Crucible — a from-scratch ONNX inference engine" },
       {
         property: "og:description",
         content:
-          "3.1 MB WASM runtime. Zero server calls. C++ core, Rust WASM build, honest benchmarks.",
+          "Native C++ engine checked against ONNX Runtime, a tiny Rust/WASM runtime for the browser, and benchmarks that show where it is slower.",
       },
       { property: "og:type", content: "website" },
       { property: "og:site_name", content: "Crucible" },
