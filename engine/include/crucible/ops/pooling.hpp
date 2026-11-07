@@ -18,8 +18,8 @@
 //   * explicit kernel/stride/pad integers (no auto_pad, no ceil_mode,
 //     no dilation — these belong to a later issue if we hit a model
 //     that needs them)
-//   * for AveragePool, count_include_pad = 1 (denominator is always
-//     kH*kW, matching the ONNX v7 default that MobileNetV2 uses)
+//   * for AveragePool, count_include_pad selects the denominator:
+//     kH*kW (true, PyTorch default) or in-bounds count (false, ONNX default)
 //
 // Why no auto_pad?
 //   MobileNetV2 doesn't use it. Adding the SAME_UPPER / SAME_LOWER
@@ -54,13 +54,14 @@ Tensor maxpool_forward(const Tensor& x,
                        int sH, int sW,
                        int pH, int pW);
 
-// AveragePool with the same signature. Denominator is always kH*kW
-// (count_include_pad = 1) — matches MobileNetV2's behaviour under the
-// ONNX v7 default.
+// AveragePool with the same signature plus `count_include_pad`:
+//   true  -> denominator is always kH*kW (padded zeros count)
+//   false -> denominator is the number of in-bounds elements (ONNX default)
 Tensor avgpool_forward(const Tensor& x,
                        int kH, int kW,
                        int sH, int sW,
-                       int pH, int pW);
+                       int pH, int pW,
+                       bool count_include_pad);
 
 // GlobalAveragePool — reduce each (N, C) feature map to a single scalar
 // by averaging every H*W element in the spatial plane.

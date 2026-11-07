@@ -91,7 +91,8 @@ CrucibleStatus classify(const std::exception& e) {
         if (what != nullptr && std::strstr(what, "io") != nullptr) {
             return CRUCIBLE_ERR_IO;
         }
-        if (what != nullptr && std::strstr(what, "unsupported") != nullptr) {
+        if (what != nullptr && (std::strstr(what, "unsupported") != nullptr ||
+                                std::strstr(what, "not supported") != nullptr)) {
             return CRUCIBLE_ERR_UNSUPPORTED;
         }
         return CRUCIBLE_ERR_RUNTIME;
@@ -99,10 +100,7 @@ CrucibleStatus classify(const std::exception& e) {
     return CRUCIBLE_ERR_INTERNAL;
 }
 
-// Install `e.what()` as the thread-local error message.
-void store_error(const std::exception& e) {
-    g_last_error = e.what();
-}
+// Install "<STATUS>: <what>" as the thread-local error message.
 void store_error(CrucibleStatus s, const std::string& what) {
     g_last_error = std::string(crucible_status_str(s)) + ": " + what;
 }
@@ -255,15 +253,37 @@ extern "C" CRUCIBLE_API CrucibleStatus crucible_run(
             "output buffers null with num_outputs > 0");
         return CRUCIBLE_ERR_INVALID_ARGUMENT;
     }
+    if (num_inputs > 0 && input_descs == nullptr) {
+        store_error(CRUCIBLE_ERR_INVALID_ARGUMENT, "input_descs is null");
+        return CRUCIBLE_ERR_INVALID_ARGUMENT;
+    }
     try {
-        // Build the C++ inputs map by name.
+        // Build the C++ inputs map by name. Every descriptor is validated
+        // (rank >= 0, non-negative dims, size == prod(shape)) BEFORE any
+        // caller memory is read, so a malformed descriptor cannot make us
+        // read past the caller's buffers.
         std::unordered_map<std::string, crucible::Tensor> cpp_inputs;
         for (int32_t i = 0; i < num_inputs; ++i) {
             const auto& desc = input_descs[i];
-            if (desc.data == nullptr || desc.size < 0 ||
+            if (desc.data == nullptr || desc.size < 0 || desc.rank < 0 ||
                 (desc.rank > 0 && desc.shape == nullptr)) {
                 store_error(CRUCIBLE_ERR_INVALID_ARGUMENT,
                     "input descriptor is malformed");
+                return CRUCIBLE_ERR_INVALID_ARGUMENT;
+            }
+            int64_t expected = 1;
+            for (int32_t d = 0; d < desc.rank; ++d) {
+                const int64_t dim = desc.shape[d];
+                if (dim < 0 || (dim > 0 && expected > INT64_MAX / dim)) {
+                    store_error(CRUCIBLE_ERR_INVALID_ARGUMENT,
+                        "input descriptor has a negative or overflowing shape");
+                    return CRUCIBLE_ERR_INVALID_ARGUMENT;
+                }
+                expected *= dim;
+            }
+            if (expected != desc.size) {
+                store_error(CRUCIBLE_ERR_INVALID_ARGUMENT,
+                    "input descriptor size does not equal the product of its shape");
                 return CRUCIBLE_ERR_INVALID_ARGUMENT;
             }
             std::vector<int64_t> shape(desc.shape, desc.shape + static_cast<size_t>(desc.rank));

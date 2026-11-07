@@ -62,7 +62,12 @@ Tensor::Tensor(std::vector<int64_t> shape, float fill)
 Tensor::Tensor(std::vector<int64_t> shape, std::vector<float> data)
     : shape_(std::move(shape))
 {
-    const int64_t expected = shape_product_or_throw(shape_);
+    // An empty shape with exactly one value is an ONNX scalar (rank 0,
+    // size 1). `Tensor()` (empty shape, no data) remains the size-0
+    // placeholder.
+    const int64_t expected = (shape_.empty() && data.size() == 1)
+                                 ? 1
+                                 : shape_product_or_throw(shape_);
     if (static_cast<int64_t>(data.size()) != expected) {
         throw std::invalid_argument(
             "Tensor: data size " + std::to_string(data.size()) +
@@ -145,10 +150,12 @@ Tensor Tensor::reshape(std::vector<int64_t> new_shape) const {
             " into shape with product " + std::to_string(new_total));
     }
 
-    // Build the result. The data buffer is copied (no aliasing); the plan
-    // promises Tensor is its own copy on every operation.
-    Tensor out(std::move(new_shape));
-    out.data_ = data_;   // copy
+    // The data buffer is copied (no aliasing); the plan promises Tensor is
+    // its own copy on every operation. Assign the members directly so the
+    // buffer is allocated once, not zero-filled and then overwritten.
+    Tensor out;
+    out.shape_ = std::move(new_shape);
+    out.data_ = data_;
     return out;
 }
 

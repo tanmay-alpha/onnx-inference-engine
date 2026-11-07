@@ -45,7 +45,7 @@ set(CRUCIBLE_THIRD_PARTY ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 # Sanity-check that submodules are populated. add_subdirectory() will fail
 # noisily if the directories are empty, but a clear upfront message helps.
-foreach(submod eigen protobuf googletest google-benchmark pybind11)
+foreach(submod eigen googletest google-benchmark pybind11)
     if(NOT EXISTS "${CRUCIBLE_THIRD_PARTY}/${submod}/CMakeLists.txt"
        AND NOT EXISTS "${CRUCIBLE_THIRD_PARTY}/${submod}/README.md"
        AND NOT EXISTS "${CRUCIBLE_THIRD_PARTY}/${submod}/Eigen")
@@ -66,21 +66,11 @@ if(EXISTS "${CRUCIBLE_THIRD_PARTY}/eigen/CMakeLists.txt")
     add_subdirectory(${CRUCIBLE_THIRD_PARTY}/eigen EXCLUDE_FROM_ALL)
 endif()
 
-# Protobuf (used by the ONNX parser in Issue #4)
-if(EXISTS "${CRUCIBLE_THIRD_PARTY}/protobuf/CMakeLists.txt")
-    set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "" FORCE)
-    add_subdirectory(${CRUCIBLE_THIRD_PARTY}/protobuf EXCLUDE_FROM_ALL)
-endif()
-
 # -----------------------------------------------------------------------------
 # Core library: crucible_core
 # -----------------------------------------------------------------------------
-# Issue #1: only tensor.cpp is real. Other sources are intentionally absent
-# until Issues #2-#10 introduce them. This keeps `cmake --build` green while
-# the design is being implemented.
+# The ONNX parser (src/onnx_parser.cpp) is a hermetic protobuf wire-format
+# reader, so the core library depends only on Eigen (header-only).
 set(CRUCIBLE_CORE_SOURCES
     src/tensor.cpp
     src/onnx_parser.cpp
@@ -140,21 +130,12 @@ if(EXISTS "${CRUCIBLE_THIRD_PARTY}/eigen/CMakeLists.txt")
     target_link_libraries(crucible_core PUBLIC Eigen3::Eigen)
 endif()
 
-if(EXISTS "${CRUCIBLE_THIRD_PARTY}/protobuf/CMakeLists.txt")
-    target_link_libraries(crucible_core PUBLIC protobuf::libprotobuf)
-endif()
-
 # Compiler flags
 target_compile_options(crucible_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
 )
 
-# Release-mode optimizations (auto-applied by CMake's RelWithDebInfo/Release)
-target_compile_options(crucible_core PRIVATE
-    $<$<CONFIG:Release>:-O3>
-    $<$<CONFIG:RelWithDebInfo>:-O2>
-)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
     # -march=native is intentionally OFF by default to keep binaries portable.
     # Enable per-build with -DCRUCIBLE_MARCH_NATIVE=ON.

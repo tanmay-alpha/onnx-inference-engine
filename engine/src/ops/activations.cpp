@@ -115,62 +115,43 @@ Tensor sigmoid_forward(const Tensor& input,
 
 // ----------------------------------------------------------------------
 
-// Softmax: shift by per-axis max for numerical stability, then
-// exp / sum-of-exp. Works for any rank by reshaping the input into
-// a 2D matrix (outer × axis_dim) and applying softmax along the
-// inner dimension.
-//
-// This handles the common case (axis = -1, last dim) by treating
-// the tensor as (rows = product of outer dims, cols = axis dim).
-// A more general implementation would stride the input; for the
-// ONNX opset we use (MobileNetV2 in particular), softmax is always
-// along the last axis of a 2D or 4D tensor, so this covers it.
+// Softmax over one axis of an arbitrary-rank tensor. The tensor is viewed
+// as (outer, axis_dim, inner) in row-major order; each of the outer*inner
+// fibres along `axis` is normalised independently with the max-shift trick
+// for numerical stability. Accumulation is in double so long fibres do not
+// lose precision relative to ONNX Runtime.
 
 Tensor softmax_forward(const Tensor& input,
                        const std::unordered_map<std::string, float>& attrs) {
-    int64_t axis = resolve_axis(input, static_cast<int64_t>(
-                                       get_attr(attrs, "axis", -1.0f)));
-    if (axis != input.rank() - 1) {
-        // The current implementation only optimises for the common
-        // axis=-1 case. For axis != last, the 2D-trick is incorrect.
-        // We support a few higher-up positions via a simple explicit
-        // path: collapse outer dims and treat axis as the inner one
-        // (i.e. transpose via copy). For now we refuse anything other
-        // than the last axis to keep the code honest.
-        throw std::invalid_argument(
-            "softmax: only axis = last dim (axis=-1 or axis=rank-1) "
-            "is currently supported; got axis=" + std::to_string(axis));
-    }
     if (input.rank() < 1) {
         throw std::invalid_argument("softmax: input must have rank >= 1");
     }
+    const int64_t axis = resolve_axis(input, static_cast<int64_t>(
+                                             get_attr(attrs, "axis", -1.0f)));
+    const auto& shape = input.shape();
+    const int64_t axis_dim = shape[static_cast<size_t>(axis)];
+    int64_t outer = 1;
+    for (int64_t d = 0; d < axis; ++d) outer *= shape[static_cast<size_t>(d)];
+    int64_t inner = 1;
+    for (int64_t d = axis + 1; d < input.rank(); ++d) inner *= shape[static_cast<size_t>(d)];
 
-    int64_t axis_dim = input.shape()[axis];
-    int64_t outer = input.size() / axis_dim;
-    if (outer == 0) return Tensor(input.shape(), 0.0f);
-
-    // View input as (outer x axis_dim) row-major. For rank-1 inputs
-    // we use a VectorXf to avoid Eigen 3.3 Map base assertions on
-    // (1, N) bindings.
-    Tensor out(input.shape(), 0.0f);
-    if (input.rank() == 1) {
-        Eigen::VectorXf in = view1d(input);
-        Eigen::VectorXf outv(axis_dim);
-        float m = in.maxCoeff();
-        Eigen::VectorXf shifted = in.array() - m;
-        Eigen::VectorXf e = shifted.array().exp();
-        outv = e / e.sum();
-        std::copy(outv.data(), outv.data() + axis_dim, out.data());
-    } else {
-        auto in = view2d(input);
-        auto outm = view2d(out);
-        for (int64_t i = 0; i < outer; ++i) {
-            auto in_row  = in.row(i);
-            auto out_row = outm.row(i);
-            float m = in_row.maxCoeff();
-            Eigen::VectorXf shifted = in_row.array() - m;
-            Eigen::VectorXf e = shifted.array().exp();
-            out_row = e / e.sum();
+    Tensor out(shape, 0.0f);
+    if (input.size() == 0) return out;
+    const float* x = input.data();
+    float* y = out.data();
+    for (int64_t o = 0; o < outer; ++o) {
+        for (int64_t i = 0; i < inner; ++i) {
+            const int64_t base = o * axis_dim * inner + i;
+            float m = x[base];
+            for (int64_t k = 1; k < axis_dim; ++k) m = std::max(m, x[base + k * inner]);
+            double sum = 0.0;
+            for (int64_t k = 0; k < axis_dim; ++k) {
+                const float e = std::exp(x[base + k * inner] - m);
+                y[base + k * inner] = e;
+                sum += e;
+            }
+            const float inv = static_cast<float>(1.0 / sum);
+            for (int64_t k = 0; k < axis_dim; ++k) y[base + k * inner] *= inv;
         }
     }
     return out;
@@ -180,11 +161,10 @@ Tensor softmax_forward(const Tensor& input,
 
 Tensor gelu_forward(const Tensor& input,
                     const std::unordered_map<std::string, float>& attrs) {
-    // ONNX GELU attribute is `approximate`; non-zero means use the
-    // tanh approximation, zero means use the exact erf form.
-    // The plan's AC and the test specification both target the tanh
-    // approximation, so we default to it.
-    int approximate = static_cast<int>(get_attr(attrs, "approximate", 1.0f));
+    // ONNX Gelu (opset 20) has a string attribute approximate = "none" |
+    // "tanh", default "none" (exact erf). The executor maps it onto this
+    // float flag: non-zero = tanh approximation, zero/absent = exact.
+    int approximate = static_cast<int>(get_attr(attrs, "approximate", 0.0f));
 
     Tensor out(input.shape(), 0.0f);
     if (input.size() == 0) return out;

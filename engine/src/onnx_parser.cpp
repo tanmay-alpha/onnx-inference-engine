@@ -212,6 +212,7 @@ struct TensorParseResult {
     std::vector<float>    float_data;
     std::vector<int64_t>  int64_data;
     std::vector<std::uint8_t> raw_data;
+    bool external = false;   // data_location == EXTERNAL (weights in a side file)
 };
 
 static TensorParseResult parse_tensor(Cursor& c) {
@@ -268,10 +269,20 @@ static TensorParseResult parse_tensor(Cursor& c) {
                 t.raw_data = c.read_length_delimited();
                 break;
             }
+            case 14:  // data_location (enum: 0 DEFAULT, 1 EXTERNAL)
+                t.external = c.read_varint() == 1;
+                break;
             default:
                 c.skip_field(tag.wire);
                 break;
         }
+    }
+
+    if (t.external) {
+        throw std::runtime_error(
+            "ONNX: initializer '" + t.name + "' uses external data "
+            "(weights stored outside the .onnx file); Crucible only loads "
+            "self-contained models");
     }
 
     if (!t.raw_data.empty()) {
@@ -396,6 +407,12 @@ static GraphNode parse_node(Cursor& c) {
                               bytes.size());
                 break;
             }
+            case 7: {  // domain (string)
+                auto bytes = c.read_length_delimited();
+                n.domain.assign(reinterpret_cast<const char*>(bytes.data()),
+                                bytes.size());
+                break;
+            }
             case 4: {  // op_type (string)
                 auto bytes = c.read_length_delimited();
                 n.op_type.assign(reinterpret_cast<const char*>(bytes.data()),
@@ -432,19 +449,67 @@ static GraphNode parse_node(Cursor& c) {
     return n;
 }
 
-// Parse a ValueInfoProto. We only need the name (field 1).
-struct ValueInfoParseResult {
-    std::string name;
-};
+// Parse a ValueInfoProto: name (1) and type (2) -> TypeProto.tensor_type (1)
+// -> { elem_type (1), shape (2) -> TensorShapeProto.dim (1, repeated) ->
+// { dim_value (1) | dim_param (2) } }.
+static std::string read_string(Cursor& c) {
+    auto bytes = c.read_length_delimited();
+    return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
 
-static ValueInfoParseResult parse_value_info(Cursor& c) {
-    ValueInfoParseResult v;
+static void parse_shape(Cursor& c, ValueInfo& v) {
+    v.has_shape = true;
     while (!c.eof()) {
         auto tag = c.read_tag();
-        if (tag.field == 1) {
+        if (tag.field == 1 && tag.wire == 2) {  // dim
             auto bytes = c.read_length_delimited();
-            v.name.assign(reinterpret_cast<const char*>(bytes.data()),
-                          bytes.size());
+            Cursor dim(bytes.data(), bytes.size());
+            int64_t value = -1;  // symbolic / unknown
+            while (!dim.eof()) {
+                auto dt = dim.read_tag();
+                if (dt.field == 1 && dt.wire == 0) {
+                    value = static_cast<int64_t>(dim.read_varint());
+                } else {
+                    dim.skip_field(dt.wire);
+                }
+            }
+            v.shape.push_back(value);
+        } else {
+            c.skip_field(tag.wire);
+        }
+    }
+}
+
+static ValueInfo parse_value_info(Cursor& c) {
+    ValueInfo v;
+    while (!c.eof()) {
+        auto tag = c.read_tag();
+        if (tag.field == 1 && tag.wire == 2) {
+            v.name = read_string(c);
+        } else if (tag.field == 2 && tag.wire == 2) {  // TypeProto
+            auto type_bytes = c.read_length_delimited();
+            Cursor type(type_bytes.data(), type_bytes.size());
+            while (!type.eof()) {
+                auto tt = type.read_tag();
+                if (tt.field == 1 && tt.wire == 2) {  // tensor_type
+                    auto tensor_bytes = type.read_length_delimited();
+                    Cursor tensor(tensor_bytes.data(), tensor_bytes.size());
+                    while (!tensor.eof()) {
+                        auto et = tensor.read_tag();
+                        if (et.field == 1 && et.wire == 0) {
+                            v.elem_type = static_cast<int32_t>(tensor.read_varint());
+                        } else if (et.field == 2 && et.wire == 2) {
+                            auto shape_bytes = tensor.read_length_delimited();
+                            Cursor shape(shape_bytes.data(), shape_bytes.size());
+                            parse_shape(shape, v);
+                        } else {
+                            tensor.skip_field(et.wire);
+                        }
+                    }
+                } else {
+                    type.skip_field(tt.wire);
+                }
+            }
         } else {
             c.skip_field(tag.wire);
         }
@@ -489,7 +554,7 @@ static Graph parse_graph(Cursor& c) {
                             ", float_data=" + std::to_string(tp.float_data.size()) +
                             ", raw_data=" + std::to_string(tp.raw_data.size()) + ")");
                     }
-                    g.weights[tp.name] = Tensor(tp.dims, tp.float_data);
+                    g.weights[tp.name] = Tensor(std::move(tp.dims), std::move(tp.float_data));
                 } else if (tp.data_type == onnx_dtype::INT64) {
                     int64_t expected_size = tp.dims.empty() ? 1LL : product_i64(tp.dims);
                     if ((int64_t)tp.int64_data.size() != expected_size) {
@@ -502,21 +567,23 @@ static Graph parse_graph(Cursor& c) {
                     }
                     g.int_initializers[tp.name] = std::move(tp.int64_data);
                 } else {
-                    // Unknown dtype — skip silently; we don't have a
-                    // representation for it.
+                    // No Tensor representation (int32, float16, bool, ...).
+                    // Remember it so a consuming node fails with a precise
+                    // message rather than "dangling edge".
+                    g.unsupported_initializers[tp.name] = tp.data_type;
                 }
                 break;
             }
             case 11: {  // input (ValueInfoProto, repeated)
                 auto bytes = c.read_length_delimited();
                 Cursor inner(bytes.data(), bytes.size());
-                g.input_names.push_back(parse_value_info(inner).name);
+                g.inputs.push_back(parse_value_info(inner));
                 break;
             }
             case 12: {  // output (ValueInfoProto, repeated)
                 auto bytes = c.read_length_delimited();
                 Cursor inner(bytes.data(), bytes.size());
-                g.output_names.push_back(parse_value_info(inner).name);
+                g.outputs.push_back(parse_value_info(inner));
                 break;
             }
             default:
@@ -524,32 +591,56 @@ static Graph parse_graph(Cursor& c) {
                 break;
         }
     }
-    // Filter initializers (weights) out of input_names, as ONNX lists them in both
-    std::vector<std::string> actual_inputs;
-    actual_inputs.reserve(g.input_names.size());
-    for (const auto& name : g.input_names) {
-        if (g.weights.find(name) == g.weights.end() &&
-            g.int_initializers.find(name) == g.int_initializers.end()) {
-            actual_inputs.push_back(name);
+    // IR < 4 models list every initializer in graph.input as well; those are
+    // not runtime inputs, so drop them.
+    std::vector<ValueInfo> runtime_inputs;
+    runtime_inputs.reserve(g.inputs.size());
+    for (auto& vi : g.inputs) {
+        if (g.weights.count(vi.name) || g.int_initializers.count(vi.name) ||
+            g.unsupported_initializers.count(vi.name)) {
+            continue;
         }
+        g.input_names.push_back(vi.name);
+        runtime_inputs.push_back(std::move(vi));
     }
-    g.input_names = std::move(actual_inputs);
+    g.inputs = std::move(runtime_inputs);
+    for (const auto& vi : g.outputs) g.output_names.push_back(vi.name);
     return g;
 }
 
-// Parse a ModelProto. Only field 7 (graph) is required.
+// Parse a ModelProto: graph (7) and opset_import (8). Only the default
+// domain's opset version is kept — it selects operator semantics that
+// changed across opsets (e.g. Softmax before/after opset 13).
 static Model parse_model(Cursor& c) {
     Model m;
+    int64_t opset = 0;
     while (!c.eof()) {
         auto tag = c.read_tag();
-        if (tag.field == 7) {
+        if (tag.field == 7 && tag.wire == 2) {
             auto bytes = c.read_length_delimited();
             Cursor inner(bytes.data(), bytes.size());
             m.graph = parse_graph(inner);
+        } else if (tag.field == 8 && tag.wire == 2) {
+            auto bytes = c.read_length_delimited();
+            Cursor inner(bytes.data(), bytes.size());
+            std::string domain;
+            int64_t version = 0;
+            while (!inner.eof()) {
+                auto t = inner.read_tag();
+                if (t.field == 1 && t.wire == 2) {
+                    domain = read_string(inner);
+                } else if (t.field == 2 && t.wire == 0) {
+                    version = static_cast<int64_t>(inner.read_varint());
+                } else {
+                    inner.skip_field(t.wire);
+                }
+            }
+            if (domain.empty() || domain == "ai.onnx") opset = version;
         } else {
             c.skip_field(tag.wire);
         }
     }
+    m.graph.opset = opset;
     return m;
 }
 

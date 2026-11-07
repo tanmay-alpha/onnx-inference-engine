@@ -188,7 +188,7 @@ TEST(AvgPool, Basic2x2Stride2) {
         9, 10, 11, 12,
        13, 14, 15, 16
     });
-    Tensor Y = avgpool_forward(X, 2, 2, 2, 2, 0, 0);
+    Tensor Y = avgpool_forward(X, 2, 2, 2, 2, 0, 0, false);
     EXPECT_EQ(Y.shape(), (std::vector<int64_t>{1, 1, 2, 2}));
     EXPECT_FLOAT_EQ(Y.at({0, 0, 0, 0}),  3.5f);
     EXPECT_FLOAT_EQ(Y.at({0, 0, 0, 1}),  5.5f);
@@ -206,7 +206,7 @@ TEST(AvgPool, ThreeByThreeStrideOne) {
         15, 16, 17, 18, 19,
         20, 21, 22, 23, 24
     });
-    Tensor Y = avgpool_forward(X, 3, 3, 1, 1, 0, 0);
+    Tensor Y = avgpool_forward(X, 3, 3, 1, 1, 0, 0, false);
     EXPECT_EQ(Y.shape(), (std::vector<int64_t>{1, 1, 3, 3}));
     const std::vector<float> expected = {
          6.0f,  7.0f,  8.0f,
@@ -227,7 +227,7 @@ TEST(AvgPool, CountIncludePadIsOne) {
         1, 1, 1,
         1, 1, 1
     });
-    Tensor Y = avgpool_forward(X, 3, 3, 1, 1, 1, 1);
+    Tensor Y = avgpool_forward(X, 3, 3, 1, 1, 1, 1, true);
     EXPECT_EQ(Y.shape(), (std::vector<int64_t>{1, 1, 3, 3}));
     const float expected_corner = 4.0f / 9.0f;
     const float expected_edge   = 6.0f / 9.0f;
@@ -235,6 +235,16 @@ TEST(AvgPool, CountIncludePadIsOne) {
     EXPECT_FLOAT_EQ(Y.at({0, 0, 0, 0}), expected_corner);
     EXPECT_FLOAT_EQ(Y.at({0, 0, 0, 1}), expected_edge);
     EXPECT_FLOAT_EQ(Y.at({0, 0, 1, 1}), expected_center);
+}
+
+TEST(AvgPool, CountIncludePadZeroUsesInBoundsCount) {
+    // ONNX default (count_include_pad=0): padded positions are excluded
+    // from the denominator, so an all-ones input averages to 1 everywhere.
+    Tensor X = make<float>({1, 1, 3, 3}, std::vector<float>(9, 1.0f));
+    Tensor Y = avgpool_forward(X, 3, 3, 1, 1, 1, 1, false);
+    for (int i = 0; i < 9; ++i) {
+        EXPECT_FLOAT_EQ(Y.data()[i], 1.0f) << "i=" << i;
+    }
 }
 
 TEST(AvgPool, MultiChannelIndependent) {
@@ -247,7 +257,7 @@ TEST(AvgPool, MultiChannelIndependent) {
         10, 20,
         30, 40
     });
-    Tensor Y = avgpool_forward(X, 2, 2, 1, 1, 0, 0);
+    Tensor Y = avgpool_forward(X, 2, 2, 1, 1, 0, 0, false);
     EXPECT_EQ(Y.shape(), (std::vector<int64_t>{1, 2, 1, 1}));
     EXPECT_FLOAT_EQ(Y.at({0, 0, 0, 0}),  2.5f);  // (1+2+3+4)/4
     EXPECT_FLOAT_EQ(Y.at({0, 1, 0, 0}), 25.0f);  // (10+20+30+40)/4
@@ -262,7 +272,7 @@ TEST(AvgPool, MaxPoolAndAvgPoolDiffer) {
         -2, 4
     });
     Tensor M = maxpool_forward(X, 2, 2, 1, 1, 0, 0);
-    Tensor A = avgpool_forward(X, 2, 2, 1, 1, 0, 0);
+    Tensor A = avgpool_forward(X, 2, 2, 1, 1, 0, 0, false);
     EXPECT_FLOAT_EQ(M.at({0, 0, 0, 0}),  4.0f);
     EXPECT_FLOAT_EQ(A.at({0, 0, 0, 0}),  1.5f);  // (1+3-2+4)/4
 }
@@ -275,7 +285,7 @@ TEST(AvgPool, SourceUnchanged) {
     });
     const float* X_ptr = X.data();
     const Tensor X_before = X;
-    (void)avgpool_forward(X, 2, 2, 1, 1, 0, 0);
+    (void)avgpool_forward(X, 2, 2, 1, 1, 0, 0, false);
     EXPECT_EQ(X.data(), X_ptr);
     for (int64_t i = 0; i < X.size(); ++i) {
         EXPECT_FLOAT_EQ(X.data()[i], X_before.data()[i]);

@@ -305,6 +305,10 @@ TEST(Executor, ConcatOperator) {
     concat.name = "c0";
     concat.inputs = {"A", "B"};
     concat.outputs = {"Y"};
+    Attribute axis0;
+    axis0.type = Attribute::Type::Int;
+    axis0.i = 0;
+    concat.attributes["axis"] = axis0;
     model.graph.node = {concat};
 
     Tensor A({2, 3}, {1, 2, 3, 4, 5, 6});
@@ -355,13 +359,39 @@ TEST(Executor, AddOperatorBroadcast) {
     add.outputs = {"Y"};
     model.graph.node = {add};
 
+    // Numpy/ONNX multidirectional broadcasting aligns trailing axes:
+    // [1,2,1,2] + [2] adds B along the LAST axis.
     Tensor A({1, 2, 1, 2}, {10, 20, 30, 40});
     Tensor B({2}, {1, 2});
     std::unordered_map<std::string, Tensor> inputs{{"A", A}, {"B", B}};
 
     Tensor Y = run_inference(model, inputs);
     EXPECT_EQ(Y.shape(), (std::vector<int64_t>{1, 2, 1, 2}));
-    std::vector<float> expected = {11, 21, 32, 42};
+    std::vector<float> expected = {11, 22, 31, 42};
+    for (int64_t i = 0; i < Y.size(); ++i) {
+        EXPECT_FLOAT_EQ(Y.data()[i], expected[i]);
+    }
+}
+
+TEST(Executor, AddOperatorBroadcastsBothOperands) {
+    // [2,1] + [1,3] -> [2,3]: each side is stretched along its size-1 axis.
+    Model model;
+    model.input_names = {"A", "B"};
+    model.output_names = {"Y"};
+    GraphNode add;
+    add.op_type = "Add";
+    add.name = "add0";
+    add.inputs = {"A", "B"};
+    add.outputs = {"Y"};
+    model.graph.node = {add};
+
+    Tensor A({2, 1}, {10, 20});
+    Tensor B({1, 3}, {1, 2, 3});
+    std::unordered_map<std::string, Tensor> inputs{{"A", A}, {"B", B}};
+
+    Tensor Y = run_inference(model, inputs);
+    EXPECT_EQ(Y.shape(), (std::vector<int64_t>{2, 3}));
+    std::vector<float> expected = {11, 12, 13, 21, 22, 23};
     for (int64_t i = 0; i < Y.size(); ++i) {
         EXPECT_FLOAT_EQ(Y.data()[i], expected[i]);
     }

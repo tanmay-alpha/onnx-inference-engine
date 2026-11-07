@@ -61,9 +61,21 @@ struct Attribute {
 struct GraphNode {
     std::string op_type;                                      // "MatMul", "Relu", ...
     std::string name;                                         // optional user-provided name
+    std::string domain;                                       // "" or "ai.onnx" = default domain
     std::vector<std::string> inputs;
     std::vector<std::string> outputs;
     std::unordered_map<std::string, Attribute> attributes;    // by attribute name
+};
+
+// Declared type of a graph input/output (ValueInfoProto). `shape` uses -1
+// for symbolic or missing dims; `has_shape` is false when the model gives
+// no shape at all. `elem_type` is the ONNX TensorProto.DataType code
+// (1 = FLOAT, 7 = INT64, ...; 0 = unknown).
+struct ValueInfo {
+    std::string name;
+    int32_t elem_type = 0;
+    bool has_shape = false;
+    std::vector<int64_t> shape;
 };
 
 // Top-level graph: nodes + initializers + IO lists.
@@ -76,8 +88,17 @@ struct Graph {
     //   - int_initializers: non-float initializers as a vector of int64
     std::unordered_map<std::string, Tensor> weights;
     std::unordered_map<std::string, std::vector<int64_t>> int_initializers;
-    std::vector<std::string> input_names;
+    // Initializers whose dtype Crucible cannot represent (name -> ONNX
+    // data_type code). Kept so the executor can say *why* a tensor is
+    // missing instead of reporting a dangling edge.
+    std::unordered_map<std::string, int32_t> unsupported_initializers;
+    std::vector<std::string> input_names;    // runtime inputs (initializers excluded)
     std::vector<std::string> output_names;
+    std::vector<ValueInfo> inputs;           // same order as input_names (may be empty
+    std::vector<ValueInfo> outputs;          // for hand-built graphs in unit tests)
+    // Default-domain ("" / "ai.onnx") opset version from ModelProto.opset_import.
+    // 0 = not declared (hand-built graphs); treated as the latest semantics.
+    int64_t opset = 0;
 };
 
 // Top-level Model struct (per ENGINEERING_PLAN.md §4).

@@ -1,14 +1,16 @@
 // 2D convolution implementation — see conv2d.hpp for the public API.
 //
-// Algorithm: im2col + GEMM.
-//   For each (output row, output col) the input receptive field of shape
-//   (C_in, kH, kW) is laid out as one row of a wide matrix. The weight
-//   tensor is reshaped to (C_out, C_in*kH*kW). One matrix multiply then
-//   produces (C_out, out_h*out_w) which is reshaped back to the NCHW
-//   output. Per-channel bias is broadcast and added in-place.
+// Algorithm: im2col + GEMM, with two specialisations.
+//   * General: each group's receptive fields are laid out as a
+//     (C_in_g*kH*kW, out_h*out_w) column matrix; the weight tensor viewed
+//     in place as (C_out_g, C_in_g*kH*kW) multiplies it, and the product
+//     is written directly into the NCHW output. Bias is added per row.
+//   * 1x1 / stride 1 / no padding: the input slice already is the column
+//     matrix, so im2col is skipped.
+//   * Depthwise (one channel per group): direct sliding-window loop.
 //
-// We follow the PyTorch / ONNX semantics of cross-correlation (no kernel
-// flip), and zero-pad positions outside the input.
+// Cross-correlation semantics (no kernel flip) and zero padding, as in
+// ONNX / PyTorch.
 
 #include "crucible/ops/conv2d.hpp"
 
@@ -30,64 +32,39 @@ namespace {
 using RowMatrix =
     Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
-// im2col: produce a (out_h*out_w, C_in*kH*kW) row-major matrix where row
-// r holds the receptive field that produces output position
-// (r / out_w, r % out_w).
-//
-// Memory layout of col_mat for batch b (the outer loop in conv2d_forward
-// calls this once per batch):
-//   col_mat[r, c * kH * kW + kh * kW + kw]
-//     = X[b, c, h_in, w_in]   where
-//         h_in = (r / out_w) * stride_h + kh - pad_h
-//         w_in = (r % out_w) * stride_w + kw - pad_w
-//     = 0.0 if (h_in, w_in) is outside the input bounds (zero padding).
+// im2col: fill `col` (C_in*kH*kW, out_h*out_w), row-major, with
+//   col[c*kH*kW + kh*kW + kw, oh*out_w + ow] = X[c, h_in, w_in]
+//     h_in = oh*stride_h + kh - pad_h,  w_in = ow*stride_w + kw - pad_w
+// and 0 where (h_in, w_in) falls in the padding. `x` points at one image's
+// (C_in, H, W) slice. Rows match the weight layout (C_out, C_in, kH, kW),
+// so the product W * col needs no transpose.
 void im2col(const float* x, int64_t C_in, int64_t H, int64_t W,
             int64_t kH, int64_t kW,
             int64_t out_h, int64_t out_w,
             int64_t stride_h, int64_t stride_w,
             int64_t pad_h, int64_t pad_w,
-            RowMatrix& col_mat) {
-    // Eigen indexing into the row-major matrix. operator()(r, c) honours
-    // the RowMajor storage order we declared above.
-    for (int64_t r = 0; r < out_h * out_w; ++r) {
-        const int64_t oh = r / out_w;
-        const int64_t ow = r % out_w;
-        int64_t col = 0;
-        for (int64_t c = 0; c < C_in; ++c) {
-            for (int64_t kh = 0; kh < kH; ++kh) {
-                const int64_t h_in = oh * stride_h + kh - pad_h;
-                for (int64_t kw = 0; kw < kW; ++kw) {
-                    const int64_t w_in = ow * stride_w + kw - pad_w;
-                    float v = 0.0f;
-                    if (h_in >= 0 && h_in < H && w_in >= 0 && w_in < W) {
-                        // Row-major offset into the (C_in, H, W) input
-                        // slice for batch b.
-                        v = x[c * H * W + h_in * W + w_in];
+            RowMatrix& col) {
+    float* dst = col.data();
+    for (int64_t c = 0; c < C_in; ++c) {
+        const float* xc = x + c * H * W;
+        for (int64_t kh = 0; kh < kH; ++kh) {
+            for (int64_t kw = 0; kw < kW; ++kw) {
+                for (int64_t oh = 0; oh < out_h; ++oh) {
+                    const int64_t h_in = oh * stride_h + kh - pad_h;
+                    if (h_in < 0 || h_in >= H) {
+                        std::fill(dst, dst + out_w, 0.0f);
+                        dst += out_w;
+                        continue;
                     }
-                    col_mat(static_cast<Eigen::Index>(r),
-                            static_cast<Eigen::Index>(col)) = v;
-                    ++col;
+                    const float* xrow = xc + h_in * W;
+                    for (int64_t ow = 0; ow < out_w; ++ow) {
+                        const int64_t w_in = ow * stride_w + kw - pad_w;
+                        *dst++ = (w_in >= 0 && w_in < W) ? xrow[w_in] : 0.0f;
+                    }
                 }
             }
         }
     }
-}
-
-// Reshape weight (C_out, C_in, kH, kW) row-major → RowMatrix (C_out, C_in*kH*kW).
-// The copy is unavoidable: weight may live in any Tensor whose storage we
-// don't own, and Eigen::Map would alias it under our downstream multiply.
-RowMatrix weight_to_2d(const Tensor& weight, int64_t C_out, int64_t C_in,
-                       int64_t kH, int64_t kW) {
-    const int64_t ksize = C_in * kH * kW;
-    RowMatrix wmat(C_out, ksize);
-    // The weight Tensor is row-major (C_out, C_in, kH, kW). For row c_out
-    // and column index c * kH * kW + kh * kW + kw, the source offset is
-    //   c_out * (C_in*kH*kW) + c * (kH*kW) + kh * kW + kw
-    // which matches the layout we built in im2col for col_mat — same
-    // column indexing convention. No transpose needed at multiplication
-    // time.
-    std::copy(weight.data(), weight.data() + C_out * ksize, wmat.data());
-    return wmat;
 }
 
 }  // namespace
@@ -167,117 +144,96 @@ Tensor conv2d_forward(const Tensor& input,
         bias_ptr = bias.data();
     }
 
-    if (p.groups == 1) {
-        // Validate input channels matching filter channel dimension
-        if (w_C != C_in) {
-            throw std::invalid_argument(
-                "conv2d_forward: weight C_in (" + std::to_string(w_C) +
-                ") != input C (" + std::to_string(C_in) + ") for groups=1");
-        }
+    // ---- 4. Group bookkeeping ------------------------------------------------
+    if (C_in % p.groups != 0) {
+        throw std::invalid_argument(
+            "conv2d_forward: input channels (" + std::to_string(C_in) +
+            ") must be divisible by groups (" + std::to_string(p.groups) + ")");
+    }
+    if (C_out % p.groups != 0) {
+        throw std::invalid_argument(
+            "conv2d_forward: output channels (" + std::to_string(C_out) +
+            ") must be divisible by groups (" + std::to_string(p.groups) + ")");
+    }
+    const int64_t C_in_g  = C_in / p.groups;
+    const int64_t C_out_g = C_out / p.groups;
+    if (w_C != C_in_g) {
+        throw std::invalid_argument(
+            "conv2d_forward: weight C_in (" + std::to_string(w_C) +
+            ") != input channels per group (" + std::to_string(C_in_g) +
+            ") for groups=" + std::to_string(p.groups));
+    }
 
-        // ---- 4. Reshape weight to (C_out, C_in*kH*kW) row-major -----------------
-        RowMatrix wmat = weight_to_2d(weight, C_out, C_in, kH, kW);
+    Tensor output({N, C_out, out_h, out_w}, 0.0f);
+    const int64_t HW_out = out_h * out_w;
 
-        // ---- 5. Allocate output -------------------------------------------------
-        Tensor output({N, C_out, out_h, out_w}, 0.0f);
-        const int64_t ksize = C_in * kH * kW;
-
-        // ---- 6. Per-batch loop: im2col + GEMM + bias ----------------------------
+    // ---- 5a. Depthwise (one input and one output channel per group) --------
+    // A per-group GEMM would be a 1 x (kH*kW) by (kH*kW) x HW product — tiny
+    // matrices dominated by im2col overhead — so compute it directly.
+    if (C_in_g == 1 && C_out_g == 1) {
         for (int64_t n = 0; n < N; ++n) {
-            // Pointer to this batch's input slice (N, C_in, H, W).
-            const float* x = input.data() + n * (C_in * H * W);
-
-            // im2col → (out_h*out_w, ksize) row-major.
-            RowMatrix col_mat(out_h * out_w, ksize);
-            im2col(x, C_in, H, W, kH, kW,
-                   out_h, out_w,
-                   p.stride_h, p.stride_w, p.pad_h, p.pad_w,
-                   col_mat);
-
-            // result = wmat * col_mat^T  →  (C_out, out_h*out_w)
-            RowMatrix result = wmat * col_mat.transpose();
-
-            // Add bias per channel and copy into the output tensor.
-            for (int64_t oc = 0; oc < C_out; ++oc) {
-                const float b = bias_ptr ? bias_ptr[oc] : 0.0f;
-                for (int64_t r = 0; r < out_h * out_w; ++r) {
-                    const float v = result(static_cast<Eigen::Index>(oc),
-                                           static_cast<Eigen::Index>(r)) + b;
-                    const int64_t oh = r / out_w;
-                    const int64_t ow = r % out_w;
-                    output.at({n, oc, oh, ow}) = v;
-                }
-            }
-        }
-        return output;
-    } else {
-        // Grouped/depthwise convolution path (p.groups > 1)
-        if (C_in % p.groups != 0) {
-            throw std::invalid_argument(
-                "conv2d_forward: input channels (" + std::to_string(C_in) +
-                ") must be divisible by groups (" + std::to_string(p.groups) + ")");
-        }
-        if (C_out % p.groups != 0) {
-            throw std::invalid_argument(
-                "conv2d_forward: output channels (" + std::to_string(C_out) +
-                ") must be divisible by groups (" + std::to_string(p.groups) + ")");
-        }
-
-        const int64_t C_in_g  = C_in / p.groups;
-        const int64_t C_out_g = C_out / p.groups;
-
-        if (w_C != C_in_g) {
-            throw std::invalid_argument(
-                "conv2d_forward: weight C_in (" + std::to_string(w_C) +
-                ") != input C_per_group (" + std::to_string(C_in_g) + ")");
-        }
-
-        // ---- 4. Allocate output -------------------------------------------------
-        Tensor output({N, C_out, out_h, out_w}, 0.0f);
-
-        // ---- 5. Pre-reshape weights for each group -----------------------------
-        std::vector<RowMatrix> w_mats;
-        w_mats.reserve(p.groups);
-        for (int g = 0; g < p.groups; ++g) {
-            const float* w_slice_start = weight.data() + g * C_out_g * C_in_g * kH * kW;
-            Tensor temp_w({C_out_g, C_in_g, kH, kW}, std::vector<float>(w_slice_start, w_slice_start + C_out_g * C_in_g * kH * kW));
-            w_mats.push_back(weight_to_2d(temp_w, C_out_g, C_in_g, kH, kW));
-        }
-
-        // ---- 6. Per-batch & Per-group loop: im2col + GEMM + bias ----------------
-        const int64_t ksize = C_in_g * kH * kW;
-
-        for (int64_t n = 0; n < N; ++n) {
-            for (int g = 0; g < p.groups; ++g) {
-                // Pointer to this batch's, this group's input slice (C_in_g, H, W).
-                const float* x = input.data() + n * (C_in * H * W) + g * (C_in_g * H * W);
-
-                // im2col → (out_h*out_w, ksize) row-major.
-                RowMatrix col_mat(out_h * out_w, ksize);
-                im2col(x, C_in_g, H, W, kH, kW,
-                       out_h, out_w,
-                       p.stride_h, p.stride_w, p.pad_h, p.pad_w,
-                       col_mat);
-
-                // result = wmat_g * col_mat^T  →  (C_out_g, out_h*out_w)
-                RowMatrix result = w_mats[g] * col_mat.transpose();
-
-                // Add bias per channel and copy into the output tensor.
-                for (int64_t oc_g = 0; oc_g < C_out_g; ++oc_g) {
-                    const int64_t oc = g * C_out_g + oc_g;
-                    const float b = bias_ptr ? bias_ptr[oc] : 0.0f;
-                    for (int64_t r = 0; r < out_h * out_w; ++r) {
-                        const float v = result(static_cast<Eigen::Index>(oc_g),
-                                               static_cast<Eigen::Index>(r)) + b;
-                        const int64_t oh = r / out_w;
-                        const int64_t ow = r % out_w;
-                        output.at({n, oc, oh, ow}) = v;
+            for (int64_t c = 0; c < C_out; ++c) {
+                const float* xc = input.data() + (n * C_in + c) * H * W;
+                const float* wc = weight.data() + c * kH * kW;
+                float* yc = output.data() + (n * C_out + c) * HW_out;
+                const float b = bias_ptr ? bias_ptr[c] : 0.0f;
+                for (int64_t oh = 0; oh < out_h; ++oh) {
+                    for (int64_t ow = 0; ow < out_w; ++ow) {
+                        float acc = 0.0f;
+                        for (int64_t kh = 0; kh < kH; ++kh) {
+                            const int64_t h_in = oh * p.stride_h + kh - p.pad_h;
+                            if (h_in < 0 || h_in >= H) continue;
+                            const float* xrow = xc + h_in * W;
+                            const float* wrow = wc + kh * kW;
+                            for (int64_t kw = 0; kw < kW; ++kw) {
+                                const int64_t w_in = ow * p.stride_w + kw - p.pad_w;
+                                if (w_in < 0 || w_in >= W) continue;
+                                acc += xrow[w_in] * wrow[kw];
+                            }
+                        }
+                        yc[oh * out_w + ow] = acc + b;
                     }
                 }
             }
         }
         return output;
     }
+
+    // ---- 5b. General grouped convolution: im2col + GEMM ---------------------
+    // Weight (C_out, C_in_g, kH, kW) row-major is already the
+    // (C_out_g, C_in_g*kH*kW) matrix for each group, so it is viewed in
+    // place. The GEMM result is written straight into the NCHW output.
+    using ConstMap = Eigen::Map<const RowMatrix>;
+    using OutMap = Eigen::Map<RowMatrix>;
+    const int64_t ksize = C_in_g * kH * kW;
+    const bool pointwise = kH == 1 && kW == 1 && p.stride_h == 1 &&
+                           p.stride_w == 1 && p.pad_h == 0 && p.pad_w == 0;
+    RowMatrix col;
+    if (!pointwise) col.resize(ksize, HW_out);
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t g = 0; g < p.groups; ++g) {
+            const float* x = input.data() + (n * C_in + g * C_in_g) * H * W;
+            ConstMap wg(weight.data() + g * C_out_g * ksize, C_out_g, ksize);
+            OutMap yg(output.data() + (n * C_out + g * C_out_g) * HW_out,
+                      C_out_g, HW_out);
+            if (pointwise) {
+                // 1x1, stride 1, no pad: the input slice IS the (C_in_g, H*W)
+                // column matrix.
+                yg.noalias() = wg * ConstMap(x, C_in_g, HW_out);
+            } else {
+                im2col(x, C_in_g, H, W, kH, kW, out_h, out_w,
+                       p.stride_h, p.stride_w, p.pad_h, p.pad_w, col);
+                yg.noalias() = wg * col;
+            }
+            if (bias_ptr) {
+                for (int64_t oc = 0; oc < C_out_g; ++oc) {
+                    yg.row(oc).array() += bias_ptr[g * C_out_g + oc];
+                }
+            }
+        }
+    }
+    return output;
 }
 
 }  // namespace crucible::ops
