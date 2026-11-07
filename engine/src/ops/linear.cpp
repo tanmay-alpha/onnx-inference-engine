@@ -64,11 +64,11 @@ Tensor matmul(const Tensor& A, const Tensor& B) {
             "matmul: inner dimension mismatch (A.cols=" +
             std::to_string(a.cols) + ", B.rows=" + std::to_string(b.rows) + ")");
     }
-    RowMatrix Ya = view(A);
-    RowMatrix Yb = view(B);
-    // Eigen product is fully expression-templated; assigning to RowMatrix
-    // forces materialisation in row-major so the data layout matches
-    // the rest of the engine.
+    check_element_budget(a.rows * b.cols, "MatMul output");
+    // Map the operands in place (no copy); the product is materialised
+    // row-major so the data layout matches the rest of the engine.
+    const auto Ya = view(A);
+    const auto Yb = view(B);
     RowMatrix Yc = Ya * Yb;
 
     // Copy the Eigen result into a fresh Tensor (Eigen allocates its
@@ -100,10 +100,11 @@ Tensor gemm(const Tensor& A, const Tensor& B, const Tensor& C,
             ", B=" + std::to_string(K2) + ")");
     }
 
-    RowMatrix Ya = view(A);
-    RowMatrix Yb = view(B);
+    check_element_budget(M * N, "Gemm output");
+    const auto Ya = view(A);
+    const auto Yb = view(B);
 
-    RowMatrix Yc = RowMatrix::Zero(M, N);
+    RowMatrix Yc(M, N);
     if (!transA) {
         if (!transB) Yc = Ya * Yb;
         else         Yc = Ya * Yb.transpose();

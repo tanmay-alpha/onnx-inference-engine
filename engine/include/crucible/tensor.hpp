@@ -30,9 +30,51 @@
 
 #include <cstdint>
 #include <iosfwd>
+#include <stdexcept>
 #include <vector>
 
 namespace crucible {
+
+// ---- Per-thread allocation budget ------------------------------------------
+// Models are untrusted input: a few bytes of ONNX can describe a tensor of
+// billions of elements (e.g. Conv with huge pads). While a ScopedElementLimit
+// is alive on a thread, every Tensor allocation and every large engine
+// temporary on that thread is checked against `max_elements` and fails with
+// ResourceLimitError instead of exhausting memory. 0 = unlimited.
+class ResourceLimitError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+class ScopedElementLimit {
+public:
+    explicit ScopedElementLimit(int64_t max_elements);
+    ~ScopedElementLimit();
+    ScopedElementLimit(const ScopedElementLimit&) = delete;
+    ScopedElementLimit& operator=(const ScopedElementLimit&) = delete;
+private:
+    int64_t previous_;
+};
+
+// Throws ResourceLimitError if `elements` exceeds the active limit.
+void check_element_budget(int64_t elements, const char* what);
+
+// Wall-clock deadline for the current thread's run. While a ScopedDeadline
+// is alive, check_deadline() throws ResourceLimitError once it has passed.
+// The executor calls it between nodes and the heavy kernels call it in
+// their outer loops, so a run stops shortly after its deadline instead of
+// holding a worker indefinitely. timeout_ms <= 0 = no deadline.
+class ScopedDeadline {
+public:
+    explicit ScopedDeadline(int64_t timeout_ms);
+    ~ScopedDeadline();
+    ScopedDeadline(const ScopedDeadline&) = delete;
+    ScopedDeadline& operator=(const ScopedDeadline&) = delete;
+private:
+    int64_t previous_;
+};
+
+void check_deadline(const char* where);
 
 class Tensor {
 public:
