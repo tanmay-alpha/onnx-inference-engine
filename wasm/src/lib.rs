@@ -1,3 +1,26 @@
+//! Crucible WASM runtime: a small, separate pure-Rust ONNX interpreter for the
+//! browser. It is NOT the native C++ engine and supports only: Add (numpy
+//! multidirectional broadcasting), MatMul (rank-2 operands), Relu, Sigmoid,
+//! Softmax (opset-aware: opset >= 13 default axis -1 on that axis only;
+//! opset < 13 default axis 1 with 2-D coercion). Models must have exactly one
+//! float32 runtime input, float32 initializers, and no external data.
+//! Parity vs ONNX Runtime: tests/parity.rs (fixtures from tests/gen_fixtures.py).
+//!
+//! JS exports (wasm-bindgen):
+//! - `runInference(modelBytes: Uint8Array, input: Float32Array, shape: Int32Array): Float32Array`
+//! - `runFraudModel(modelBytes, amount, oldBalanceOrig, newBalanceOrig, oldBalanceDest, newBalanceDest, isCashOut, isTransfer): number`
+//! - `outputShape(modelBytes: Uint8Array, input: Float32Array, shape: Int32Array): Int32Array`
+//!   — runs the model and returns the first output's shape
+//! - `supportedOps(): string[]` — `["Add", "MatMul", "Relu", "Sigmoid", "Softmax"]`
+//! - `modelInfo(modelBytes: Uint8Array): string` — JSON:
+//!   `{opset: number|null, num_nodes, inputs: [{name, elem_type, shape: number[]|null}],
+//!   outputs: [...], ops_used: string[], supported: bool, unsupported_reasons: string[]}`
+//!   (symbolic dims are -1; `inputs` excludes initializers; non-default-domain
+//!   ops are reported as `domain::op`).
+//!
+//! All functions throw a string error (never return zeros) on unsupported ops,
+//! incompatible shapes, or malformed models.
+
 #![allow(clippy::excessive_precision, clippy::too_many_arguments)]
 
 use wasm_bindgen::prelude::*;
@@ -167,7 +190,8 @@ fn parse_attribute(c: &mut Cursor) -> Result<Attribute, String> {
             4 => {
                 attr.s = c.read_length_delimited()?.to_vec();
             }
-            7 => {
+            // AttributeProto.ints = 8
+            8 => {
                 if wire == 2 {
                     let bytes = c.read_length_delimited()?;
                     let mut inner = Cursor::new(bytes);
@@ -178,7 +202,8 @@ fn parse_attribute(c: &mut Cursor) -> Result<Attribute, String> {
                     attr.ints.push(c.read_varint()? as i64);
                 }
             }
-            8 => {
+            // AttributeProto.floats = 7
+            7 => {
                 if wire == 2 {
                     let bytes = c.read_length_delimited()?;
                     let mut inner = Cursor::new(bytes);
@@ -202,10 +227,25 @@ fn parse_attribute(c: &mut Cursor) -> Result<Attribute, String> {
 #[derive(Clone, Debug, Default)]
 pub struct GraphNode {
     pub op_type: String,
+    /// Operator domain ("" = default ONNX domain).
+    pub domain: String,
     pub name: String,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub attributes: HashMap<String, Attribute>,
+}
+
+impl GraphNode {
+    /// Operator key used for dispatch/reporting: `op_type` for the default
+    /// domain, `domain::op_type` otherwise (so custom-domain ops never alias
+    /// a default-domain kernel).
+    pub fn op_key(&self) -> String {
+        if self.domain.is_empty() || self.domain == "ai.onnx" {
+            self.op_type.clone()
+        } else {
+            format!("{}::{}", self.domain, self.op_type)
+        }
+    }
 }
 
 fn parse_node(c: &mut Cursor) -> Result<GraphNode, String> {
@@ -235,6 +275,10 @@ fn parse_node(c: &mut Cursor) -> Result<GraphNode, String> {
                 let attr = parse_attribute(&mut inner)?;
                 node.attributes.insert(attr.name.clone(), attr);
             }
+            7 => {
+                node.domain = String::from_utf8(c.read_length_delimited()?.to_vec())
+                    .map_err(|_| "ONNX: invalid UTF-8 in node domain")?;
+            }
             _ => {
                 c.skip_field(wire)?;
             }
@@ -251,6 +295,8 @@ struct TensorParseResult {
     int64_data: Vec<i64>,
 }
 
+// TensorProto field numbers: dims=1, data_type=2, float_data=4, int64_data=7,
+// name=8, raw_data=9, external_data=13, data_location=14.
 fn parse_tensor(c: &mut Cursor) -> Result<TensorParseResult, String> {
     let mut res = TensorParseResult {
         name: String::new(),
@@ -259,6 +305,8 @@ fn parse_tensor(c: &mut Cursor) -> Result<TensorParseResult, String> {
         float_data: Vec::new(),
         int64_data: Vec::new(),
     };
+    let mut raw: Option<&[u8]> = None;
+    let mut external = false;
     while !c.eof() {
         let (field, wire) = c.read_tag()?;
         match field {
@@ -276,49 +324,42 @@ fn parse_tensor(c: &mut Cursor) -> Result<TensorParseResult, String> {
             2 => {
                 res.data_type = c.read_varint()? as i32;
             }
+            4 => {
+                if wire == 2 {
+                    let bytes = c.read_length_delimited()?;
+                    let mut inner = Cursor::new(bytes);
+                    while !inner.eof() {
+                        res.float_data.push(f32::from_bits(inner.read_fixed32()?));
+                    }
+                } else {
+                    res.float_data.push(f32::from_bits(c.read_fixed32()?));
+                }
+            }
+            7 => {
+                if wire == 2 {
+                    let bytes = c.read_length_delimited()?;
+                    let mut inner = Cursor::new(bytes);
+                    while !inner.eof() {
+                        res.int64_data.push(inner.read_varint()? as i64);
+                    }
+                } else {
+                    res.int64_data.push(c.read_varint()? as i64);
+                }
+            }
             8 => {
                 res.name = String::from_utf8(c.read_length_delimited()?.to_vec())
                     .map_err(|_| "ONNX: invalid UTF-8 in tensor name")?;
             }
             9 => {
-                let bytes = c.read_length_delimited()?;
-                if res.data_type == 1 {
-                    if bytes.len() % 4 != 0 {
-                        return Err("ONNX: float raw_data size not multiple of 4".into());
-                    }
-                    let count = bytes.len() / 4;
-                    let mut data = vec![0.0f32; count];
-                    for i in 0..count {
-                        let mut b = [0u8; 4];
-                        b.copy_from_slice(&bytes[i * 4..i * 4 + 4]);
-                        data[i] = f32::from_le_bytes(b);
-                    }
-                    res.float_data = data;
-                } else if res.data_type == 7 {
-                    if bytes.len() % 8 != 0 {
-                        return Err("ONNX: int64 raw_data size not multiple of 8".into());
-                    }
-                    let count = bytes.len() / 8;
-                    let mut data = vec![0i64; count];
-                    for i in 0..count {
-                        let mut b = [0u8; 8];
-                        b.copy_from_slice(&bytes[i * 8..i * 8 + 8]);
-                        data[i] = i64::from_le_bytes(b);
-                    }
-                    res.int64_data = data;
-                }
+                raw = Some(c.read_length_delimited()?);
             }
             13 => {
-                if wire == 2 {
-                    let bytes = c.read_length_delimited()?;
-                    let mut inner = Cursor::new(bytes);
-                    while !inner.eof() {
-                        let bits = inner.read_fixed32()?;
-                        res.float_data.push(f32::from_bits(bits));
-                    }
-                } else {
-                    let bits = c.read_fixed32()?;
-                    res.float_data.push(f32::from_bits(bits));
+                external = true;
+                c.skip_field(wire)?;
+            }
+            14 => {
+                if c.read_varint()? == 1 {
+                    external = true;
                 }
             }
             _ => {
@@ -326,21 +367,110 @@ fn parse_tensor(c: &mut Cursor) -> Result<TensorParseResult, String> {
             }
         }
     }
+    if external {
+        return Err(format!(
+            "ONNX: initializer '{}' uses external data, which the WASM runtime cannot load",
+            res.name
+        ));
+    }
+    // raw_data is decoded after the loop so field order does not matter.
+    if let Some(bytes) = raw {
+        match res.data_type {
+            1 => {
+                let (chunks, rest) = bytes.as_chunks::<4>();
+                if !rest.is_empty() {
+                    return Err("ONNX: float raw_data size not multiple of 4".into());
+                }
+                res.float_data = chunks.iter().map(|b| f32::from_le_bytes(*b)).collect();
+            }
+            7 => {
+                let (chunks, rest) = bytes.as_chunks::<8>();
+                if !rest.is_empty() {
+                    return Err("ONNX: int64 raw_data size not multiple of 8".into());
+                }
+                res.int64_data = chunks.iter().map(|b| i64::from_le_bytes(*b)).collect();
+            }
+            _ => {}
+        }
+    }
     Ok(res)
 }
 
-fn parse_value_info(c: &mut Cursor) -> Result<String, String> {
-    let mut name = String::new();
+/// Declared graph input/output: name, ONNX elem_type code, and shape
+/// (`None` when no shape is declared; symbolic dims are reported as -1).
+#[derive(Clone, Debug, Default)]
+pub struct ValueInfo {
+    pub name: String,
+    pub elem_type: i32,
+    pub shape: Option<Vec<i64>>,
+}
+
+fn parse_dimension(c: &mut Cursor) -> Result<i64, String> {
+    let mut dim = -1i64;
     while !c.eof() {
         let (field, wire) = c.read_tag()?;
         if field == 1 {
-            name = String::from_utf8(c.read_length_delimited()?.to_vec())
-                .map_err(|_| "ONNX: invalid UTF-8 in value info name")?;
+            dim = c.read_varint()? as i64;
         } else {
             c.skip_field(wire)?;
         }
     }
-    Ok(name)
+    Ok(dim)
+}
+
+fn parse_tensor_type(c: &mut Cursor, vi: &mut ValueInfo) -> Result<(), String> {
+    while !c.eof() {
+        let (field, wire) = c.read_tag()?;
+        match field {
+            1 => vi.elem_type = c.read_varint()? as i32,
+            2 => {
+                let bytes = c.read_length_delimited()?;
+                let mut shape_c = Cursor::new(bytes);
+                let mut dims = Vec::new();
+                while !shape_c.eof() {
+                    let (f, w) = shape_c.read_tag()?;
+                    if f == 1 {
+                        let db = shape_c.read_length_delimited()?;
+                        dims.push(parse_dimension(&mut Cursor::new(db))?);
+                    } else {
+                        shape_c.skip_field(w)?;
+                    }
+                }
+                vi.shape = Some(dims);
+            }
+            _ => c.skip_field(wire)?,
+        }
+    }
+    Ok(())
+}
+
+fn parse_value_info(c: &mut Cursor) -> Result<ValueInfo, String> {
+    let mut vi = ValueInfo::default();
+    while !c.eof() {
+        let (field, wire) = c.read_tag()?;
+        match field {
+            1 => {
+                vi.name = String::from_utf8(c.read_length_delimited()?.to_vec())
+                    .map_err(|_| "ONNX: invalid UTF-8 in value info name")?;
+            }
+            2 => {
+                // TypeProto: field 1 = tensor_type
+                let bytes = c.read_length_delimited()?;
+                let mut tc = Cursor::new(bytes);
+                while !tc.eof() {
+                    let (f, w) = tc.read_tag()?;
+                    if f == 1 {
+                        let tb = tc.read_length_delimited()?;
+                        parse_tensor_type(&mut Cursor::new(tb), &mut vi)?;
+                    } else {
+                        tc.skip_field(w)?;
+                    }
+                }
+            }
+            _ => c.skip_field(wire)?,
+        }
+    }
+    Ok(vi)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -349,8 +479,12 @@ pub struct Graph {
     pub nodes: Vec<GraphNode>,
     pub weights: HashMap<String, Tensor>,
     pub int_initializers: HashMap<String, Vec<i64>>,
+    /// Initializers of dtypes this runtime cannot compute with (name -> ONNX data_type).
+    pub other_initializers: HashMap<String, i32>,
     pub input_names: Vec<String>,
     pub output_names: Vec<String>,
+    pub inputs: Vec<ValueInfo>,
+    pub outputs: Vec<ValueInfo>,
 }
 
 fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
@@ -378,8 +512,8 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
                     1
                 } else {
                     tp.dims.iter().try_fold(1usize, |acc, &d| {
-                        if d <= 0 {
-                            return Err("ONNX: non-positive dimension".to_string());
+                        if d < 0 {
+                            return Err("ONNX: negative initializer dimension".to_string());
                         }
                         let d_us = d as usize;
                         acc.checked_mul(d_us)
@@ -403,17 +537,23 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
                         ));
                     }
                     g.int_initializers.insert(tp.name, tp.int64_data);
+                } else {
+                    g.other_initializers.insert(tp.name, tp.data_type);
                 }
             }
             11 => {
                 let bytes = c.read_length_delimited()?;
                 let mut inner = Cursor::new(bytes);
-                g.input_names.push(parse_value_info(&mut inner)?);
+                let vi = parse_value_info(&mut inner)?;
+                g.input_names.push(vi.name.clone());
+                g.inputs.push(vi);
             }
             12 => {
                 let bytes = c.read_length_delimited()?;
                 let mut inner = Cursor::new(bytes);
-                g.output_names.push(parse_value_info(&mut inner)?);
+                let vi = parse_value_info(&mut inner)?;
+                g.output_names.push(vi.name.clone());
+                g.outputs.push(vi);
             }
             _ => {
                 c.skip_field(wire)?;
@@ -426,6 +566,25 @@ fn parse_graph(c: &mut Cursor) -> Result<Graph, String> {
 #[derive(Clone, Debug, Default)]
 pub struct Model {
     pub graph: Graph,
+    /// Default-domain ("" or "ai.onnx") opset version; `None` if absent.
+    pub opset: Option<i64>,
+}
+
+fn parse_opset_import(c: &mut Cursor) -> Result<(String, i64), String> {
+    let mut domain = String::new();
+    let mut version = 0i64;
+    while !c.eof() {
+        let (field, wire) = c.read_tag()?;
+        match field {
+            1 => {
+                domain = String::from_utf8(c.read_length_delimited()?.to_vec())
+                    .map_err(|_| "ONNX: invalid UTF-8 in opset domain")?;
+            }
+            2 => version = c.read_varint()? as i64,
+            _ => c.skip_field(wire)?,
+        }
+    }
+    Ok((domain, version))
 }
 
 fn parse_model(c: &mut Cursor) -> Result<Model, String> {
@@ -436,11 +595,22 @@ fn parse_model(c: &mut Cursor) -> Result<Model, String> {
             let bytes = c.read_length_delimited()?;
             let mut inner = Cursor::new(bytes);
             m.graph = parse_graph(&mut inner)?;
+        } else if field == 8 {
+            let bytes = c.read_length_delimited()?;
+            let (domain, version) = parse_opset_import(&mut Cursor::new(bytes))?;
+            if domain.is_empty() || domain == "ai.onnx" {
+                m.opset = Some(version);
+            }
         } else {
             c.skip_field(wire)?;
         }
     }
     Ok(m)
+}
+
+/// Parse raw ONNX bytes into a [`Model`].
+pub fn load_model(bytes: &[u8]) -> Result<Model, String> {
+    parse_model(&mut Cursor::new(bytes))
 }
 
 // =================================────────────────===========================
@@ -504,47 +674,50 @@ pub fn topological_sort(nodes: &[GraphNode]) -> Result<Vec<GraphNode>, String> {
 // Pure-Rust Operator Subset Reimplementation
 // ============================================================================
 
+/// MatMul for rank-2 operands only (`[m,k] x [k,n] -> [m,n]`). Other ranks
+/// are rejected with an error instead of being guessed at.
 pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor, String> {
-    if a.shape.len() != 2 {
-        return Err(format!("matmul A: expected 2-D tensor, got rank {}", a.shape.len()));
+    if a.shape.len() != 2 || b.shape.len() != 2 {
+        return Err(format!(
+            "MatMul: WASM runtime only supports rank-2 operands, got A {:?} and B {:?}",
+            a.shape, b.shape
+        ));
     }
-    if b.shape.len() != 2 {
-        return Err(format!("matmul B: expected 2-D tensor, got rank {}", b.shape.len()));
+    let (m, k, k2, n) = (a.shape[0], a.shape[1], b.shape[0], b.shape[1]);
+    if [m, k, n].iter().any(|&d| d < 0) {
+        return Err(format!("MatMul: negative dimension in A {:?} / B {:?}", a.shape, b.shape));
     }
-    let m = a.shape[0];
-    let k1 = a.shape[1];
-    let k2 = b.shape[0];
-    let n = b.shape[1];
-    if k1 != k2 {
-        return Err(format!("matmul: inner dimension mismatch (A.cols={}, B.rows={})", k1, k2));
+    if k != k2 {
+        return Err(format!(
+            "MatMul: inner dimensions differ (A {:?} has {} columns, B {:?} has {} rows)",
+            a.shape, k, b.shape, k2
+        ));
     }
-    if m <= 0 || n <= 0 || k1 <= 0 {
-        return Err(format!("matmul: dimensions must be positive (m={}, k={}, n={})", m, k1, n));
+    let (m, k, n) = (m as usize, k as usize, n as usize);
+    let a_len = m.checked_mul(k).ok_or("MatMul: A size overflows usize")?;
+    let b_len = k.checked_mul(n).ok_or("MatMul: B size overflows usize")?;
+    if a.data.len() != a_len || b.data.len() != b_len {
+        return Err(format!(
+            "MatMul: shape/data mismatch (A {:?} len {}, B {:?} len {})",
+            a.shape,
+            a.data.len(),
+            b.shape,
+            b.data.len()
+        ));
     }
-
-    let m_us = m as usize;
-    let n_us = n as usize;
-    let k1_us = k1 as usize;
-    let total = m_us.checked_mul(n_us).ok_or_else(|| {
-        format!("matmul: output shape {}x{} overflows usize", m, n)
-    })?;
+    let total = m.checked_mul(n).ok_or("MatMul: output size overflows usize")?;
     let mut data = vec![0.0f32; total];
-    for r in 0..m_us {
-        for c in 0..n_us {
-            let mut sum = 0.0f32;
-            for i in 0..k1_us {
-                let ai = r.checked_mul(k1_us).ok_or_else(|| {
-                    format!("matmul: row offset overflow at r={}, k={}", m, k1)
-                })?;
-                let bi = i.checked_mul(n_us).ok_or_else(|| {
-                    format!("matmul: col offset overflow at k={}, n={}", k1, n)
-                })?;
-                sum += a.data[ai + i] * b.data[bi + c];
+    for r in 0..m {
+        let a_row = &a.data[r * k..(r + 1) * k];
+        let out_row = &mut data[r * n..(r + 1) * n];
+        for (i, &av) in a_row.iter().enumerate() {
+            let b_row = &b.data[i * n..(i + 1) * n];
+            for (o, &bv) in out_row.iter_mut().zip(b_row) {
+                *o += av * bv;
             }
-            data[r * n_us + c] = sum;
         }
     }
-    Ok(Tensor::new(vec![m, n], data))
+    Ok(Tensor::new(vec![m as i64, n as i64], data))
 }
 
 pub fn relu(a: &Tensor) -> Tensor {
@@ -557,227 +730,393 @@ pub fn sigmoid(a: &Tensor) -> Tensor {
     Tensor::new(a.shape.clone(), data)
 }
 
-pub fn softmax(input: &Tensor, axis_attr: Option<i64>) -> Result<Tensor, String> {
-    if input.shape.is_empty() {
+/// Softmax following ONNX semantics for the given opset.
+///
+/// * opset >= 13 (or unknown): default axis = -1; normalises along `axis` only.
+/// * opset < 13: default axis = 1; input is coerced to 2-D
+///   `[prod(shape[..axis]), prod(shape[axis..])]` and each row is normalised.
+pub fn softmax(input: &Tensor, axis_attr: Option<i64>, opset: Option<i64>) -> Result<Tensor, String> {
+    let rank = input.shape.len();
+    if rank == 0 {
         return Err("softmax: input must have rank >= 1".into());
     }
-    let rank = input.shape.len();
-    let axis_attr = axis_attr.unwrap_or(-1);
-    let mut axis = axis_attr;
-    if axis < 0 {
-        axis += rank as i64;
+    let legacy = matches!(opset, Some(v) if v < 13);
+    let axis_raw = axis_attr.unwrap_or(if legacy { 1 } else { -1 });
+    let axis = if axis_raw < 0 { axis_raw + rank as i64 } else { axis_raw };
+    // Legacy semantics allow axis == rank (inner block of size 1).
+    let max_axis = if legacy { rank as i64 } else { rank as i64 - 1 };
+    if axis < 0 || axis > max_axis {
+        return Err(format!("softmax: axis {} out of range for rank {}", axis_raw, rank));
     }
-    if axis < 0 || axis >= rank as i64 {
-        return Err(format!("softmax: axis {} out of range for rank {}", axis_attr, rank));
-    }
+    let axis = axis as usize;
+    let dims: Vec<usize> = input.shape.iter().map(|&d| d.max(0) as usize).collect();
 
-    if axis != (rank - 1) as i64 {
-        return Err(format!("softmax: only axis = last dim (axis=-1) is supported, got {}", axis));
+    // Normalise over `n` elements spaced by `stride`, in `outer * stride` groups.
+    let (outer, n, stride) = if legacy {
+        let outer: usize = dims[..axis].iter().product();
+        let n: usize = dims[axis..].iter().product();
+        (outer, n, 1usize)
+    } else {
+        let outer: usize = dims[..axis].iter().product();
+        let inner: usize = dims[axis + 1..].iter().product();
+        (outer, dims[axis], inner)
+    };
+    if outer * n * stride != input.data.len() {
+        return Err(format!(
+            "softmax: shape {:?} does not match data length {}",
+            input.shape,
+            input.data.len()
+        ));
     }
-
-    let axis_dim = input.shape[axis as usize] as usize;
-    let outer = input.data.len() / axis_dim;
-    if outer == 0 {
-        return Ok(Tensor::new(input.shape.clone(), vec![0.0; input.data.len()]));
-    }
-
     let mut data = vec![0.0f32; input.data.len()];
-    for i in 0..outer {
-        let start = i * axis_dim;
-        let end = start + axis_dim;
-        let slice = &input.data[start..end];
-
-        let mut max_val = slice[0];
-        for &v in slice.iter().skip(1) {
-            if v > max_val {
-                max_val = v;
+    if n == 0 {
+        return Ok(Tensor::new(input.shape.clone(), data));
+    }
+    for o in 0..outer {
+        for s in 0..stride {
+            let base = o * n * stride + s;
+            let idx = |j: usize| base + j * stride;
+            let mut max_val = f32::NEG_INFINITY;
+            for j in 0..n {
+                max_val = max_val.max(input.data[idx(j)]);
             }
-        }
-
-        let mut exps = vec![0.0f32; axis_dim];
-        let mut sum = 0.0f32;
-        for j in 0..axis_dim {
-            let val = (slice[j] - max_val).exp();
-            exps[j] = val;
-            sum += val;
-        }
-
-        if !sum.is_normal() {
-            let uniform = 1.0 / axis_dim as f32;
-            for j in 0..axis_dim {
-                data[start + j] = uniform;
+            let mut sum = 0.0f32;
+            for j in 0..n {
+                let e = (input.data[idx(j)] - max_val).exp();
+                data[idx(j)] = e;
+                sum += e;
             }
-        } else {
-            for j in 0..axis_dim {
-                data[start + j] = exps[j] / sum;
+            for j in 0..n {
+                data[idx(j)] /= sum;
             }
         }
     }
-
     Ok(Tensor::new(input.shape.clone(), data))
 }
 
-
+/// Elementwise Add with numpy-style multidirectional broadcasting.
 pub fn add(a: &Tensor, b: &Tensor) -> Result<Tensor, String> {
-    if a.shape == b.shape {
-        let mut data = Vec::with_capacity(a.data.len());
-        for i in 0..a.data.len() {
-            data.push(a.data[i] + b.data[i]);
+    let rank = a.shape.len().max(b.shape.len());
+    let pad = |s: &[i64]| -> Vec<usize> {
+        let mut v = vec![1usize; rank - s.len()];
+        v.extend(s.iter().map(|&d| d.max(0) as usize));
+        v
+    };
+    let (sa, sb) = (pad(&a.shape), pad(&b.shape));
+    let numel = |s: &[usize]| s.iter().product::<usize>();
+    if numel(&sa) != a.data.len() || numel(&sb) != b.data.len() {
+        return Err(format!(
+            "add: tensor shape/data mismatch (A {:?} len {}, B {:?} len {})",
+            a.shape,
+            a.data.len(),
+            b.shape,
+            b.data.len()
+        ));
+    }
+    let mut out = vec![0usize; rank];
+    for i in 0..rank {
+        out[i] = if sa[i] == sb[i] || sb[i] == 1 {
+            sa[i]
+        } else if sa[i] == 1 {
+            sb[i]
+        } else {
+            return Err(format!(
+                "add: shapes {:?} and {:?} are not broadcast-compatible",
+                a.shape, b.shape
+            ));
+        };
+    }
+    // Row-major strides; broadcast dims get stride 0.
+    let strides = |s: &[usize]| -> Vec<usize> {
+        let mut st = vec![0usize; rank];
+        let mut acc = 1usize;
+        for i in (0..rank).rev() {
+            st[i] = if s[i] == 1 { 0 } else { acc };
+            acc *= s[i];
         }
-        return Ok(Tensor::new(a.shape.clone(), data));
-    }
-
-    if b.data.len() == 1 {
-        let val = b.data[0];
-        let data = a.data.iter().map(|&x| x + val).collect();
-        return Ok(Tensor::new(a.shape.clone(), data));
-    }
-    if a.data.len() == 1 {
-        let val = a.data[0];
-        let data = b.data.iter().map(|&x| x + val).collect();
-        return Ok(Tensor::new(b.shape.clone(), data));
-    }
-
-    if b.shape.len() == 1 && !a.shape.is_empty() && b.shape[0] == *a.shape.last().unwrap() {
-        let c = b.shape[0] as usize;
-        let spatial = a.data.len() / c / (a.shape[0] as usize);
-        let n_outer = a.shape[0] as usize;
-        let mut data = vec![0.0f32; a.data.len()];
-        for n in 0..n_outer {
-            for j in 0..c {
-                let val_b = b.data[j];
-                let base = (n * c + j) * spatial;
-                for k in 0..spatial {
-                    data[base + k] = a.data[base + k] + val_b;
-                }
+        st
+    };
+    let (sta, stb) = (strides(&sa), strides(&sb));
+    let total = numel(&out);
+    let mut data = Vec::with_capacity(total);
+    let mut idx = vec![0usize; rank];
+    let (mut ia, mut ib) = (0usize, 0usize);
+    for _ in 0..total {
+        data.push(a.data[ia] + b.data[ib]);
+        for d in (0..rank).rev() {
+            idx[d] += 1;
+            ia += sta[d];
+            ib += stb[d];
+            if idx[d] < out[d] {
+                break;
             }
+            ia -= sta[d] * out[d];
+            ib -= stb[d] * out[d];
+            idx[d] = 0;
         }
-        return Ok(Tensor::new(a.shape.clone(), data));
     }
-
-    Err(format!(
-        "add: unsupported broadcast (A shape {:?} B shape {:?})",
-        a.shape, b.shape
-    ))
+    Ok(Tensor::new(out.iter().map(|&d| d as i64).collect(), data))
 }
 
 // ============================================================================
 // Pure-Rust Executor
 // ============================================================================
 
-fn require_tensor<'a>(map: &'a HashMap<String, Tensor>, name: &str) -> Result<&'a Tensor, String> {
-    map.get(name).ok_or_else(|| {
-        format!(
-            "run_inference: tensor '{}' is neither an initializer nor a prior node's output",
-            name
-        )
-    })
+/// Look up a node input: computed values first, then float initializers.
+fn lookup<'a>(
+    model: &'a Model,
+    computed: &'a HashMap<String, Tensor>,
+    name: &str,
+) -> Result<&'a Tensor, String> {
+    if let Some(t) = computed.get(name).or_else(|| model.graph.weights.get(name)) {
+        return Ok(t);
+    }
+    if model.graph.int_initializers.contains_key(name) {
+        return Err(format!("tensor '{}' is an int64 initializer; WASM runtime ops take float32 only", name));
+    }
+    if let Some(dt) = model.graph.other_initializers.get(name) {
+        return Err(format!("tensor '{}' has ONNX data_type {}; WASM runtime ops take float32 only", name, dt));
+    }
+    Err(format!("tensor '{}' is neither an initializer nor a prior node's output", name))
 }
 
-fn run_inference_internal(
+/// Operators implemented by this WASM runtime.
+pub const SUPPORTED_OPS: [&str; 5] = ["Add", "MatMul", "Relu", "Sigmoid", "Softmax"];
+
+/// Graph inputs that are real runtime inputs (not initializers).
+fn runtime_inputs(model: &Model) -> Vec<&ValueInfo> {
+    let g = &model.graph;
+    g.inputs
+        .iter()
+        .filter(|vi| {
+            !g.weights.contains_key(&vi.name)
+                && !g.int_initializers.contains_key(&vi.name)
+                && !g.other_initializers.contains_key(&vi.name)
+        })
+        .collect()
+}
+
+/// One reason per distinct unsupported operator (empty = all supported).
+fn unsupported_op_reasons(model: &Model) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    model
+        .graph
+        .nodes
+        .iter()
+        .map(GraphNode::op_key)
+        .filter(|k| !SUPPORTED_OPS.contains(&k.as_str()))
+        .filter(|k| seen.insert(k.clone()))
+        .map(|k| format!("Unsupported operator '{}' (WASM runtime supports: {})", k, SUPPORTED_OPS.join(", ")))
+        .collect()
+}
+
+/// Static reasons the model cannot run here (empty = supported).
+pub fn check_model(model: &Model) -> Vec<String> {
+    let mut reasons = unsupported_op_reasons(model);
+    let ins = runtime_inputs(model);
+    if ins.len() != 1 {
+        reasons.push(format!("WASM runtime requires exactly 1 graph input, model has {}", ins.len()));
+    }
+    for vi in ins {
+        if vi.elem_type != 0 && vi.elem_type != 1 {
+            reasons.push(format!("Input '{}' has elem_type {} (only float32 supported)", vi.name, vi.elem_type));
+        }
+    }
+    if model.graph.outputs.is_empty() {
+        reasons.push("Model has no outputs declared".into());
+    }
+    reasons
+}
+
+pub fn run_inference_internal(
     model: &Model,
     input_data: &[f32],
     input_shape: &[i64],
 ) -> Result<Tensor, String> {
-    if model.graph.input_names.is_empty() {
-        return Err("Model has no inputs declared".into());
+    if let Some(first) = unsupported_op_reasons(model).into_iter().next() {
+        return Err(first);
     }
-    let input_name = &model.graph.input_names[0];
-
-    let mut tensor_map = HashMap::new();
-    for (k, v) in &model.graph.weights {
-        tensor_map.insert(k.clone(), v.clone());
+    let ins = runtime_inputs(model);
+    let input_vi = match ins.as_slice() {
+        [one] => *one,
+        _ => return Err(format!("WASM runtime requires exactly 1 graph input, model has {}", ins.len())),
+    };
+    if input_vi.elem_type != 0 && input_vi.elem_type != 1 {
+        return Err(format!(
+            "input '{}' has elem_type {} (only float32 supported)",
+            input_vi.name, input_vi.elem_type
+        ));
+    }
+    let expected = input_shape.iter().try_fold(1usize, |acc, &d| {
+        if d < 0 {
+            return None;
+        }
+        acc.checked_mul(d as usize)
+    });
+    if expected != Some(input_data.len()) {
+        return Err(format!(
+            "input data has {} elements but shape {:?} is invalid or needs a different count",
+            input_data.len(),
+            input_shape
+        ));
+    }
+    if let Some(decl) = &input_vi.shape {
+        let ok = decl.len() == input_shape.len()
+            && decl.iter().zip(input_shape).all(|(&d, &s)| d <= 0 || d == s);
+        if !ok {
+            return Err(format!(
+                "input '{}' shape {:?} does not match declared shape {:?} (-1 = any)",
+                input_vi.name,
+                input_shape,
+                decl.iter().map(|&d| if d <= 0 { -1 } else { d }).collect::<Vec<_>>()
+            ));
+        }
     }
 
-    let input_tensor = Tensor::new(input_shape.to_vec(), input_data.to_vec());
-    tensor_map.insert(input_name.clone(), input_tensor);
+    // Computed values only; initializers are read in place via `lookup`.
+    let mut computed: HashMap<String, Tensor> = HashMap::new();
+    computed.insert(input_vi.name.clone(), Tensor::new(input_shape.to_vec(), input_data.to_vec()));
 
     let sorted_nodes = topological_sort(&model.graph.nodes)?;
 
     for node in &sorted_nodes {
-        let op = &node.op_type;
         let ins = &node.inputs;
-        let outs = &node.outputs;
+        let arity = if matches!(node.op_type.as_str(), "MatMul" | "Add") { 2 } else { 1 };
+        if ins.len() != arity || node.outputs.len() != 1 {
+            return Err(format!(
+                "{} '{}': expected {} input(s) and 1 output, got {} and {}",
+                node.op_type,
+                node.name,
+                arity,
+                ins.len(),
+                node.outputs.len()
+            ));
+        }
+        let x = lookup(model, &computed, &ins[0])?;
+        let y = match node.op_type.as_str() {
+            "MatMul" => matmul(x, lookup(model, &computed, &ins[1])?)?,
+            "Add" => add(x, lookup(model, &computed, &ins[1])?)?,
+            "Relu" => relu(x),
+            "Sigmoid" => sigmoid(x),
+            "Softmax" => softmax(x, node.attributes.get("axis").map(|a| a.i), model.opset)?,
+            other => {
+                return Err(format!(
+                    "Unsupported operator '{}' (WASM runtime supports: {})",
+                    other,
+                    SUPPORTED_OPS.join(", ")
+                ))
+            }
+        };
+        computed.insert(node.outputs[0].clone(), y);
+    }
 
-        if op == "MatMul" {
-            if ins.len() < 2 {
-                return Err(format!("MatMul '{}': need 2 inputs, got {}", node.name, ins.len()));
-            }
-            let a = require_tensor(&tensor_map, &ins[0])?;
-            let b = require_tensor(&tensor_map, &ins[1])?;
-            let y = matmul(a, b)?;
-            for out in outs {
-                tensor_map.insert(out.clone(), y.clone());
-            }
-        } else if op == "Relu" {
-            if ins.is_empty() {
-                return Err(format!("Relu '{}': need 1 input, got 0", node.name));
-            }
-            let x = require_tensor(&tensor_map, &ins[0])?;
-            let y = relu(x);
-            for out in outs {
-                tensor_map.insert(out.clone(), y.clone());
-            }
-        } else if op == "Sigmoid" {
-            if ins.is_empty() {
-                return Err(format!("Sigmoid '{}': need 1 input, got 0", node.name));
-            }
-            let x = require_tensor(&tensor_map, &ins[0])?;
-            let y = sigmoid(x);
-            for out in outs {
-                tensor_map.insert(out.clone(), y.clone());
-            }
-        } else if op == "Softmax" {
-            if ins.is_empty() {
-                return Err(format!("Softmax '{}': need 1 input, got 0", node.name));
-            }
-            let x = require_tensor(&tensor_map, &ins[0])?;
-            let axis_attr = node.attributes.get("axis").map(|a| a.i);
-            let y = softmax(x, axis_attr)?;
-            for out in outs {
-                tensor_map.insert(out.clone(), y.clone());
-            }
-        } else if op == "Add" {
-            if ins.len() < 2 {
-                return Err(format!("Add '{}': need 2 inputs, got {}", node.name, ins.len()));
-            }
-            let a = require_tensor(&tensor_map, &ins[0])?;
-            let b = require_tensor(&tensor_map, &ins[1])?;
-            let y = add(a, b)?;
-            for out in outs {
-                tensor_map.insert(out.clone(), y.clone());
-            }
-        } else {
-            return Err(format!("Unsupported operator '{}' in WASM runtime", op));
+    let output_name = model
+        .graph
+        .output_names
+        .first()
+        .ok_or_else(|| "Model has no outputs declared".to_string())?;
+    match computed.remove(output_name) {
+        Some(t) => Ok(t),
+        None => lookup(model, &computed, output_name).cloned(),
+    }
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
         }
     }
+    o.push('"');
+    o
+}
 
-    if model.graph.output_names.is_empty() {
-        return Err("Model has no outputs declared".into());
-    }
-    let output_name = &model.graph.output_names[0];
-    let output_tensor = require_tensor(&tensor_map, output_name)?;
-    Ok(output_tensor.clone())
+fn json_value_infos(vis: &[&ValueInfo]) -> String {
+    let items: Vec<String> = vis
+        .iter()
+        .map(|vi| {
+            let shape = match &vi.shape {
+                Some(s) => format!(
+                    "[{}]",
+                    s.iter().map(|&d| if d <= 0 { -1 } else { d }.to_string()).collect::<Vec<_>>().join(",")
+                ),
+                None => "null".into(),
+            };
+            format!("{{\"name\":{},\"elem_type\":{},\"shape\":{}}}", json_str(&vi.name), vi.elem_type, shape)
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// JSON metadata for a parsed model (see `modelInfo` export).
+pub fn model_info_json(model: &Model) -> String {
+    let mut ops: Vec<String> = model.graph.nodes.iter().map(GraphNode::op_key).collect();
+    ops.sort_unstable();
+    ops.dedup();
+    let reasons = check_model(model);
+    let outputs: Vec<&ValueInfo> = model.graph.outputs.iter().collect();
+    format!(
+        "{{\"opset\":{},\"num_nodes\":{},\"inputs\":{},\"outputs\":{},\"ops_used\":[{}],\"supported\":{},\"unsupported_reasons\":[{}]}}",
+        model.opset.map_or("null".to_string(), |v| v.to_string()),
+        model.graph.nodes.len(),
+        json_value_infos(&runtime_inputs(model)),
+        json_value_infos(&outputs),
+        ops.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","),
+        reasons.is_empty(),
+        reasons.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",")
+    )
 }
 
 // ============================================================================
 // Public JS FFI interface
 // ============================================================================
 
+/// Runs the model on one float32 input and returns the first output's data
+/// (row-major). Throws a string on unsupported ops or bad shapes.
 #[wasm_bindgen(js_name = runInference)]
 pub fn run_inference(
     model_bytes: &[u8],
     input_data: &[f32],
     input_shape: Vec<i32>,
 ) -> Result<Vec<f32>, JsValue> {
-    let mut cursor = Cursor::new(model_bytes);
-    let model = parse_model(&mut cursor).map_err(|e| JsValue::from_str(&e))?;
-
+    let model = load_model(model_bytes).map_err(|e| JsValue::from_str(&e))?;
     let shape_i64: Vec<i64> = input_shape.iter().map(|&x| x as i64).collect();
     let output = run_inference_internal(&model, input_data, &shape_i64)
         .map_err(|e| JsValue::from_str(&e))?;
-
     Ok(output.data)
+}
+
+/// Runs the model like `runInference` and returns only the output shape
+/// (row-major dims of the first graph output).
+#[wasm_bindgen(js_name = outputShape)]
+pub fn output_shape(
+    model_bytes: &[u8],
+    input_data: &[f32],
+    input_shape: Vec<i32>,
+) -> Result<Vec<i32>, JsValue> {
+    let model = load_model(model_bytes).map_err(|e| JsValue::from_str(&e))?;
+    let shape_i64: Vec<i64> = input_shape.iter().map(|&x| x as i64).collect();
+    let output = run_inference_internal(&model, input_data, &shape_i64)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(output.shape.iter().map(|&d| d as i32).collect())
+}
+
+/// Operators this WASM runtime implements.
+#[wasm_bindgen(js_name = supportedOps)]
+pub fn supported_ops() -> Vec<String> {
+    SUPPORTED_OPS.iter().map(|s| s.to_string()).collect()
+}
+
+/// Model metadata as a JSON string (parse with `JSON.parse`).
+#[wasm_bindgen(js_name = modelInfo)]
+pub fn model_info(model_bytes: &[u8]) -> Result<String, JsValue> {
+    let model = load_model(model_bytes).map_err(|e| JsValue::from_str(&e))?;
+    Ok(model_info_json(&model))
 }
 
 // ============================================================================
@@ -809,6 +1148,23 @@ const FRAUD_STD: [f32; 7] = [
     0.36204198,
 ];
 
+/// Fraud probability for one raw (un-normalised) 7-feature transaction.
+pub fn fraud_score(model_bytes: &[u8], raw: [f32; 7]) -> Result<f32, String> {
+    let normalised: Vec<f32> = raw
+        .iter()
+        .zip(FRAUD_MEAN.iter().zip(FRAUD_STD.iter()))
+        .map(|(&v, (&mean, &std))| (v - mean) / std)
+        .collect();
+    let model = load_model(model_bytes)?;
+    let output = run_inference_internal(&model, &normalised, &[1, 7])?;
+    match output.data.as_slice() {
+        [p] => Ok(*p),
+        other => Err(format!("runFraudModel: expected 1 output value, got {}", other.len())),
+    }
+}
+
+/// Fraud probability for one raw transaction: z-score normalises the seven
+/// features with the training constants, then runs the model on `[1, 7]`.
 #[wasm_bindgen(js_name = runFraudModel)]
 pub fn run_fraud_model(
     model_bytes: &[u8],
@@ -820,52 +1176,43 @@ pub fn run_fraud_model(
     is_cash_out: f32,
     is_transfer: f32,
 ) -> Result<f32, JsValue> {
-    let raw = [
-        amount,
-        old_balance_orig,
-        new_balance_orig,
-        old_balance_dest,
-        new_balance_dest,
-        is_cash_out,
-        is_transfer,
-    ];
-
-    // Z-score normalise
-    let normalised: Vec<f32> = raw
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (v - FRAUD_MEAN[i]) / FRAUD_STD[i])
-        .collect();
-
-    let mut cursor = Cursor::new(model_bytes);
-    let model = parse_model(&mut cursor).map_err(|e| JsValue::from_str(&e))?;
-
-    let output = run_inference_internal(&model, &normalised, &[1, 7])
-        .map_err(|e| JsValue::from_str(&e))?;
-
-    // output is shape [1,1]; return the single probability value
-    output
-        .data
-        .first()
-        .copied()
-        .ok_or_else(|| JsValue::from_str("run_fraud_model: empty output tensor"))
+    fraud_score(
+        model_bytes,
+        [
+            amount,
+            old_balance_orig,
+            new_balance_orig,
+            old_balance_dest,
+            new_balance_dest,
+            is_cash_out,
+            is_transfer,
+        ],
+    )
+    .map_err(|e| JsValue::from_str(&e))
 }
 
-
 // ============================================================================
-// Unit Tests
+// Unit Tests (ORT parity tests live in tests/parity.rs)
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn repo_file(rel: &str) -> Vec<u8> {
+        let p = format!("{}/../{}", env!("CARGO_MANIFEST_DIR"), rel);
+        std::fs::read(&p).unwrap_or_else(|e| panic!("read {p}: {e}"))
+    }
+
+    fn t(shape: &[i64], data: &[f32]) -> Tensor {
+        Tensor::new(shape.to_vec(), data.to_vec())
+    }
+
     #[test]
     fn test_empty_onnx_parse() {
         // empty.onnx is the smallest legal model containing no nodes.
-        let bytes = std::fs::read("../engine/tests/fixtures/empty.onnx").unwrap();
-        let mut cursor = Cursor::new(&bytes);
-        let model = parse_model(&mut cursor).unwrap();
+        let bytes = repo_file("engine/tests/fixtures/empty.onnx");
+        let model = load_model(&bytes).unwrap();
         assert_eq!(model.graph.name, "empty");
         assert_eq!(model.graph.nodes.len(), 0);
         assert_eq!(model.graph.input_names, vec!["X"]);
@@ -874,9 +1221,9 @@ mod tests {
 
     #[test]
     fn test_matmul_add_onnx_parse() {
-        let bytes = std::fs::read("../engine/tests/fixtures/matmul_add.onnx").unwrap();
-        let mut cursor = Cursor::new(&bytes);
-        let model = parse_model(&mut cursor).unwrap();
+        let bytes = repo_file("engine/tests/fixtures/matmul_add.onnx");
+        let model = load_model(&bytes).unwrap();
+        assert!(model.opset.is_some());
         assert_eq!(model.graph.name, "matmul_add");
         assert_eq!(model.graph.nodes.len(), 2);
         assert_eq!(model.graph.nodes[0].op_type, "MatMul");
@@ -902,30 +1249,86 @@ mod tests {
     }
 
     #[test]
-    fn test_softmax() {
-        let x = Tensor::new(vec![3], vec![1.0, 2.0, 3.0]);
-        let y = softmax(&x, None).unwrap();
+    fn test_softmax_sums_to_one() {
+        let x = t(&[3], &[1.0, 2.0, 3.0]);
+        let y = softmax(&x, None, Some(13)).unwrap();
         let sum: f32 = y.data.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5);
     }
 
     #[test]
-    fn test_add() {
-        let a = Tensor::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]);
-        let b = Tensor::new(vec![2, 2], vec![0.5, 1.5, 2.5, 3.5]);
-        let y = add(&a, &b).unwrap();
+    fn test_softmax_axis_semantics() {
+        // [1,2,2]: opset 13 default axis=-1 normalises pairs along the last dim.
+        let x = t(&[1, 2, 2], &[0.0, 0.0, 1.0, 1.0]);
+        let y13 = softmax(&x, None, Some(13)).unwrap();
+        assert_eq!(y13.data, vec![0.5, 0.5, 0.5, 0.5]);
+        // opset 11 default axis=1 coerces to [1,4]: all four share one denominator.
+        let y11 = softmax(&x, None, Some(11)).unwrap();
+        let e = 1f32.exp();
+        let d = 2.0 + 2.0 * e;
+        for (got, want) in y11.data.iter().zip([1.0 / d, 1.0 / d, e / d, e / d]) {
+            assert!((got - want).abs() < 1e-6);
+        }
+        // opset 13 axis=1 is strided (normalise column-wise).
+        let y = softmax(&x, Some(1), Some(13)).unwrap();
+        assert!((y.data[0] + y.data[2] - 1.0).abs() < 1e-6);
+        assert!(softmax(&x, Some(3), Some(13)).is_err());
+    }
+
+    #[test]
+    fn test_add_broadcasting() {
+        let a = t(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
+        let y = add(&a, &t(&[2, 2], &[0.5, 1.5, 2.5, 3.5])).unwrap();
         assert_eq!(y.data, vec![1.5, 3.5, 5.5, 7.5]);
 
-        let c = Tensor::new(vec![1], vec![10.0]);
-        let y2 = add(&a, &c).unwrap();
-        assert_eq!(y2.data, vec![11.0, 12.0, 13.0, 14.0]);
+        // Trailing 1-D broadcast (previously produced zeros).
+        let y = add(&a, &t(&[2], &[10.0, 20.0])).unwrap();
+        assert_eq!((y.shape.clone(), y.data), (vec![2, 2], vec![11.0, 22.0, 13.0, 24.0]));
+
+        // Column vector [2,1] broadcasts across columns.
+        let y = add(&a, &t(&[2, 1], &[10.0, 20.0])).unwrap();
+        assert_eq!(y.data, vec![11.0, 12.0, 23.0, 24.0]);
+
+        // Both-direction [2,1] + [1,3] -> [2,3].
+        let y = add(&t(&[2, 1], &[1.0, 2.0]), &t(&[1, 3], &[10.0, 20.0, 30.0])).unwrap();
+        assert_eq!((y.shape.clone(), y.data), (vec![2, 3], vec![11.0, 21.0, 31.0, 12.0, 22.0, 32.0]));
+
+        // Rank-0 scalar.
+        let y = add(&a, &t(&[], &[1.0])).unwrap();
+        assert_eq!(y.data, vec![2.0, 3.0, 4.0, 5.0]);
+
+        // Incompatible shapes are an error, never zeros.
+        let err = add(&a, &t(&[3], &[1.0, 2.0, 3.0])).unwrap_err();
+        assert!(err.contains("not broadcast-compatible"), "{err}");
+        // Shape/data mismatch is an error, never a panic.
+        assert!(add(&a, &t(&[3], &[1.0])).is_err());
+    }
+
+    #[test]
+    fn test_matmul_shape_checks() {
+        let a = t(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let b = t(&[3, 1], &[1.0, 1.0, 1.0]);
+        let y = matmul(&a, &b).unwrap();
+        assert_eq!((y.shape, y.data), (vec![2, 1], vec![6.0, 15.0]));
+        assert!(matmul(&a, &a).unwrap_err().contains("inner dimensions differ"));
+        assert!(matmul(&t(&[3], &[1.0, 2.0, 3.0]), &b).unwrap_err().contains("rank-2"));
+        assert!(matmul(&a, &t(&[3, 1], &[1.0])).unwrap_err().contains("shape/data mismatch"));
+    }
+
+    #[test]
+    fn test_supported_ops_and_model_info() {
+        assert_eq!(supported_ops(), vec!["Add", "MatMul", "Relu", "Sigmoid", "Softmax"]);
+        let model = load_model(&repo_file("models/fraud/fraud_detector.onnx")).unwrap();
+        let info = model_info_json(&model);
+        assert!(info.starts_with("{\"opset\":13,\"num_nodes\":3,"), "{info}");
+        assert!(info.contains("\"inputs\":[{\"name\":\"input\",\"elem_type\":1,\"shape\":[-1,7]}]"), "{info}");
+        assert!(info.contains("\"ops_used\":[\"Add\",\"MatMul\",\"Sigmoid\"]"), "{info}");
+        assert!(info.contains("\"supported\":true,\"unsupported_reasons\":[]"), "{info}");
     }
 
     #[test]
     fn test_extreme_fraud_fuzzing() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let bytes = std::fs::read(format!("{}/../web/public/models/fraud_detector.onnx", manifest_dir))
-            .expect("Failed to read fraud_detector.onnx for extreme testing");
+        let bytes = repo_file("web/public/models/fraud_detector.onnx");
 
         let mut seed: u32 = 1337;
         let mut next_random = || {
@@ -942,20 +1345,20 @@ mod tests {
             let is_cash_out = if i % 2 == 0 { 1.0 } else { 0.0 };
             let is_transfer = if i % 2 != 0 { 1.0 } else { 0.0 };
 
-            let score = run_fraud_model(
+            let val = fraud_score(
                 &bytes,
-                amount,
-                old_balance_orig,
-                new_balance_orig,
-                old_balance_dest,
-                new_balance_dest,
-                is_cash_out,
-                is_transfer,
-            );
-
-            assert!(score.is_ok(), "Fuzz iteration {} failed: {:?}", i, score.err());
-            let val = score.unwrap();
-            assert!(val >= 0.0 && val <= 1.0, "Fuzz iteration {} returned invalid score: {}", i, val);
+                [
+                    amount,
+                    old_balance_orig,
+                    new_balance_orig,
+                    old_balance_dest,
+                    new_balance_dest,
+                    is_cash_out,
+                    is_transfer,
+                ],
+            )
+            .unwrap_or_else(|e| panic!("Fuzz iteration {i} failed: {e}"));
+            assert!((0.0..=1.0).contains(&val), "Fuzz iteration {i} returned invalid score: {val}");
         }
     }
 }

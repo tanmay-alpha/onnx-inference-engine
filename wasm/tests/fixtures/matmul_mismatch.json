@@ -1,0 +1,17 @@
+{
+ "name": "matmul_mismatch",
+ "model": "matmul_mismatch.onnx",
+ "input_shape": [
+  2,
+  3
+ ],
+ "input": [
+  -0.7143065929412842,
+  0.810705840587616,
+  -0.5516422390937805,
+  -0.4124206304550171,
+  -0.7296701669692993,
+  -0.7007579803466797
+ ],
+ "expect_error": "inner dimensions differ"
+}

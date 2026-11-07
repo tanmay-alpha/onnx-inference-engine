@@ -1,0 +1,15 @@
+{
+ "name": "unsupported_tanh",
+ "model": "unsupported_tanh.onnx",
+ "input_shape": [
+  1,
+  4
+ ],
+ "input": [
+  0.8195523023605347,
+  2.502393960952759,
+  0.9595904350280762,
+  1.219437599182129
+ ],
+ "expect_error": "Tanh"
+}
