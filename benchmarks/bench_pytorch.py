@@ -1,192 +1,107 @@
-"""PyTorch eager-mode benchmark (Issue #14).
+"""PyTorch (CPU, eager) benchmark worker.
 
-Same shape as bench_crucible.py / bench_onnxruntime.py: 100 timed
-runs after 10 warmup iterations, reported as JSON.
+PyTorch is only benchmarked on a *genuinely equivalent* network: the
+exact ONNX file is converted to a ``torch.nn.Module`` with onnx2torch
+and its output is checked against ONNX Runtime's output for the same
+input (``--reference``). onnx2torch has no converters for some old
+opset versions (e.g. BatchNormalization-7 in the opset-7 CNNs), so if
+the direct conversion fails the graph is first upgraded with
+``onnx.version_converter`` to ``--upgrade-opset`` -- same nodes, same
+weights -- and the upgrade is noted in the row. If conversion still
+fails or the outputs diverge beyond ``--tolerance`` (or the arg-max
+class differs), the row is recorded as ``unsupported`` with the reason
+-- a different network (e.g. a torchvision model with other weights)
+is never substituted.
 
-The natural PyTorch comparison for the .onnx-based Crucible and
-ONNX Runtime benches is to run the *same architecture* under
-PyTorch's eager mode. We have two options:
-
-  1. Load torchvision.models.mobilenet_v2 (if torchvision is
-     installed) and run it directly. The architecture is the
-     same as the .onnx we benchmark Crucible on, so the
-     comparison is apples-to-apples.
-
-  2. If torchvision is not installed, build a small ConvNet
-     stub that uses the same input/output shapes. The numbers
-     are still informative — they tell you "PyTorch's eager
-     dispatch on CPU" — but they're not directly comparable to
-     a real MobileNetV2 forward pass.
-
-We try option 1 first and fall back to option 2 with a warning.
-The backend name in the JSON tells downstream tooling which
-path was taken.
+``torch.set_num_threads(--threads)`` is applied before anything runs and
+the effective ``torch.get_num_threads()`` is recorded. ``load_ms`` is the
+onnx2torch conversion time (including any opset upgrade). Timing is
+``time.perf_counter`` around each forward call under
+``torch.inference_mode()``, including the numpy -> tensor -> numpy
+conversions. See common.py for the protocol.
 """
 from __future__ import annotations
 
-import argparse
-import json
-import math
-import statistics
-import sys
 import time
-import warnings
 from pathlib import Path
-from typing import List
 
 import numpy as np
-import torch
-import torch.nn as nn
+
+from common import time_calls, worker_args, write_ok, write_unsupported
 
 
-# ---------------------------------------------------------------------------
-# Constants — kept in lockstep with the other benches.
-# ---------------------------------------------------------------------------
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_INPUT_SHAPE = (1, 3, 224, 224)
-DEFAULT_RUNS = 100
-DEFAULT_WARMUP = 10
+def main() -> int:
+    parser = worker_args(__doc__.splitlines()[0])
+    parser.add_argument("--threads", type=int, required=True)
+    parser.add_argument("--reference", required=True, type=Path,
+                        help=".npy output of onnxruntime-cpu for the same input")
+    parser.add_argument("--tolerance", type=float, default=1e-3)
+    parser.add_argument("--upgrade-opset", type=int, default=13)
+    args = parser.parse_args()
 
-
-# ---------------------------------------------------------------------------
-# Model selection
-# ---------------------------------------------------------------------------
-class _TinyClassifier(nn.Module):
-    """Fallback model used when torchvision isn't installed.
-
-    It mirrors the input shape (1, 3, 224, 224) and produces a
-    1000-class output, which is what the comparison consumers
-    (recharts plot, etc.) expect. It is NOT a real MobileNetV2.
-    """
-
-    def __init__(self, num_classes: int = 1000) -> None:
-        super().__init__()
-        # Keep parameter count small so the bench finishes in a
-        # reasonable time on a developer laptop. The point of the
-        # PyTorch bench is to measure dispatch overhead, not to
-        # win at MobileNetV2.
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1),
-        )
-        self.classifier = nn.Linear(32, num_classes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = x.flatten(1)
-        return self.classifier(x)
-
-
-def _load_model() -> tuple[nn.Module, str, str]:
-    """Try torchvision's MobileNetV2, fall back to a tiny stub.
-
-    Returns (model, backend_name, model_name).
-    """
     try:
-        from torchvision.models import mobilenet_v2  # type: ignore[import-not-found]
-        m = mobilenet_v2(weights=None)
-        m.eval()
-        return m, "torchvision-mobilenet_v2", "mobilenet_v2 (torchvision)"
-    except ImportError:
-        warnings.warn(
-            "torchvision not installed; falling back to a tiny stub. "
-            "The PyTorch numbers will not be directly comparable to "
-            "Crucible / ONNX Runtime MobileNetV2 numbers.",
-            stacklevel=2,
-        )
-        m = _TinyClassifier()
-        m.eval()
-        return m, "torch-stub", "tiny_convnet"
+        import onnx
+        import onnx.version_converter
+        import torch
+        from onnx2torch import convert
+    except ImportError as exc:
+        write_unsupported(args.result,
+                          f"torch/onnx2torch not installed in the benchmark environment ({exc})",
+                          threads=args.threads)
+        return 0
 
+    torch.set_num_threads(args.threads)
+    threads = torch.get_num_threads()
 
-# ---------------------------------------------------------------------------
-# Benchmark loop
-# ---------------------------------------------------------------------------
-def _bench(model: nn.Module, x: torch.Tensor,
-           runs: int, warmup: int) -> List[float]:
-    """Eager-mode forward with no_grad for fair comparison.
+    x_np = np.load(args.input)
+    ref = np.load(args.reference)
 
-    We disable autograd because inference is what we're measuring.
-    Re-enabling it would add operator-level bookkeeping and inflate
-    every other engine's apparent latency.
-    """
-    with torch.no_grad():
-        for _ in range(warmup):
-            model(x)
-        timings: List[float] = []
-        for _ in range(runs):
-            t0 = time.perf_counter()
-            model(x)
-            timings.append((time.perf_counter() - t0) * 1000.0)
-    return timings
+    t0 = time.perf_counter()
+    proto = onnx.load(str(args.model))
+    note = f"ONNX converted with onnx2torch; torch.set_num_threads({args.threads})"
+    try:
+        module = convert(proto).eval()
+    except Exception as direct_exc:  # onnx2torch raises NotImplementedError and friends
+        opset = next((o.version for o in proto.opset_import if o.domain in ("", "ai.onnx")),
+                     None)
+        try:
+            upgraded = onnx.version_converter.convert_version(proto, args.upgrade_opset)
+            module = convert(upgraded).eval()
+        except Exception as exc:
+            write_unsupported(args.result,
+                              f"onnx2torch could not convert the model ({direct_exc}); "
+                              f"after upgrading opset {opset} -> {args.upgrade_opset}: {exc}",
+                              threads=threads)
+            return 0
+        note = (f"ONNX opset {opset} upgraded to {args.upgrade_opset} with "
+                f"onnx.version_converter (same weights), then converted with onnx2torch; "
+                f"torch.set_num_threads({args.threads})")
+    load_ms = (time.perf_counter() - t0) * 1000.0
 
+    def forward() -> np.ndarray:
+        with torch.inference_mode():
+            return module(torch.from_numpy(x_np)).numpy()
 
-def percentile(sorted_data, p):
-    """Standard percentile with linear interpolation."""
-    n = len(sorted_data)
-    if n == 1:
-        return sorted_data[0]
-    k = (n - 1) * p / 100.0
-    f = math.floor(k)
-    c = math.ceil(k)
-    if f == c:
-        return sorted_data[int(k)]
-    return sorted_data[f] * (c - k) + sorted_data[c] * (k - f)
+    check = forward()
+    if check.shape != ref.shape:
+        write_unsupported(args.result,
+                          f"onnx2torch output shape {list(check.shape)} != ORT {list(ref.shape)}",
+                          threads=threads)
+        return 0
+    diff = float(np.max(np.abs(check.astype(np.float32) - ref)))
+    top1_ok = ref.shape[-1] < 2 or bool(
+        np.array_equal(check.reshape(-1, ref.shape[-1]).argmax(-1),
+                       ref.reshape(-1, ref.shape[-1]).argmax(-1)))
+    if diff > args.tolerance or not top1_ok:
+        write_unsupported(args.result,
+                          f"onnx2torch conversion is not equivalent: max_abs_diff vs ORT "
+                          f"{diff:.3g} (tolerance {args.tolerance:g}), top1_match={top1_ok}",
+                          threads=threads)
+        return 0
 
-
-def _summarise(timings_ms: List[float]) -> dict:
-    sorted_t = sorted(timings_ms)
-    n = len(sorted_t)
-    return {
-        "runs": n,
-        "mean_ms":   statistics.fmean(sorted_t),
-        "median_ms": statistics.median(sorted_t),
-        "p95_ms": percentile(sorted_t, 95),
-        "p99_ms": percentile(sorted_t, 99),
-        "min_ms": sorted_t[0],
-        "max_ms": sorted_t[-1],
-        "throughput_inf_per_sec": min(1e6, 1000.0 / statistics.fmean(sorted_t)),
-    }
-
-
-def main(argv: List[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runs", type=int, default=DEFAULT_RUNS)
-    parser.add_argument("--warmup", type=int, default=DEFAULT_WARMUP)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--output", type=Path, default=None)
-    args = parser.parse_args(argv)
-
-    model, backend, model_name = _load_model()
-    print(f"[bench_pytorch] backend={backend} model={model_name} "
-          f"runs={args.runs} warmup={args.warmup}", file=sys.stderr)
-
-    # Match the other benches: same seed, same shape, same dtype.
-    rng = np.random.default_rng(args.seed)
-    x_np = rng.standard_normal(DEFAULT_INPUT_SHAPE).astype(np.float32)
-    x = torch.from_numpy(x_np)
-
-    timings = _bench(model, x, args.runs, args.warmup)
-    summary = _summarise(timings)
-
-    result = {
-        "engine": "pytorch",
-        "backend": backend,
-        "model": model_name,
-        "input_shape": list(DEFAULT_INPUT_SHAPE),
-        "stats": summary,
-    }
-
-    out = json.dumps(result, indent=2)
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(out + "\n")
-        print(f"[bench_pytorch] wrote {args.output}", file=sys.stderr)
-    else:
-        print(out)
+    timings, out = time_calls(forward, args.warmup, args.iterations, time.perf_counter)
+    np.save(args.out_npy, out)
+    write_ok(args.result, load_ms=load_ms, timings_ms=timings, threads=threads, note=note)
     return 0
 
 

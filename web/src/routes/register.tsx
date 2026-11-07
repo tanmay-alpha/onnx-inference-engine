@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Eye, EyeOff, Loader2, UserPlus, AlertCircle, Check } from "lucide-react";
-import { register as registerAccount } from "../lib/api";
+import { login, register as registerAccount } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -46,6 +46,7 @@ function RegisterPage() {
     setError(null);
     try {
       await registerAccount(data.email, data.password, data.fullName);
+      await login(data.email, data.password);
       setSuccess(true);
       setTimeout(() => {
         navigate({ to: "/dashboard" });
@@ -362,6 +363,7 @@ function RegisterPage() {
   );
 }
 
-export const Route = {
+export const Route = createFileRoute("/register")({
+  head: () => ({ meta: [{ title: "Register · Crucible" }] }),
   component: RegisterPage,
-};
+});

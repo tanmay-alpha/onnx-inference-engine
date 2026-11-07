@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   Upload,
   Trash2,
@@ -14,7 +14,10 @@ import {
   Check,
 } from "lucide-react";
 import { uploadModel, deleteModel, fetchModels } from "../lib/api";
-import type { RegisteredModel } from "../lib/api";
+import type { ConvertResult, RegisteredModel } from "../lib/api";
+import { requireAuth } from "../lib/auth-guard";
+import { useBackendHealth } from "../lib/use-backend-health";
+import { BackendOfflineNotice } from "../components/crucible/BackendStatus";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -28,6 +31,9 @@ import {
   TableRow,
 } from "../components/ui/table";
 import { CrucibleLayout } from "../components/crucible/Layout";
+
+const fmtShape = (s: number[] | null) =>
+  s ? `[${s.map((d) => (d < 0 ? "?" : d)).join(", ")}]` : "—";
 
 const fmtBytes = (b: number) => {
   if (b < 1024) return `${b} B`;
@@ -51,6 +57,8 @@ const fmtDate = (iso: string) => {
 
 function ModelsPage() {
   const navigate = useNavigate();
+  const health = useBackendHealth();
+  const [lastUpload, setLastUpload] = useState<ConvertResult | null>(null);
   const [models, setModels] = useState<RegisteredModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -81,34 +89,19 @@ function ModelsPage() {
     if (!file) return;
 
     setUploading(true);
-    setUploadProgress(`Uploading ${file.name}...`);
+    setUploadProgress(`Uploading and analysing ${file.name}...`);
     setError(null);
+    setLastUpload(null);
 
     try {
-      const shapeStr = prompt(
-        "Enter input shape as comma-separated dimensions (e.g., 1,3,224,224):",
-        "1,3,224,224",
+      const result = await uploadModel(file, file.name);
+      setLastUpload(result);
+      setUploadProgress(
+        result.all_supported
+          ? `Registered ${result.name}: every operator is supported by the native engine.`
+          : `Registered ${result.name}, but the native engine cannot run it (see below).`,
       );
-      if (!shapeStr) {
-        setUploading(false);
-        setUploadProgress(null);
-        return;
-      }
-
-      const inputShape = shapeStr
-        .split(",")
-        .map((s) => parseInt(s.trim(), 10))
-        .filter((n) => !Number.isNaN(n) && n > 0);
-
-      if (inputShape.length === 0) {
-        throw new Error("Invalid shape. Enter numbers separated by commas.");
-      }
-
-      setUploadProgress(`Validating and uploading ${file.name}...`);
-      const result = await uploadModel(file, inputShape);
-      setUploadProgress(`Uploaded ${result.name} successfully!`);
       await loadModels();
-      setTimeout(() => setUploadProgress(null), 3000);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload failed");
       setUploadProgress(null);
@@ -136,7 +129,7 @@ function ModelsPage() {
   const handleUseForInference = (model: RegisteredModel) => {
     navigate({
       to: "/playground",
-      search: { modelId: model.id, modelName: model.name },
+      search: { modelId: model.id },
     });
   };
 
@@ -160,7 +153,8 @@ function ModelsPage() {
               ONNX Models
             </h1>
             <p className="c-muted" style={{ marginTop: 8 }}>
-              Upload, manage, and run inference on your ONNX models.
+              Register ONNX models with the server; each upload is analysed by the native engine and
+              stored under your account, even if some operators are unsupported.
             </p>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -204,6 +198,30 @@ function ModelsPage() {
           </div>
         )}
 
+        <BackendOfflineNotice health={health} onRetry={health.recheck} />
+
+        {lastUpload && !lastUpload.all_supported && (
+          <div
+            role="alert"
+            style={{
+              padding: "10px 14px",
+              borderRadius: 2,
+              background: "#f3e7c4",
+              border: "1px solid #dcc58a",
+              color: "#92400e",
+              fontSize: 13,
+              marginBottom: 20,
+            }}
+          >
+            <div style={{ fontWeight: 600 }}>Not runnable on the native engine:</div>
+            <ul style={{ margin: "6px 0 0 18px" }}>
+              {lastUpload.unsupported_reasons.map((r) => (
+                <li key={r}>{r}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {error && (
           <div
             style={{
@@ -235,8 +253,8 @@ function ModelsPage() {
               No models uploaded yet
             </h3>
             <p className="c-muted" style={{ maxWidth: 420, margin: "0 auto 20px" }}>
-              Upload an ONNX model file to start running inferences. Supported operators include
-              MatMul, Relu, Sigmoid, Softmax, and more.
+              Upload an ONNX file (float32 inputs, ops from the native engine's 20-operator set) to
+              run it on the server. Models are private to your account.
             </p>
             <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
               <Button onClick={() => fileInputRef.current?.click()}>
@@ -272,6 +290,7 @@ function ModelsPage() {
                         <span style={{ fontWeight: 500 }}>{model.name}</span>
                         {!model.all_supported && (
                           <span
+                            title={model.unsupported_reasons.join("\n")}
                             style={{
                               fontSize: 10,
                               padding: "1px 6px",
@@ -282,7 +301,7 @@ function ModelsPage() {
                               fontFamily: "var(--f-mono)",
                             }}
                           >
-                            partial
+                            unsupported
                           </span>
                         )}
                       </div>
@@ -290,13 +309,16 @@ function ModelsPage() {
                     <TableCell style={{ textAlign: "right" }}>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                         <HardDrive size={12} style={{ color: "var(--ink-muted)" }} />
-                        {fmtBytes(model.file_size_bytes)}
+                        {fmtBytes(model.size_bytes)}
                       </span>
                     </TableCell>
                     <TableCell style={{ textAlign: "right" }}>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <span
+                        style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                        title={model.operators_used.join(", ")}
+                      >
                         <Cpu size={12} style={{ color: "var(--ink-muted)" }} />
-                        {model.operators.length}
+                        {model.operators_used.length}
                       </span>
                     </TableCell>
                     <TableCell
@@ -306,7 +328,7 @@ function ModelsPage() {
                         fontSize: 12,
                       }}
                     >
-                      [{model.input_shape?.join(", ") || "—"}]
+                      {model.inputs.map((t) => fmtShape(t.shape)).join(" ") || "—"}
                     </TableCell>
                     <TableCell style={{ textAlign: "right" }}>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -320,7 +342,12 @@ function ModelsPage() {
                           variant="ghost"
                           size="sm"
                           onClick={() => handleUseForInference(model)}
-                          title="Run inference"
+                          disabled={!model.all_supported}
+                          title={
+                            model.all_supported
+                              ? "Run in the playground (native server)"
+                              : model.unsupported_reasons.join("\n")
+                          }
                         >
                           <Play size={14} />
                         </Button>
@@ -361,6 +388,9 @@ function ModelsPage() {
   );
 }
 
-export const Route = {
+export const Route = createFileRoute("/models")({
+  head: () => ({ meta: [{ title: "Models · Crucible" }] }),
+  ssr: false,
+  beforeLoad: requireAuth,
   component: ModelsPage,
-};
+});

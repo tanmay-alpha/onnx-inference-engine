@@ -1,93 +1,86 @@
-"""FastAPI inference server for Crucible (Issue #13) — Verified and Audited.
+"""Crucible FastAPI server.
 
-Endpoints (all under base URL ``http://localhost:8000``):
+Public:     GET /health, GET /ready, GET /operators, GET /metrics,
+            POST /auth/register, POST /auth/login, /docs, /openapi.json
+Protected:  everything else, via :func:`server.auth.require_principal`
+            (``Authorization: Bearer <JWT>`` or ``X-API-Key``).
 
-  POST /convert     multipart .onnx upload, save to /tmp/models/<uuid>.onnx
-  POST /infer       JSON body, run inference via crucible_py
-  POST /validate    multipart .onnx OR form {model_id}, structural check
-  GET  /operators   catalogue of supported op_type strings  (public)
-  GET  /health      liveness probe                          (public)
+Inference
+---------
+``/infer`` and ``/inference/batch`` run only on the native C++ engine
+(``crucible_py``). There is no fallback: without the module they return 503
+and ``/health`` reports ``engine: "unavailable"``. ``inference_time_ms`` is
+measured around ``crucible_py.run`` only. See :mod:`server.engine` for the
+concurrency bound and the 504 timeout semantics (a timed-out native run
+cannot be cancelled; it finishes in the background holding its slot).
 
-Security posture (after Issue #13 review)
-=========================================
+Uploads
+-------
+``/convert`` streams the file to ``<CRUCIBLE_MODEL_DIR>/<uuid>.onnx`` (the
+client filename is only a display name), then runs ``onnx.checker`` and the
+native loader/checker (:mod:`server.validator`). Unsupported models are
+stored and owned anyway, flagged with ``unsupported_reasons``.
 
-  * Auth: every non-public route requires the X-API-Key header
-    matching CRUCIBLE_API_KEY. The check uses hmac.compare_digest
-    to avoid timing side-channels. Without a configured key the
-    server returns 503 on protected routes (NOT 200) so an
-    operator who forgot to set the env var notices immediately.
+Limits
+------
+Request bodies are capped by an ASGI middleware (``MAX_UPLOAD_BYTES`` + 1 MiB
+multipart overhead on /convert and /validate, ``MAX_REQUEST_BODY_BYTES``
+elsewhere) whether or not Content-Length is sent. ``/infer`` additionally
+caps the tensor at ``MAX_INPUT_ELEMENTS``.
 
-  * /convert: accepts a pre-exported .onnx only. We removed the
-    PyTorch-deserialization path because torch.load(weights_only=False)
-    is RCE-equivalent and torch.load(weights_only=True) cannot
-    reconstruct a full nn.Module. The PyTorch -> ONNX helper is
-    still present (convert_torch_module) for in-process use.
+Ownership
+---------
+Models, inference logs and fraud checks belong to the authenticated user;
+other users get 404. The optional operator key (``CRUCIBLE_API_KEY``) sees all.
 
-  * /infer: input_shape product is capped at MAX_INPUT_ELEMENTS
-    (50M) so a 50 GB JSON body can't OOM the server.
-
-  * Error envelopes: 4xx details are short and stable. 5xx details
-    are a fixed string with a correlation id; the full traceback
-    goes to the server log only.
-
-  * Docker: runs as non-root user 'crucible' (uid 1000).
+Storage note: model files live on local disk. On hosts with ephemeral disks
+(e.g. Render free tier) they disappear on restart while DB rows remain;
+/infer then answers 410 for those models.
 """
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import hmac
 import json
 import logging
 import math
 import os
 import secrets
-import tempfile
-import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-import uuid
 from pathlib import Path
-from typing import Annotated, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
-import onnx
-from fastapi import (
-    Depends,
-    FastAPI,
-    File,
-    Form,
-    Header,
-    HTTPException,
-    Query,
-    Request,
-    Response,
-    UploadFile,
-)
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi import status as http_status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
+from sqlalchemy import select
 
-from server import auth as server_auth, converter, database, logging_config, metrics, validator
+from server import database, engine, logging_config, metrics, validator
 from server.auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
-    ApiKeyCreated,
+    KEY_PREFIX_DISPLAY_LEN,
     ApiKeyCreate,
+    ApiKeyCreated,
     ApiKeyResponse,
+    Principal,
     Token,
     UserCreate,
     UserLogin,
     UserResponse,
     create_access_token,
-    get_current_active_user,
-    get_current_user,
+    generate_api_key,
     hash_password,
-    require_admin,
+    require_principal,
+    require_user,
     verify_password,
 )
+from server.config import get_settings
 from server.schemas import (
-    BenchmarkItem,
-    BenchmarkListResponse,
-    BenchmarkRequest,
+    BatchItemResult,
+    BatchResponse,
     ConvertResponse,
     FraudHistoryResponse,
     FraudTxItem,
@@ -95,238 +88,117 @@ from server.schemas import (
     HealthResponse,
     InferRequest,
     InferResponse,
-    InferenceLogItem,
     InferenceLogListResponse,
     ModelItem,
     ModelListResponse,
     OperatorsResponse,
+    ReadyResponse,
     ValidateResponse,
 )
 
-from server.config import get_settings
-
 settings = get_settings()
+logging_config.setup_logging()
+_log = logging.getLogger("crucible.server")
 
 SERVER_VERSION = settings.APP_VERSION
-ENGINE_NAME = "crucible-cpp"
-
-
-def _engine_name() -> str:
-    """Return the active engine identifier based on backend."""
-    return ENGINE_NAME if BACKEND == "cpp" else "crucible-fallback"
-
-# Hard timeout on inference requests. A hung C++ process or runaway
-# model would otherwise hold a connection open forever.
-INFERENCE_TIMEOUT_SEC = settings.INFERENCE_TIMEOUT_SEC
-
-# Max upload size — configurable via MAX_UPLOAD_BYTES
+BACKEND = engine.BACKEND
 MAX_UPLOAD_BYTES = settings.MAX_UPLOAD_BYTES
-
-# Cap on the product of input_shape dims. Configurable via MAX_INPUT_ELEMENTS
 MAX_INPUT_ELEMENTS = settings.MAX_INPUT_ELEMENTS
-
-# Endpoints that bypass auth. /health is a liveness probe that
-# orchestrators poll — it must not require credentials or the
-# container's health check fails. /operators is a capability
-# catalogue; leaking it tells an attacker nothing they couldn't
-# guess from the docs.
-PUBLIC_PATHS = frozenset({
-    "/health",
-    "/operators",
-    "/models",
-    "/fraud/history",
-    "/benchmarks",
-    "/docs",
-    "/openapi.json",
-})
+INFERENCE_TIMEOUT_SEC = settings.INFERENCE_TIMEOUT_SEC
+UPLOAD_PATHS = frozenset({"/convert", "/validate"})
+MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+_CHUNK = 1024 * 1024
 
 
 def _model_dir() -> Path:
-    """Resolve the model dir on every call."""
     d = Path(os.environ.get("CRUCIBLE_MODEL_DIR", settings.CRUCIBLE_MODEL_DIR))
+    d.mkdir(parents=True, exist_ok=True)
+    return d.resolve()
+
+
+def _contained_model_path(file_path: str) -> Optional[Path]:
+    """Resolve a stored path and return it only if it lies inside the model dir."""
     try:
-        d.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Cannot create model directory at {d}: permission denied"
-        )
-    return d
+        p = Path(file_path).resolve()
+    except (OSError, ValueError):
+        return None
+    return p if p.suffix == ".onnx" and p.is_relative_to(_model_dir()) else None
+
+
+def _internal_error(exc: BaseException) -> HTTPException:
+    trace_id = secrets.token_hex(8)
+    _log.error("trace=%s: %s", trace_id, exc, exc_info=exc)
+    return HTTPException(status_code=500, detail=f"Internal error (trace {trace_id}).")
 
 
 # ---------------------------------------------------------------------------
-# Authentication
+# Body size limit (ASGI middleware; works with or without Content-Length)
 # ---------------------------------------------------------------------------
-# A static API key is the lowest-friction auth scheme that the
-# security review will accept for a demo server. In production
-# this should be replaced with OAuth2 bearer or mTLS; the
-# interface (a single function returning bool) is the same either
-# way so the call sites in the endpoints don't change.
-#
-# Set CRUCIBLE_API_KEY to enable. If unset, /health and /operators
-# stay public (liveness + capability discovery), and the rest of
-# the routes are 503 (operator must configure the server).
-def _check_api_key(api_key: Optional[str]) -> None:
-    """Reject the request if the API key is wrong.
-
-    The comparison uses hmac.compare_digest to avoid timing
-    side-channels. Empty string vs empty string is a fail (we
-    never want a no-key request to authenticate).
-    """
-    expected = os.environ.get("CRUCIBLE_API_KEY", "")
-    if not expected:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Server is not configured: set CRUCIBLE_API_KEY "
-                "in the environment. /health and /operators stay "
-                "public."
-            ),
-        )
-    if not api_key or not hmac.compare_digest(api_key, expected):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or missing API key. Set X-API-Key header.",
-        )
+class _BodyTooLarge(Exception):
+    pass
 
 
-def require_api_key(
-    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
-) -> None:
-    """FastAPI dependency: rejects requests with a bad / missing key.
+class BodyLimitMiddleware:
+    def __init__(self, app):
+        self.app = app
 
-    Used as `dependencies=[Depends(require_api_key)]` on every
-    protected route. The function returns None — the value is
-    the side effect (raising HTTPException for bad keys).
-    Declared as a dependency rather than middleware because
-    middleware-raised HTTPException doesn't propagate cleanly
-    through FastAPI's TestClient (anyio task groups wrap it
-    in a BaseExceptionGroup that fails the test).
-    """
-    _check_api_key(x_api_key)
+    @staticmethod
+    def limit_for(path: str) -> int:
+        if path in UPLOAD_PATHS:
+            return settings.MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES
+        return settings.MAX_REQUEST_BODY_BYTES
 
+    @staticmethod
+    async def _send_413(send, limit: int) -> None:
+        body = json.dumps({"detail": f"Request body exceeds the {limit}-byte limit"}).encode()
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
 
-# ---------------------------------------------------------------------------
-# Backend selection: real C++ binding if available, numpy fallback otherwise.
-# ---------------------------------------------------------------------------
-_log = logging.getLogger("crucible.server")
-try:
-    import crucible_py  # type: ignore[import-not-found]
-    BACKEND = "cpp"
-    _log.info("Loaded backend: crucible_py (C++ bindings)")
-except ImportError:
-    BACKEND = "numpy-fallback"
-    crucible_py = None  # type: ignore[assignment]
-    _log.warning(
-        "crucible_py not importable; using numpy fallback for /infer. "
-        "Build and install the C++ bindings to use the real engine."
-    )
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = self.limit_for(scope["path"])
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    declared = 0
+                if declared > limit:
+                    await self._send_413(send, limit)
+                    return
+        state = {"received": 0, "exceeded": False, "started": False, "replaced": False}
 
+        async def limited_receive():
+            message = await receive()
+            if message["type"] == "http.request":
+                state["received"] += len(message.get("body", b""))
+                if state["received"] > limit:
+                    state["exceeded"] = True
+                    raise _BodyTooLarge()
+            return message
 
-# ---------------------------------------------------------------------------
-# Model registry
-# ---------------------------------------------------------------------------
-# A process-local dict mapping model_id -> Path. Cleared on restart,
-# which is fine for an Issue #13 demo. A real deployment would back
-# this with a database or a shared filesystem.
-_MODEL_REGISTRY: dict[str, Path] = {}
+        async def guarded_send(message):
+            # Body parsers may catch our exception and answer 400; turn
+            # any response produced after the limit tripped into a 413.
+            if state["exceeded"]:
+                if message["type"] == "http.response.start" and not state["replaced"]:
+                    state["replaced"] = True
+                    state["started"] = True
+                    await self._send_413(send, limit)
+                return
+            if message["type"] == "http.response.start":
+                state["started"] = True
+            await send(message)
 
-
-def _register_model(
-    onnx_path: Path,
-    input_shape: Optional[List[int]] = None,
-    operators: Optional[List[str]] = None,
-    all_supported: bool = True,
-) -> str:
-    """Store a model under the resolved model dir and persist to SQLite."""
-    model_id = uuid.uuid4().hex
-    target = _model_dir() / f"{model_id}.onnx"
-    import shutil
-
-    shutil.move(str(onnx_path), str(target))
-    _MODEL_REGISTRY[model_id] = target
-    file_size = target.stat().st_size if target.is_file() else 0
-    database.save_model(
-        model_id=model_id,
-        name=target.name,
-        file_path=str(target),
-        file_size_bytes=file_size,
-        input_shape=input_shape or [1],
-        operators=operators or [],
-        all_supported=all_supported,
-    )
-    return model_id
-
-
-def _lookup_model(model_id: str) -> Path:
-    if model_id in _MODEL_REGISTRY:
-        return _MODEL_REGISTRY[model_id]
-    rec = database.get_model(model_id)
-    if rec:
-        p = Path(rec["file_path"])
-        _MODEL_REGISTRY[model_id] = p
-        return p
-    raise HTTPException(
-        status_code=404,
-        detail=f"model_id {model_id!r} not found. Did you POST /convert first?",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Inference: real C++ binding or numpy fallback.
-# ---------------------------------------------------------------------------
-def _infer_numpy_fallback(model_path: Path,
-                          input_array: np.ndarray) -> tuple[np.ndarray, float]:
-    """Pure-Python fallback for /infer.
-
-    The numpy fallback only handles the *output shape* check that
-    tests rely on. We don't run the actual graph here — that's
-    what the C++ engine is for. The fallback exists so the API
-    layer (HTTP shape, JSON encode/decode, model_id registry,
-    error envelopes) is testable without the C++ build.
-    """
-    t0 = time.perf_counter()
-    model_proto = onnx.load(str(model_path))
-    out_shape = [
-        d.dim_value if d.dim_value > 0 else 1
-        for d in model_proto.graph.output[0].type.tensor_type.shape.dim
-    ]
-    out = np.zeros(out_shape, dtype=np.float32)
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    return out, elapsed_ms
-
-
-def _infer_cpp(model_path: Path,
-               input_array: np.ndarray) -> tuple[np.ndarray, float]:
-    """Real path through the C++ engine via crucible_py."""
-    if crucible_py is None:
-        raise RuntimeError("C++ backend (crucible_py) is not available")
-    t0 = time.perf_counter()
-    model = crucible_py.load_model(str(model_path))
-    out = crucible_py.run(model, input_array)
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    return np.asarray(out, dtype=np.float32), elapsed_ms
-
-
-# ---------------------------------------------------------------------------
-# Error envelope helpers
-# ---------------------------------------------------------------------------
-def _internal_error(exc: Exception, trace_id: str) -> HTTPException:
-    """Build a 500 with a fixed message and log the full traceback.
-
-    The trace id is a 16-hex-char token the user can quote when
-    filing a bug. It is NOT derived from the request body so it
-    cannot leak user data into logs.
-    """
-    _log.exception("trace=%s: %s", trace_id, exc)
-    return HTTPException(
-        status_code=500,
-        detail=f"Internal error (trace {trace_id}). See server log for details.",
-    )
-
-
-def _new_trace_id() -> str:
-    return secrets.token_hex(8)
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except _BodyTooLarge:
+            if not state["started"]:
+                await self._send_413(send, limit)
 
 
 # ---------------------------------------------------------------------------
@@ -334,21 +206,19 @@ def _new_trace_id() -> str:
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def _lifespan(app_instance: FastAPI):
-    """Application lifespan — initialize database on startup."""
     database.init_db()
+    if not engine.native_available():
+        _log.warning("Native engine unavailable: /infer will answer 503.")
     yield
 
 
 app = FastAPI(
     title=settings.APP_NAME,
-    description="REST API for the ONNX Inference Engine",
+    description="REST API for the Crucible ONNX inference engine",
     version=SERVER_VERSION,
     lifespan=_lifespan,
 )
-
-# CORS: allow the Crucible frontend (and any authorised consumer)
-# to call the API from a browser. Restrict origins in production
-# via the CRUCIBLE_CORS_ORIGINS env var (comma-separated).
+app.add_middleware(BodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -357,792 +227,506 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.middleware("http")
-async def _combined_middleware(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            if int(content_length) > settings.MAX_REQUEST_BODY_BYTES:
-                limit_mb = settings.MAX_REQUEST_BODY_BYTES // (1024 * 1024)
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"Request body exceeds maximum limit of {limit_mb} MB",
-                )
-        except ValueError:
-            pass
-    try:
-        response = await asyncio.wait_for(
-            call_next(request), timeout=settings.INFERENCE_TIMEOUT_SEC
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Inference timed out — model or input may be too large. Server limit is {settings.INFERENCE_TIMEOUT_SEC}s.",
-        )
-    return response
+
+# ===========================================================================
+# Public
+# ===========================================================================
+def _health_fields() -> Dict[str, Any]:
+    native = engine.native_available()
+    return {
+        "engine": BACKEND if native else "unavailable",
+        "native_available": native,
+        "version": SERVER_VERSION,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
-logging_config.setup_logging()
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    """Liveness: 200 while the process serves requests; reports engine availability."""
+    return HealthResponse(status="ok", **_health_fields())
+
+
+@app.get("/ready", response_model=ReadyResponse,
+         responses={503: {"model": ReadyResponse}})
+def readiness():
+    """Readiness: 200 only if the database answers and the native engine is loaded."""
+    db_ok = database.ping()
+    fields = _health_fields()
+    ready = db_ok and fields["native_available"]
+    body = ReadyResponse(status="ready" if ready else "not_ready", database=db_ok, **fields)
+    if ready:
+        return body
+    return JSONResponse(status_code=503, content=body.model_dump())
+
+
+@app.get("/operators", response_model=OperatorsResponse)
+def get_operators() -> OperatorsResponse:
+    supported = engine.supported_ops()
+    return OperatorsResponse(supported=supported, count=len(supported))
+
+
+@app.get("/metrics")
+def get_metrics() -> Response:
+    return metrics.metrics_response()
 
 
 # ===========================================================================
-# AUTH ENDPOINTS
+# Auth
 # ===========================================================================
+def _user_response(user: database.User) -> UserResponse:
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        is_active=user.is_active,
+        is_admin=user.is_admin,
+        created_at=user.created_at.isoformat() if user.created_at else "",
+    )
+
 
 @app.post("/auth/register", response_model=UserResponse, status_code=http_status.HTTP_201_CREATED)
 async def register(user_in: UserCreate) -> UserResponse:
-    """Register a new user account."""
-    from server.database import get_session_factory
-    from sqlalchemy import select
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        result = await session.execute(
-            select(database.User).where(database.User.email == user_in.email)
-        )
-        if result.scalar_one_or_none():
+    email = user_in.email.lower()
+    async with database.get_session_factory()() as session:
+        existing = await session.execute(select(database.User).where(database.User.email == email))
+        if existing.scalar_one_or_none():
             raise HTTPException(status_code=409, detail="Email already registered")
-
         user = database.User(
             id=uuid.uuid4().hex,
-            email=user_in.email.lower(),
-            hashed_password=hash_password(user_in.password),
+            email=email,
+            hashed_password=await run_in_threadpool(hash_password, user_in.password),
             full_name=user_in.full_name,
         )
         session.add(user)
         await session.commit()
         await session.refresh(user)
-        return UserResponse(
-            id=user.id,
-            email=user.email,
-            full_name=user.full_name,
-            is_active=user.is_active,
-            is_admin=user.is_admin,
-            created_at=user.created_at.isoformat() if user.created_at else "",
-        )
+        return _user_response(user)
 
 
 @app.post("/auth/login", response_model=Token)
 async def login(credentials: UserLogin) -> Token:
-    """Authenticate and receive a JWT bearer token."""
-    from server.database import get_session_factory
-    from sqlalchemy import select
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        result = await session.execute(
+    async with database.get_session_factory()() as session:
+        user = (await session.execute(
             select(database.User).where(database.User.email == credentials.email.lower())
+        )).scalar_one_or_none()
+        valid = user is not None and await run_in_threadpool(
+            verify_password, credentials.password, user.hashed_password
         )
-        user = result.scalar_one_or_none()
-
-    if user is None or not verify_password(credentials.password, user.hashed_password):
-        metrics.record_error("auth_failed")
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
-
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="Account is deactivated")
-
-    # Update last_login
-    from server.database import get_session_factory as _gsf
-    async with _gsf() as session:
-        user.last_login = datetime.now(timezone.utc)
-        session.add(user)
+        if not valid:
+            metrics.record_error("auth_failed")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="Account is deactivated")
+        user.last_login = datetime.now(timezone.utc).replace(tzinfo=None)
         await session.commit()
-
-    token = create_access_token(user.id, user.email, user.is_admin)
-    return Token(
-        access_token=token,
-        token_type="bearer",
-        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-    )
+        token = create_access_token(user.id, user.email, user.is_admin)
+    return Token(access_token=token, token_type="bearer", expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60)
 
 
 @app.get("/auth/me", response_model=UserResponse)
-async def get_me(current_user: dict = Depends(get_current_active_user)) -> UserResponse:
-    """Get current authenticated user info."""
-    return UserResponse(
-        id=current_user["id"],
-        email=current_user["email"],
-        full_name=current_user.get("full_name"),
-        is_active=current_user.get("is_active", True),
-        is_admin=current_user.get("is_admin", False),
-        created_at="",
+async def get_me(principal: Principal = Depends(require_user)) -> UserResponse:
+    async with database.get_session_factory()() as session:
+        user = await session.get(database.User, principal.user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    return _user_response(user)
+
+
+def _key_response(k: database.ApiKey) -> Dict[str, Any]:
+    return dict(
+        id=k.id,
+        name=k.name,
+        key_prefix=k.key_prefix or "(not recorded)",
+        is_active=k.is_active,
+        rate_limit=k.rate_limit,
+        last_used=k.last_used.isoformat() if k.last_used else None,
+        created_at=k.created_at.isoformat() if k.created_at else "",
+        expires_at=k.expires_at.isoformat() if k.expires_at else None,
     )
 
 
 @app.post("/auth/api-key", response_model=ApiKeyCreated)
-async def create_api_key(
-    key_in: ApiKeyCreate,
-    current_user: dict = Depends(get_current_active_user),
-) -> ApiKeyCreated:
-    """Generate a new API key for the authenticated user."""
-    import hashlib
-
-    raw_key, key_hash = server_auth.generate_api_key()
-    key_id = uuid.uuid4().hex
+async def create_api_key(key_in: ApiKeyCreate, principal: Principal = Depends(require_user)) -> ApiKeyCreated:
+    raw_key, key_hash = generate_api_key()
     expires_at = None
-    if key_in.expires_in_days and key_in.expires_in_days > 0:
-        expires_at = datetime.now(timezone.utc) + timedelta(days=key_in.expires_in_days)
-
-    from server.database import get_session_factory
-    from sqlalchemy import select as sa_select
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
+    if key_in.expires_in_days:
+        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=key_in.expires_in_days)
+    async with database.get_session_factory()() as session:
         api_key = database.ApiKey(
-            id=key_id,
-            user_id=current_user["id"],
+            id=uuid.uuid4().hex,
+            user_id=principal.user_id,
             key_hash=key_hash,
+            key_prefix=raw_key[:KEY_PREFIX_DISPLAY_LEN],
             name=key_in.name,
             expires_at=expires_at,
         )
         session.add(api_key)
         await session.commit()
         await session.refresh(api_key)
-
-    return ApiKeyCreated(
-        id=api_key.id,
-        name=api_key.name,
-        key_prefix=raw_key[:12],
-        is_active=api_key.is_active,
-        rate_limit=api_key.rate_limit,
-        last_used=api_key.last_used.isoformat() if api_key.last_used else None,
-        created_at=api_key.created_at.isoformat() if api_key.created_at else "",
-        expires_at=api_key.expires_at.isoformat() if api_key.expires_at else None,
-        full_key=raw_key,
-    )
+    return ApiKeyCreated(**_key_response(api_key), full_key=raw_key)
 
 
 @app.get("/auth/api-keys", response_model=List[ApiKeyResponse])
-async def list_api_keys(
-    current_user: dict = Depends(get_current_active_user),
-) -> List[ApiKeyResponse]:
-    """List all API keys for the authenticated user."""
-    from server.database import get_session_factory
-    from sqlalchemy import select as sa_select
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        result = await session.execute(
-            sa_select(database.ApiKey).where(database.ApiKey.user_id == current_user["id"])
-        )
-        keys = result.scalars().all()
-
-    return [
-        ApiKeyResponse(
-            id=k.id,
-            name=k.name,
-            key_prefix=k.key_hash[:12],
-            is_active=k.is_active,
-            rate_limit=k.rate_limit,
-            last_used=k.last_used.isoformat() if k.last_used else None,
-            created_at=k.created_at.isoformat() if k.created_at else "",
-            expires_at=k.expires_at.isoformat() if k.expires_at else None,
-        )
-        for k in keys
-    ]
+async def list_api_keys(principal: Principal = Depends(require_user)) -> List[ApiKeyResponse]:
+    async with database.get_session_factory()() as session:
+        keys = (await session.execute(
+            select(database.ApiKey).where(database.ApiKey.user_id == principal.user_id)
+            .order_by(database.ApiKey.created_at.desc())
+        )).scalars().all()
+    return [ApiKeyResponse(**_key_response(k)) for k in keys]
 
 
 @app.delete("/auth/api-key/{key_id}")
-async def revoke_api_key(
-    key_id: str,
-    current_user: dict = Depends(get_current_active_user),
-) -> dict[str, str]:
-    """Revoke an API key."""
-    from server.database import get_session_factory
-    from sqlalchemy import select as sa_select, update as sa_update
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        result = await session.execute(
-            sa_select(database.ApiKey).where(
-                database.ApiKey.id == key_id,
-                database.ApiKey.user_id == current_user["id"],
-            )
-        )
-        key = result.scalar_one_or_none()
+async def revoke_api_key(key_id: str, principal: Principal = Depends(require_user)) -> Dict[str, str]:
+    async with database.get_session_factory()() as session:
+        key = (await session.execute(
+            select(database.ApiKey).where(database.ApiKey.id == key_id,
+                                          database.ApiKey.user_id == principal.user_id)
+        )).scalar_one_or_none()
         if key is None:
             raise HTTPException(status_code=404, detail="API key not found")
-
         key.is_active = False
-        session.add(key)
         await session.commit()
-
     return {"status": "revoked", "key_id": key_id}
 
 
 # ===========================================================================
-# METRICS
+# Model upload / validation
 # ===========================================================================
-
-@app.get("/metrics")
-async def get_metrics() -> Response:
-    """Prometheus metrics endpoint."""
-    return metrics.metrics_response()
-
-
-# ===========================================================================
-# BATCH INFERENCE
-# ===========================================================================
-
-@app.post("/inference/batch")
-async def batch_infer(
-    requests: List[InferRequest],
-    current_user: dict = Depends(get_current_active_user),
-) -> dict:
-    """Run multiple inference requests in a single call.
-
-    Max 100 requests per batch. Returns individual results with
-    per-request latency and status.
-    """
-    if len(requests) > 100:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Batch size {len(requests)} exceeds maximum of 100",
-        )
-
-    results = []
-    for req in requests:
-        t0 = time.perf_counter()
-        try:
-            model_path = _lookup_model(req.model_id)
-            if not model_path.is_file():
-                results.append({
-                    "model_id": req.model_id,
-                    "status": "error",
-                    "error": "Model file not found",
-                    "latency_ms": 0,
-                })
-                metrics.record_batch_job("error")
-                continue
-
-            product = math.prod(req.input_shape)
-            if product > MAX_INPUT_ELEMENTS:
-                results.append({
-                    "model_id": req.model_id,
-                    "status": "error",
-                    "error": "Input shape exceeds element limit",
-                    "latency_ms": 0,
-                })
-                metrics.record_batch_job("error")
-                continue
-
-            arr = np.asarray(req.input, dtype=np.float32).reshape(req.input_shape)
-            if BACKEND == "cpp":
-                out_arr, elapsed_ms = _infer_cpp(model_path, arr)
-            else:
-                out_arr, elapsed_ms = _infer_numpy_fallback(model_path, arr)
-
-            results.append({
-                "model_id": req.model_id,
-                "output": out_arr.reshape(-1).tolist(),
-                "output_shape": list(out_arr.shape),
-                "latency_ms": elapsed_ms,
-                "status": "success",
-            })
-            metrics.record_inference(req.model_id, BACKEND, elapsed_ms, "success")
-            metrics.record_batch_job("success")
-
-        except Exception as exc:
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            results.append({
-                "model_id": req.model_id,
-                "status": "error",
-                "error": str(exc),
-                "latency_ms": elapsed_ms,
-            })
-            metrics.record_batch_job("error")
-
-    return {
-        "batch_size": len(requests),
-        "success_count": sum(1 for r in results if r["status"] == "success"),
-        "error_count": sum(1 for r in results if r["status"] == "error"),
-        "results": results,
-    }
-
-
-# ===========================================================================
-# ANALYTICS ENDPOINTS
-# ===========================================================================
-
-@app.get("/analytics/inference")
-async def analytics_inference(
-    days: int = Query(7, ge=1, le=90),
-    current_user: dict = Depends(get_current_active_user),
-) -> dict:
-    """Get inference analytics for the last N days."""
-    from server.database import get_session_factory
-    from sqlalchemy import select, func, text as sa_text
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        result = await session.execute(
-            sa_select(
-                func.strftime("%Y-%m-%d", database.InferenceLog.created_at).label("date"),
-                func.count(database.InferenceLog.id).label("count"),
-                func.avg(database.InferenceLog.latency_ms).label("avg_latency"),
-                func.min(database.InferenceLog.latency_ms).label("min_latency"),
-                func.max(database.InferenceLog.latency_ms).label("max_latency"),
-            )
-            .where(database.InferenceLog.created_at >= cutoff)
-            .group_by(func.strftime("%Y-%m-%d", database.InferenceLog.created_at))
-            .order_by(func.strftime("%Y-%m-%d", database.InferenceLog.created_at))
-        )
-        rows = result.all()
-
-    return {
-        "period_days": days,
-        "data": [
-            {
-                "date": str(r.date),
-                "count": r.count,
-                "avg_latency_ms": round(float(r.avg_latency), 2) if r.avg_latency else 0,
-                "min_latency_ms": round(float(r.min_latency), 2) if r.min_latency else 0,
-                "max_latency_ms": round(float(r.max_latency), 2) if r.max_latency else 0,
-            }
-            for r in rows
-        ],
-    }
-
-
-@app.get("/analytics/fraud")
-async def analytics_fraud(
-    days: int = Query(7, ge=1, le=90),
-    current_user: dict = Depends(get_current_active_user),
-) -> dict:
-    """Get fraud detection analytics for the last N days."""
-    from server.database import get_session_factory
-    from sqlalchemy import select, func
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        result = await session.execute(
-            select(
-                func.strftime("%Y-%m-%d", database.FraudCase.created_at).label("date"),
-                func.count(database.FraudCase.id).label("total"),
-                func.sum(func.cast(database.FraudCase.is_fraud, Integer)).label("fraud_count"),
-                func.avg(database.FraudCase.fraud_probability).label("avg_probability"),
-            )
-            .where(database.FraudCase.created_at >= cutoff)
-            .group_by(func.strftime("%Y-%m-%d", database.FraudCase.created_at))
-            .order_by(func.strftime("%Y-%m-%d", database.FraudCase.created_at))
-        )
-        rows = result.all()
-
-    return {
-        "period_days": days,
-        "data": [
-            {
-                "date": str(r.date),
-                "total": r.total,
-                "fraud_count": r.fraud_count or 0,
-                "avg_probability": round(float(r.avg_probability), 4) if r.avg_probability else 0,
-            }
-            for r in rows
-        ],
-    }
-
-
-@app.get("/analytics/models")
-async def analytics_models(
-    current_user: dict = Depends(get_current_active_user),
-) -> dict:
-    """Get model usage statistics."""
-    from server.database import get_session_factory
-    from sqlalchemy import select, func, Integer
-
-    session_factory = get_session_factory()
-    async with session_factory() as session:
-        result = await session.execute(
-            select(
-                database.ModelRecord.id,
-                database.ModelRecord.name,
-                database.ModelRecord.usage_count,
-                database.ModelRecord.last_used,
-                func.count(database.InferenceLog.id).label("inference_count"),
-                func.avg(database.InferenceLog.latency_ms).label("avg_latency"),
-            )
-            .outerjoin(
-                database.InferenceLog,
-                database.InferenceLog.model_id == database.ModelRecord.id,
-            )
-            .group_by(database.ModelRecord.id)
-            .order_by(database.ModelRecord.usage_count.desc())
-        )
-        rows = result.all()
-
-    return {
-        "models": [
-            {
-                "id": r.id,
-                "name": r.name,
-                "usage_count": r.usage_count,
-                "inference_count": r.inference_count or 0,
-                "avg_latency_ms": round(float(r.avg_latency), 2) if r.avg_latency else 0,
-                "last_used": r.last_used.isoformat() if r.last_used else None,
-            }
-            for r in rows
-        ],
-    }
-
-
-@app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    """Liveness probe. Always returns 200 unless the process is dead."""
-    return HealthResponse(
-        status="ok",
-        engine=_engine_name(),
-        version=SERVER_VERSION,
-    )
-
-
-@app.get("/ready", response_model=HealthResponse)
-def readiness() -> HealthResponse:
-    """Readiness probe. Checks engine & DB readiness before accepting traffic."""
-    return HealthResponse(
-        status="ready",
-        engine=_engine_name(),
-        version=SERVER_VERSION,
-    )
-
-
-@app.get("/operators", response_model=OperatorsResponse)
-def get_operators() -> OperatorsResponse:
-    """Catalogue of op_type strings Crucible can dispatch."""
-    supported = validator.list_supported_ops()
-    return OperatorsResponse(supported=supported, count=len(supported))
-
-
-@app.post("/convert", response_model=ConvertResponse,
-             dependencies=[Depends(require_api_key)])
-async def convert(
-    model_file: UploadFile = File(..., description="ONNX file to register"),
-    input_shape: str = Form(..., description='JSON array, e.g. "[1,3,224,224]"'),
-) -> ConvertResponse:
-    """Validate and register a pre-exported ONNX model.
-
-    /convert used to accept .pt files; the security review
-    correctly flagged torch.load as RCE-equivalent. We now require
-    the client to export to .onnx on the training side and POST
-    that here. The server onnx-loads + onnx-checks the upload
-    and saves it under the model registry.
-    """
-    # Read with explicit size cap. Starlette doesn't enforce one
-    # by default and a hostile client can stream 10 GB.
-    contents = await model_file.read(MAX_UPLOAD_BYTES + 1)
-    if len(contents) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Upload exceeds {MAX_UPLOAD_BYTES} bytes",
-        )
-
+async def _store_upload(upload: UploadFile, dest: Path) -> int:
+    """Stream an upload to ``dest`` enforcing MAX_UPLOAD_BYTES. Returns size."""
+    size = 0
     try:
-        shape_list = json.loads(input_shape)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"input_shape is not valid JSON: {exc}",
-        ) from exc
-    if not isinstance(shape_list, list) or not all(isinstance(d, int) for d in shape_list):
-        raise HTTPException(
-            status_code=400,
-            detail="input_shape must be a JSON array of integers",
-        )
-    if any(d <= 0 for d in shape_list):
-        raise HTTPException(
-            status_code=400,
-            detail="input_shape dims must be positive",
-        )
-    # Cap the product so the dummy input we'd build on a future
-    # state-dict path can't OOM the server. The cap is generous
-    # enough for ImageNet (3*224*224 = 150K).
-    try:
-        product = math.prod(shape_list)
-    except OverflowError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="input_shape product overflows",
-        ) from exc
-    if product > MAX_INPUT_ELEMENTS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"input_shape product {product} exceeds the "
-                f"{MAX_INPUT_ELEMENTS}-element cap"
-            ),
-        )
+        with dest.open("wb") as f:
+            while chunk := await upload.read(_CHUNK):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail=f"Upload exceeds {MAX_UPLOAD_BYTES} bytes")
+                f.write(chunk)
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+    if size == 0:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Empty upload")
+    return size
 
-    # Run through a temp file first so the registry only ever
-    # sees valid, onnx-checked models.
-    trace_id = _new_trace_id()
-    with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
+
+async def _analyze(path: Path) -> validator.ModelAnalysis:
     try:
-        model_proto = converter.accept_onnx_upload(
-            contents, shape_list, tmp_path,
-        )
+        return await run_in_threadpool(validator.analyze_model_file, path)
     except ValueError as exc:
-        tmp_path.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 — translator
-        tmp_path.unlink(missing_ok=True)
-        raise _internal_error(exc, trace_id) from exc
+    except Exception as exc:  # noqa: BLE001
+        path.unlink(missing_ok=True)
+        raise _internal_error(exc) from exc
 
-    ops = validator.extract_op_types(model_proto)
-    supported, unsupported = validator.partition_ops(ops)
 
-    model_id = _register_model(
-        tmp_path,
-        input_shape=shape_list,
-        operators=ops,
-        all_supported=not unsupported,
-    )
+def _display_name(filename: Optional[str]) -> str:
+    name = Path(filename or "model.onnx").name.strip() or "model.onnx"
+    return name[:255]
 
+
+@app.post("/convert", response_model=ConvertResponse)
+async def convert(
+    upload: UploadFile = File(..., alias="model_file", description="ONNX model file"),
+    input_shape: Optional[str] = Form(
+        None, description="Ignored (legacy). Input signatures are read from the model."
+    ),
+    principal: Principal = Depends(require_principal),
+) -> ConvertResponse:
+    """Store an ONNX model owned by the caller and return its static analysis.
+
+    Unsupported models are stored too (``all_supported=false`` plus reasons).
+    """
+    model_id = uuid.uuid4().hex
+    path = _model_dir() / f"{model_id}.onnx"
+    size = await _store_upload(upload, path)
+    analysis = await _analyze(path)
+    name = _display_name(upload.filename)
+    try:
+        await run_in_threadpool(
+            lambda: database.save_model(
+                model_id=model_id, name=name, file_path=str(path), size_bytes=size,
+                owner_id=principal.user_id, opset=analysis.opset,
+                operators_used=analysis.operators_used, unsupported_ops=analysis.unsupported_ops,
+                unsupported_reasons=analysis.unsupported_reasons,
+                all_supported=analysis.all_supported, inputs=analysis.inputs,
+                outputs=analysis.outputs, native_checked=analysis.native_checked,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        path.unlink(missing_ok=True)
+        raise _internal_error(exc) from exc
     return ConvertResponse(
         onnx_model_id=model_id,
-        operators_used=ops,
-        all_supported=not unsupported,
-        unsupported_ops=unsupported,
+        name=name,
+        size_bytes=size,
+        opset=analysis.opset,
+        operators_used=analysis.operators_used,
+        all_supported=analysis.all_supported,
+        unsupported_ops=analysis.unsupported_ops,
+        unsupported_reasons=analysis.unsupported_reasons,
+        inputs=analysis.inputs,
+        outputs=analysis.outputs,
     )
 
 
-@app.post("/infer", response_model=InferResponse,
-             dependencies=[Depends(require_api_key)])
-def infer(req: InferRequest) -> InferResponse:
-    """Run inference on a previously converted model.
+def _get_owned_model(model_id: str, principal: Principal) -> Dict[str, Any]:
+    rec = database.get_model(model_id, owner_id=principal.user_id, all_owners=principal.all_owners)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    return rec
 
-    The input is a flat float list; the server reshapes it to
-    `input_shape` and feeds the result to the C++ engine (or
-    the numpy fallback if the bindings aren't built).
-    """
-    model_path = _lookup_model(req.model_id)
-    if not model_path.is_file():
+
+def _model_file(rec: Dict[str, Any]) -> Path:
+    path = _contained_model_path(rec["file_path"])
+    if path is None or not path.is_file():
         raise HTTPException(
-            status_code=500,
-            detail=(
-                f"Model file for id {req.model_id!r} not found on disk. "
-                "The model may have been removed by a server restart or "
-                "temporary directory cleanup."
-            ),
+            status_code=410,
+            detail="Model file is no longer on this server's disk (storage is ephemeral); upload it again.",
         )
+    return path
 
-    # Pydantic should have caught this, but the schemas validator
-    # only checks each dim < 2**31 — the product can still be huge.
-    # We re-check here as defence-in-depth.
-    try:
-        product = math.prod(req.input_shape)
-    except OverflowError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="input_shape product overflows",
-        ) from exc
-    if product > MAX_INPUT_ELEMENTS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"input_shape product {product} exceeds the "
-                f"{MAX_INPUT_ELEMENTS}-element cap"
-            ),
-        )
 
-    if len(req.input) != product:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"input has {len(req.input)} elements but "
-                f"input_shape {req.input_shape} requires {product}"
-            ),
-        )
-    arr = np.asarray(req.input, dtype=np.float32).reshape(req.input_shape)
-
-    trace_id = _new_trace_id()
-    try:
-        if BACKEND == "cpp":
-            out_arr, elapsed_ms = _infer_cpp(model_path, arr)
-        else:
-            out_arr, elapsed_ms = _infer_numpy_fallback(model_path, arr)
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001 — translator
-        raise _internal_error(exc, trace_id) from exc
-
-    database.log_inference(
-        model_id=req.model_id,
-        input_shape=req.input_shape,
-        output_shape=list(out_arr.shape),
-        inference_time_ms=elapsed_ms,
-        engine=_engine_name(),
+@app.post("/validate", response_model=ValidateResponse)
+async def validate(
+    upload: Optional[UploadFile] = File(None, alias="model_file", description="ONNX file (not stored)"),
+    stored_id: Optional[str] = Form(None, alias="model_id", description="Id of a model you own"),
+    principal: Principal = Depends(require_principal),
+) -> ValidateResponse:
+    """Analyse a model without storing it (file) or re-analyse a stored one (model_id)."""
+    # Parameters are aliased: FastAPI builds a Pydantic model from form fields
+    # and names starting with "model_" collide with Pydantic's namespace.
+    if (upload is None) == (stored_id is None):
+        raise HTTPException(status_code=400, detail="Provide exactly one of `model_file` or `model_id`")
+    if upload is not None:
+        path = _model_dir() / f".validate-{uuid.uuid4().hex}.onnx"
+        await _store_upload(upload, path)
+        try:
+            analysis = await _analyze(path)
+        finally:
+            path.unlink(missing_ok=True)
+    else:
+        rec = await run_in_threadpool(_get_owned_model, stored_id, principal)
+        path = _model_file(rec)
+        try:
+            analysis = await run_in_threadpool(validator.analyze_model_file, path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ValidateResponse(
+        valid=analysis.all_supported,
+        operators=analysis.operators_used,
+        unsupported=analysis.unsupported_ops,
+        unsupported_reasons=analysis.unsupported_reasons,
+        opset=analysis.opset,
+        inputs=analysis.inputs,
+        outputs=analysis.outputs,
     )
 
-    return InferResponse(
-        output=out_arr.reshape(-1).tolist(),
-        output_shape=list(out_arr.shape),
-        inference_time_ms=elapsed_ms,
-        engine=_engine_name(),
-    )
+
+# ===========================================================================
+# Models
+# ===========================================================================
+def _model_item(rec: Dict[str, Any]) -> ModelItem:
+    return ModelItem(**{k: rec[k] for k in ModelItem.model_fields if k in rec})
+
 
 @app.get("/models", response_model=ModelListResponse)
-def list_models() -> ModelListResponse:
-    """Get all registered models from database."""
-    models = database.list_models()
-    return ModelListResponse(models=models, count=len(models))
+def list_models(principal: Principal = Depends(require_principal)) -> ModelListResponse:
+    models = database.list_models(owner_id=principal.user_id, all_owners=principal.all_owners)
+    return ModelListResponse(models=[_model_item(m) for m in models], count=len(models))
 
 
 @app.get("/models/{model_id}", response_model=ModelItem)
-def get_model(model_id: str) -> ModelItem:
-    """Get metadata for a single model."""
-    item = database.get_model(model_id)
-    if not item:
-        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    return ModelItem(**item)
+def get_model(model_id: str, principal: Principal = Depends(require_principal)) -> ModelItem:
+    return _model_item(_get_owned_model(model_id, principal))
 
 
 @app.delete("/models/{model_id}")
-def delete_model(model_id: str) -> dict[str, str]:
-    """Delete a registered model from database and disk."""
-    rec = database.get_model(model_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    file_p = Path(rec["file_path"])
-    if file_p.is_file():
-        file_p.unlink(missing_ok=True)
-    _MODEL_REGISTRY.pop(model_id, None)
+def delete_model(model_id: str, principal: Principal = Depends(require_principal)) -> Dict[str, str]:
+    rec = _get_owned_model(model_id, principal)
+    path = _contained_model_path(rec["file_path"])
+    if path is not None:
+        engine.evict_model(path)
+        path.unlink(missing_ok=True)
+    else:
+        _log.warning("model %s: stored path outside model dir, file left untouched", model_id)
     database.delete_model(model_id)
     return {"status": "deleted", "model_id": model_id}
 
 
+# ===========================================================================
+# Inference
+# ===========================================================================
+def _prepare(req: InferRequest, principal: Principal) -> tuple[Path, str, np.ndarray]:
+    """Validate an inference request. Raises HTTPException (404/410/413/422)."""
+    elements = math.prod(req.input_shape)
+    if elements > MAX_INPUT_ELEMENTS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"input_shape has {elements} elements; the limit is {MAX_INPUT_ELEMENTS}",
+        )
+    if len(req.input) != elements:
+        raise HTTPException(
+            status_code=422,
+            detail=f"input has {len(req.input)} values but input_shape {req.input_shape} needs {elements}",
+        )
+    rec = _get_owned_model(req.model_id, principal)
+    if not rec["all_supported"]:
+        reasons = "; ".join(rec["unsupported_reasons"] or rec["unsupported_ops"]) or "unsupported"
+        raise HTTPException(status_code=422, detail=f"Model is not supported by Crucible: {reasons}")
+    inputs = rec["inputs"]
+    if len(inputs) != 1:
+        raise HTTPException(status_code=422,
+                            detail=f"/infer supports single-input models; this model has {len(inputs)} inputs")
+    spec = inputs[0]
+    if spec.get("dtype") != "float32":
+        raise HTTPException(status_code=422, detail=f"Input {spec.get('name')!r} is {spec.get('dtype')}; only float32 is supported")
+    declared = spec.get("shape")
+    if declared is not None:
+        mismatch = len(declared) != len(req.input_shape) or any(
+            d > 0 and d != got for d, got in zip(declared, req.input_shape)
+        )
+        if mismatch:
+            raise HTTPException(
+                status_code=422,
+                detail=f"input_shape {req.input_shape} does not match the model input {declared} (-1 = any)",
+            )
+    arr = np.asarray(req.input, dtype=np.float32).reshape(req.input_shape)
+    if not np.isfinite(arr).all():
+        raise HTTPException(status_code=422, detail="input contains NaN or Inf")
+    return _model_file(rec), str(spec["name"]), arr
+
+
+async def _run(req: InferRequest, principal: Principal) -> InferResponse:
+    path, input_name, arr = await run_in_threadpool(_prepare, req, principal)
+
+    async def _log(status: str, latency: float, out_shape: Optional[List[int]] = None,
+                   error: Optional[str] = None) -> None:
+        metrics.record_inference(BACKEND, latency, status)
+        await run_in_threadpool(lambda: database.log_inference(
+            model_id=req.model_id, user_id=principal.user_id, api_key_id=principal.api_key_id,
+            input_shape=req.input_shape, output_shape=out_shape, latency_ms=latency,
+            backend=BACKEND, status=status, error_message=error,
+        ))
+
+    try:
+        out, elapsed_ms = await engine.run_native(path, input_name, arr, INFERENCE_TIMEOUT_SEC)
+    except engine.EngineUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except engine.EngineBusy as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "1"}) from exc
+    except engine.EngineTimeout as exc:
+        await _log("timeout", INFERENCE_TIMEOUT_SEC * 1000.0, error=str(exc))
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except engine.EngineRejected as exc:
+        await _log("error", 0.0, error=str(exc))
+        raise HTTPException(status_code=422, detail=f"Engine rejected the request: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _internal_error(exc) from exc
+
+    if not np.isfinite(out).all():
+        await _log("error", elapsed_ms, list(out.shape), "non-finite output")
+        raise HTTPException(status_code=422,
+                            detail="Engine produced NaN/Inf values, which cannot be encoded as JSON")
+    await _log("success", elapsed_ms, list(out.shape))
+    return InferResponse(
+        model_id=req.model_id,
+        output=out.reshape(-1).tolist(),
+        output_shape=list(out.shape),
+        inference_time_ms=elapsed_ms,
+    )
+
+
+@app.post("/infer", response_model=InferResponse)
+async def infer(req: InferRequest, principal: Principal = Depends(require_principal)) -> InferResponse:
+    """Run one inference on a model you own, on the native engine only."""
+    return await _run(req, principal)
+
+
+@app.post("/inference/batch", response_model=BatchResponse)
+async def batch_infer(
+    requests: List[InferRequest], principal: Principal = Depends(require_principal)
+) -> BatchResponse:
+    """Run up to MAX_BATCH_SIZE inference requests sequentially; per-item errors are reported inline."""
+    if len(requests) > settings.MAX_BATCH_SIZE:
+        raise HTTPException(status_code=422,
+                            detail=f"Batch size {len(requests)} exceeds the limit of {settings.MAX_BATCH_SIZE}")
+    total = sum(math.prod(r.input_shape) for r in requests)
+    if total > MAX_INPUT_ELEMENTS:
+        raise HTTPException(status_code=413,
+                            detail=f"Batch has {total} input elements; the limit is {MAX_INPUT_ELEMENTS}")
+    if not engine.native_available():
+        raise HTTPException(status_code=503, detail="native engine (crucible_py) is not available on this server")
+    results: List[BatchItemResult] = []
+    for req in requests:
+        try:
+            r = await _run(req, principal)
+            results.append(BatchItemResult(model_id=req.model_id, status="success", output=r.output,
+                                           output_shape=r.output_shape,
+                                           inference_time_ms=r.inference_time_ms))
+            metrics.record_batch_job("success")
+        except HTTPException as exc:
+            results.append(BatchItemResult(model_id=req.model_id, status="error",
+                                           error=str(exc.detail), status_code=exc.status_code))
+            metrics.record_batch_job("error")
+    ok = sum(1 for r in results if r.status == "success")
+    return BatchResponse(batch_size=len(requests), success_count=ok,
+                         error_count=len(results) - ok, results=results)
+
+
 @app.get("/inference/logs", response_model=InferenceLogListResponse)
-def get_inference_logs(limit: int = 50) -> InferenceLogListResponse:
-    """Get recent inference execution logs."""
-    logs = database.get_inference_logs(limit=limit)
+def get_inference_logs(
+    limit: int = Query(50, ge=1, le=500), principal: Principal = Depends(require_principal)
+) -> InferenceLogListResponse:
+    logs = database.get_inference_logs(owner_id=principal.user_id, all_owners=principal.all_owners,
+                                       limit=limit)
     return InferenceLogListResponse(logs=logs, count=len(logs))
 
 
+# ===========================================================================
+# Fraud check history (scores computed client-side; the server only records them)
+# ===========================================================================
 @app.post("/fraud/log", response_model=FraudTxItem)
-def log_fraud_transaction(req: FraudTxRequest) -> FraudTxItem:
-    """Record a fraud transaction evaluation into the database."""
-    item = database.log_fraud_tx(
-        tx_type=req.tx_type,
-        amount=req.amount,
-        orig_before=req.orig_before,
-        orig_after=req.orig_after,
-        dest_before=req.dest_before,
-        dest_after=req.dest_after,
-        probability=req.probability,
-        verdict=req.verdict,
-        execution_mode=req.execution_mode,
-        latency_ms=req.latency_ms,
-    )
-    # Merge request fields into response so tests pass;
-    # DB schema expansion to persist these fields is future work.
-    return FraudTxItem(
-        id=item["id"],
-        tx_type=req.tx_type,
-        amount=req.amount,
-        orig_before=req.orig_before,
-        orig_after=req.orig_after,
-        dest_before=req.dest_before,
-        dest_after=req.dest_after,
-        probability=req.probability,
-        verdict=req.verdict,
-        execution_mode=req.execution_mode,
-        latency_ms=req.latency_ms,
-        created_at=item["created_at"],
-    )
+def log_fraud_transaction(req: FraudTxRequest, principal: Principal = Depends(require_principal)) -> FraudTxItem:
+    item = database.log_fraud_tx(user_id=principal.user_id, **req.model_dump())
+    return FraudTxItem(**item)
 
 
 @app.get("/fraud/history", response_model=FraudHistoryResponse)
-def get_fraud_history(limit: int = 50) -> FraudHistoryResponse:
-    """Retrieve fraud transaction check history."""
-    history = database.get_fraud_history(limit=limit)
-    return FraudHistoryResponse(history=history, count=len(history))
+def get_fraud_history(
+    limit: int = Query(50, ge=1, le=500), principal: Principal = Depends(require_principal)
+) -> FraudHistoryResponse:
+    history = database.get_fraud_history(owner_id=principal.user_id, all_owners=principal.all_owners,
+                                         limit=limit)
+    return FraudHistoryResponse(history=[FraudTxItem(**h) for h in history], count=len(history))
 
 
-@app.post("/benchmarks", response_model=BenchmarkItem)
-def log_benchmark(req: BenchmarkRequest) -> BenchmarkItem:
-    """Log a benchmark evaluation record."""
-    item = database.log_benchmark(
-        model_name=req.model_name,
-        engine=req.engine,
-        latency_ms=req.latency_ms,
-        memory_mb=req.memory_mb,
-    )
-    return BenchmarkItem(**item)
+# ===========================================================================
+# Analytics (caller's own data)
+# ===========================================================================
+@app.get("/analytics/inference")
+def analytics_inference(days: int = Query(7, ge=1, le=90),
+                        principal: Principal = Depends(require_principal)) -> Dict[str, Any]:
+    data = database.inference_analytics(owner_id=principal.user_id, all_owners=principal.all_owners, days=days)
+    return {"period_days": days, "data": data}
 
 
-@app.get("/benchmarks", response_model=BenchmarkListResponse)
-def get_benchmarks(limit: int = 50) -> BenchmarkListResponse:
-    """Retrieve recorded benchmarks."""
-    benches = database.get_benchmarks(limit=limit)
-    return BenchmarkListResponse(benchmarks=benches, count=len(benches))
+@app.get("/analytics/fraud")
+def analytics_fraud(days: int = Query(7, ge=1, le=90),
+                    principal: Principal = Depends(require_principal)) -> Dict[str, Any]:
+    data = database.fraud_analytics(owner_id=principal.user_id, all_owners=principal.all_owners, days=days)
+    return {"period_days": days, "data": data}
 
 
-
-@app.post("/validate", response_model=ValidateResponse,
-               dependencies=[Depends(require_api_key)])
-async def validate(
-    model_file: Optional[UploadFile] = File(None, description="ONNX file to validate (alternative to model_id)"),
-    model_id: Optional[str] = Form(None, description="Previously registered model id (alternative to file upload)"),
-) -> ValidateResponse:
-    """Validate that every op in a model is supported by Crucible.
-
-    Accepts either a multipart file upload OR a model_id form
-    field pointing to a previously converted model. The two
-    parameters are mutually exclusive; supplying both is a 400.
-    """
-    if (model_file is None) == (model_id is None):
-        raise HTTPException(
-            status_code=400,
-            detail="Provide exactly one of `model_file` or `model_id`",
-        )
-
-    trace_id = _new_trace_id()
-    try:
-        if model_file is not None:
-            data = await model_file.read(MAX_UPLOAD_BYTES + 1)
-            if len(data) > MAX_UPLOAD_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"Upload exceeds {MAX_UPLOAD_BYTES} bytes",
-                )
-            result = validator.validate_model_bytes(data)
-        else:
-            path = _lookup_model(model_id)  # type: ignore[arg-type]
-            if not path.is_file():
-                raise HTTPException(
-                    status_code=404,
-                    detail=(
-                        f"Model file for id {model_id!r} not found on disk. "
-                        "The model may have been removed by a server restart or "
-                        "temporary directory cleanup."
-                    ),
-                )
-            result = validator.validate_model_path(path)
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        # Malformed ONNX: 400 with the validator's message (it
-        # doesn't echo user bytes; just the error name).
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 — translator
-        raise _internal_error(exc, trace_id) from exc
-
-    return ValidateResponse(
-        valid=result.valid,
-        operators=result.operators,
-        unsupported=result.unsupported,
-    )
+@app.get("/analytics/models")
+def analytics_models(principal: Principal = Depends(require_principal)) -> Dict[str, Any]:
+    return {"models": database.model_analytics(owner_id=principal.user_id, all_owners=principal.all_owners)}
 
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("server.main:app", host="0.0.0.0", port=port, reload=False)
+
+    uvicorn.run("server.main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=False)

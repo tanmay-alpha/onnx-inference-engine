@@ -1,38 +1,21 @@
-// ONNX model parser — Issue #4.
+// ONNX model parser.
 //
-// Parses .onnx files into crucible::Model (see model.hpp).
+// Parses .onnx files into crucible::Model with a hand-rolled, hermetic
+// protobuf wire-format decoder (no libprotobuf, no protoc step). It covers
+// the ONNX subset needed for inference:
 //
-// Implementation note: this module uses a hand-rolled, hermetic
-// protobuf wire-format decoder rather than linking against libprotobuf.
-// The submodule `engine/third_party/protobuf` would let us use the
-// generated C++ stubs from onnx.proto, but that requires the submodule
-// to be initialized AND a `protoc` build step. The hand-rolled reader
-// keeps the build hermetic (no submodules, no protoc, no link deps) and
-// covers exactly the ONNX subset we need for inference:
+//   * ModelProto     -> graph, opset_import (default-domain version)
+//   * GraphProto     -> node[], initializer[], input[], output[]
+//   * NodeProto      -> op_type, domain, name, inputs[], outputs[], attribute[]
+//   * AttributeProto -> float / int / string / floats / ints
+//   * TensorProto    -> dims, data_type, raw_data / float_data / int64_data;
+//                       external-data tensors are rejected
+//   * ValueInfoProto -> name, tensor elem_type, shape (symbolic dims -> -1)
 //
-//   * ModelProto  -> GraphProto
-//   * GraphProto  -> node[], initializer[], input[], output[]
-//   * NodeProto   -> op_type, name, inputs[], outputs[], attribute[]
-//   * AttributeProto -> name -> float / int (the only types MobileNetV2 uses)
-//   * TensorProto -> dims, data_type, raw_data / float_data
-//
-// The wire format spec is in
-// https://protobuf.dev/programming-guides/encoding/. A field is encoded
-// as: `(field_number << 3 | wire_type)` varint, then payload.
-//
-// Wire types we handle:
-//   0 = VARINT      (int32 / int64 / bool / enum)
-//   1 = FIXED64     (double / fixed64 / sfixed64)
-//   2 = LEN_DELIM   (string / bytes / sub-message / packed repeated)
-//   5 = FIXED32     (float / fixed32 / sfixed32)
-//
-// All other wire types are skipped (with a clear error if they would
-// lose data we care about, e.g. a 64-bit dim we don't expect).
-//
-// This module is a transitional implementation. Once the protobuf
-// submodule is initialized, the same public API (Model + load_model) can
-// be re-implemented over onnx::ModelProto without changing the test
-// suite or downstream code.
+// Wire format: https://protobuf.dev/programming-guides/encoding/. Each
+// field is a `(field_number << 3 | wire_type)` varint followed by its
+// payload. Wire types 0 (VARINT), 1 (FIXED64), 2 (LEN) and 5 (FIXED32) are
+// decoded or skipped; anything else, and any truncated payload, throws.
 
 #pragma once
 
@@ -61,9 +44,21 @@ struct Attribute {
 struct GraphNode {
     std::string op_type;                                      // "MatMul", "Relu", ...
     std::string name;                                         // optional user-provided name
+    std::string domain;                                       // "" or "ai.onnx" = default domain
     std::vector<std::string> inputs;
     std::vector<std::string> outputs;
     std::unordered_map<std::string, Attribute> attributes;    // by attribute name
+};
+
+// Declared type of a graph input/output (ValueInfoProto). `shape` uses -1
+// for symbolic or missing dims; `has_shape` is false when the model gives
+// no shape at all. `elem_type` is the ONNX TensorProto.DataType code
+// (1 = FLOAT, 7 = INT64, ...; 0 = unknown).
+struct ValueInfo {
+    std::string name;
+    int32_t elem_type = 0;
+    bool has_shape = false;
+    std::vector<int64_t> shape;
 };
 
 // Top-level graph: nodes + initializers + IO lists.
@@ -76,8 +71,17 @@ struct Graph {
     //   - int_initializers: non-float initializers as a vector of int64
     std::unordered_map<std::string, Tensor> weights;
     std::unordered_map<std::string, std::vector<int64_t>> int_initializers;
-    std::vector<std::string> input_names;
+    // Initializers whose dtype Crucible cannot represent (name -> ONNX
+    // data_type code). Kept so the executor can say *why* a tensor is
+    // missing instead of reporting a dangling edge.
+    std::unordered_map<std::string, int32_t> unsupported_initializers;
+    std::vector<std::string> input_names;    // runtime inputs (initializers excluded)
     std::vector<std::string> output_names;
+    std::vector<ValueInfo> inputs;           // same order as input_names (may be empty
+    std::vector<ValueInfo> outputs;          // for hand-built graphs in unit tests)
+    // Default-domain ("" / "ai.onnx") opset version from ModelProto.opset_import.
+    // 0 = not declared (hand-built graphs); treated as the latest semantics.
+    int64_t opset = 0;
 };
 
 // Top-level Model struct (per ENGINEERING_PLAN.md §4).

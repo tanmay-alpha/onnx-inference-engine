@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { createFileRoute } from "@tanstack/react-router";
+import { requireAuth } from "../lib/auth-guard";
 import {
   Key,
   Plus,
@@ -97,8 +99,8 @@ function ApiKeysPage() {
   };
 
   const copyKey = () => {
-    if (createdKey?.key) {
-      navigator.clipboard.writeText(createdKey.key);
+    if (createdKey?.full_key) {
+      navigator.clipboard.writeText(createdKey.full_key);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
@@ -240,7 +242,7 @@ function ApiKeysPage() {
                         color: "var(--ink-muted)",
                       }}
                     >
-                      {key.prefix}...
+                      {key.key_prefix}...
                     </TableCell>
                     <TableCell style={{ textAlign: "right", fontSize: 13 }}>
                       {fmtDate(key.created_at)}
@@ -401,7 +403,7 @@ function ApiKeysPage() {
                   }}
                 >
                   <code style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {createdKey.key}
+                    {createdKey.full_key}
                   </code>
                   <button
                     onClick={copyKey}
@@ -471,6 +473,9 @@ function ApiKeysPage() {
   );
 }
 
-export const Route = {
+export const Route = createFileRoute("/api-keys")({
+  head: () => ({ meta: [{ title: "API Keys · Crucible" }] }),
+  ssr: false,
+  beforeLoad: requireAuth,
   component: ApiKeysPage,
-};
+});

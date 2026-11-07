@@ -1,7 +1,7 @@
 {
   "name": "crucible-wasm",
   "type": "module",
-  "description": "Pure Rust WASM reimplementation of Crucible inference engine",
+  "description": "Small pure-Rust ONNX interpreter (Add, MatMul, Relu, Sigmoid, Softmax) compiled to WASM; separate from the native C++ engine",
   "version": "0.1.0",
   "files": [
     "crucible_wasm_bg.wasm",

@@ -79,6 +79,6 @@ models/*.pth
 !models/.gitkeep
 !models/download_models.py
 
-# Benchmark outputs
-benchmarks/results/benchmark_results.json
-!benchmarks/results/.gitkeep
+# Build output copied by web/scripts/postbuild.js (never commit: Vercel builds from source)
+/public/
+*.tsbuildinfo

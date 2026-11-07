@@ -89,6 +89,7 @@ Tensor maxpool_forward(const Tensor& x,
 
     Tensor y({in.N, in.C, out.out_h, out.out_w}, 0.0f);
     const float neg_inf = -std::numeric_limits<float>::infinity();
+    float* yp = y.data();
 
     // Loop layout matches the conv2d implementation: outer batch,
     // outer channel, then per-window reduction. Padded positions
@@ -109,7 +110,7 @@ Tensor maxpool_forward(const Tensor& x,
                             if (v > m) m = v;
                         }
                     }
-                    y.at({n, c, oh, ow}) = m;
+                    *yp++ = m;
                 }
             }
         }
@@ -122,15 +123,17 @@ Tensor maxpool_forward(const Tensor& x,
 Tensor avgpool_forward(const Tensor& x,
                        int kH, int kW,
                        int sH, int sW,
-                       int pH, int pW) {
+                       int pH, int pW,
+                       bool count_include_pad) {
     Dim4 in; OutDims out;
     resolve_pool(x, kH, kW, sH, sW, pH, pW, in, out);
 
     Tensor y({in.N, in.C, out.out_h, out.out_w}, 0.0f);
-    // count_include_pad = 1: denominator is always kH*kW. This is the
-    // ONNX v7 default and matches PyTorch's nn.AvgPool2d with
-    // count_include_pad=True. MobileNetV2 uses this configuration.
-    const float denom = static_cast<float>(kH) * static_cast<float>(kW);
+    // count_include_pad = true: denominator is always kH*kW (PyTorch's
+    // nn.AvgPool2d default). false (the ONNX default): denominator is
+    // the number of in-bounds elements in the window.
+    const float full_window = static_cast<float>(kH) * static_cast<float>(kW);
+    float* yp = y.data();
 
     for (int64_t n = 0; n < in.N; ++n) {
         for (int64_t c = 0; c < in.C; ++c) {
@@ -138,6 +141,7 @@ Tensor avgpool_forward(const Tensor& x,
             for (int64_t oh = 0; oh < out.out_h; ++oh) {
                 for (int64_t ow = 0; ow < out.out_w; ++ow) {
                     float sum = 0.0f;
+                    int64_t count = 0;
                     for (int64_t kh = 0; kh < kH; ++kh) {
                         const int64_t h_in = oh * sH + kh - pH;
                         if (h_in < 0 || h_in >= in.H) continue;
@@ -145,9 +149,13 @@ Tensor avgpool_forward(const Tensor& x,
                             const int64_t w_in = ow * sW + kw - pW;
                             if (w_in < 0 || w_in >= in.W) continue;
                             sum += xc[h_in * in.W + w_in];
+                            ++count;
                         }
                     }
-                    y.at({n, c, oh, ow}) = sum / denom;
+                    const float denom = count_include_pad
+                                            ? full_window
+                                            : static_cast<float>(count);
+                    *yp++ = count > 0 ? sum / denom : 0.0f;
                 }
             }
         }
@@ -203,7 +211,7 @@ Tensor global_avgpool_forward(const Tensor& x) {
             // debug builds, and lets the compiler auto-vectorise the
             // contiguous W-axis loop on release.
             for (int64_t i = 0; i < H * W; ++i) sum += xc[i];
-            y.at({n, c, 0, 0}) = sum / denom;
+            y.data()[n * C + c] = sum / denom;
         }
     }
     return y;

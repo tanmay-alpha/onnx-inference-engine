@@ -108,42 +108,69 @@ pub fn format_validate_text(path: &Path, info: &ModelInfo) -> String {
     s
 }
 
-/// Benchmark stats — single number, plus the (n, mean, median, p95,
-/// p99, min, max) tuple. Layout is intentionally identical to
-/// `benchmarks/results/benchmark_results.json` so a future CI step
-/// can splice `crucible bench` output into the same dashboard.
-pub fn format_bench_text(
-    runs: usize, mean_ms: f64, median_ms: f64,
-    p95_ms: f64, p99_ms: f64, min_ms: f64, max_ms: f64,
-) -> String {
+/// What `benchmark` measured: wall-clock time of each `crucible_run` call
+/// (native C++ engine through the C ABI, including the ABI's input/output
+/// copies), after `warmup` untimed calls.
+pub const BENCH_METHOD: &str =
+    "native Crucible engine (C++) via the C ABI; timer = std::time::Instant around each crucible_run call";
+
+/// Latency statistics in milliseconds.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BenchStats {
+    pub mean_ms:   f64,
+    pub median_ms: f64,
+    pub p95_ms:    f64,
+    pub p99_ms:    f64,
+    pub min_ms:    f64,
+    pub max_ms:    f64,
+}
+
+/// Everything `benchmark` reports.
+pub struct BenchReport<'a> {
+    pub model:       &'a Path,
+    pub input_shape: &'a [i64],
+    pub warmup:      usize,
+    pub runs:        usize,
+    pub stats:       BenchStats,
+}
+
+fn calls_per_sec(mean_ms: f64) -> f64 {
+    if mean_ms > 0.0 { 1000.0 / mean_ms } else { 0.0 }
+}
+
+pub fn format_bench_text(r: &BenchReport) -> String {
+    let st = &r.stats;
     let mut s = String::new();
-    s.push_str(&format!("Runs         : {runs}\n"));
-    s.push_str(&format!("Mean (ms)    : {mean_ms:.3}\n"));
-    s.push_str(&format!("Median (ms)  : {median_ms:.3}\n"));
-    s.push_str(&format!("p95  (ms)    : {p95_ms:.3}\n"));
-    s.push_str(&format!("p99  (ms)    : {p99_ms:.3}\n"));
-    s.push_str(&format!("Min  (ms)    : {min_ms:.3}\n"));
-    s.push_str(&format!("Max  (ms)    : {max_ms:.3}\n"));
-    let thr = if mean_ms > 0.0 { 1000.0 / mean_ms } else { 0.0 };
-    s.push_str(&format!("Throughput   : {thr:.2} inf/s\n"));
+    s.push_str(&format!("Model        : {}\n", r.model.display()));
+    s.push_str(&format!("Input shape  : {:?}\n", r.input_shape));
+    s.push_str(&format!("Measures     : {BENCH_METHOD}\n"));
+    s.push_str(&format!("Iterations   : {} warmup (untimed) + {} timed\n", r.warmup, r.runs));
+    s.push_str(&format!("Mean (ms)    : {:.3}\n", st.mean_ms));
+    s.push_str(&format!("Median (ms)  : {:.3}\n", st.median_ms));
+    s.push_str(&format!("p95  (ms)    : {:.3}\n", st.p95_ms));
+    s.push_str(&format!("p99  (ms)    : {:.3}\n", st.p99_ms));
+    s.push_str(&format!("Min  (ms)    : {:.3}\n", st.min_ms));
+    s.push_str(&format!("Max  (ms)    : {:.3}\n", st.max_ms));
+    s.push_str(&format!("Calls/s      : {:.2} (1000 / mean)\n", calls_per_sec(st.mean_ms)));
     s
 }
 
-/// JSON stats — same numbers, with the AC-required key names.
-pub fn format_bench_json(
-    runs: usize, mean_ms: f64, median_ms: f64,
-    p95_ms: f64, p99_ms: f64, min_ms: f64, max_ms: f64,
-) -> serde_json::Value {
-    let thr = if mean_ms > 0.0 { 1000.0 / mean_ms } else { 0.0 };
+pub fn format_bench_json(r: &BenchReport) -> serde_json::Value {
+    let st = &r.stats;
     serde_json::json!({
-        "runs":      runs,
-        "mean_ms":   mean_ms,
-        "median_ms": median_ms,
-        "p95_ms":    p95_ms,
-        "p99_ms":    p99_ms,
-        "min_ms":    min_ms,
-        "max_ms":    max_ms,
-        "throughput_inf_per_sec": thr,
+        "model":        r.model.display().to_string(),
+        "input_shape":  r.input_shape,
+        "runtime":      "crucible-native",
+        "method":       BENCH_METHOD,
+        "warmup":       r.warmup,
+        "runs":         r.runs,
+        "mean_ms":      st.mean_ms,
+        "median_ms":    st.median_ms,
+        "p95_ms":       st.p95_ms,
+        "p99_ms":       st.p99_ms,
+        "min_ms":       st.min_ms,
+        "max_ms":       st.max_ms,
+        "calls_per_sec": calls_per_sec(st.mean_ms),
     })
 }
 
@@ -185,10 +212,20 @@ mod tests {
 
     #[test]
     fn test_format_bench_json() {
-        let val = format_bench_json(10, 10.0, 9.5, 12.0, 13.0, 8.0, 14.0);
+        let report = BenchReport {
+            model: Path::new("m.onnx"),
+            input_shape: &[1, 7],
+            warmup: 3,
+            runs: 10,
+            stats: BenchStats { mean_ms: 10.0, median_ms: 9.5, p95_ms: 12.0, p99_ms: 13.0, min_ms: 8.0, max_ms: 14.0 },
+        };
+        let val = format_bench_json(&report);
         assert_eq!(val["runs"], 10);
+        assert_eq!(val["warmup"], 3);
+        assert_eq!(val["runtime"], "crucible-native");
         assert_eq!(val["mean_ms"], 10.0);
-        assert_eq!(val["throughput_inf_per_sec"], 100.0);
+        assert_eq!(val["calls_per_sec"], 100.0);
+        assert!(format_bench_text(&report).contains("3 warmup (untimed) + 10 timed"));
     }
 
     #[test]

@@ -1,30 +1,21 @@
 //! FFI bindings to the Crucible C ABI (engine/include/crucible/c_api.h).
 //!
-//! Three layers, top to bottom:
+//!   1. Public Rust API — `Model`, `Tensor`, `CrucibleError`,
+//!      `top_k_indices`. Safe Rust; no raw pointers except the borrowed
+//!      name arrays inside `ModelInfo` (read by formatter.rs).
+//!   2. `extern "C"` block — mirrors c_api.h; the library is linked at build
+//!      time by build.rs (`CRUCIBLE_LIB_DIR`).
+//!   3. Ownership — `crucible_run` mallocs each output's shape array and data
+//!      buffer; `OutputBuffers` frees every non-null pointer with
+//!      `crucible_free_array` on every path (success, engine error, or a
+//!      malformed descriptor detected here).
 //!
-//!   1. Public Rust API   — `Model`, `Tensor`, `Status`, `validate_model`,
-//!      `top_k_indices`. All safe Rust, no `unsafe`,
-//!      no raw pointers in the public surface.
-//!
-//!   2. Internal FFI      — `extern "C"` blocks below the public API.
-//!      Reproduces the C ABI exactly; the public
-//!      types wrap these.
-//!
-//!   3. Memory ownership  — output buffers from `crucible_run` are
-//!      caller-allocated (the C side fills them).
-//!      Shape arrays are malloc'd by the C side and
-//!      freed here with `libc::free` to match the
-//!      allocator.
-//!
-//! Why one module for the whole FFI? All the call sites are tiny and
-//! the boundary is the same in every place; spreading them across
-//! files would scatter the same `extern "C"` block four times.
-//!
-//! This module is the only place `unsafe` is allowed in the crate.
-//! Every other file is pure safe Rust on top of these wrappers.
+//! Engine errors carry the thread-local `crucible_last_error()` text, which
+//! is formatted by the engine as `"<CRUCIBLE_ERR_*>: <message>"`.
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -32,34 +23,13 @@ use thiserror::Error;
 // FFI types — mirror engine/include/crucible/c_api.h verbatim.
 // ---------------------------------------------------------------------------
 
-/// Mirrors `CrucibleStatus` in c_api.h.
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum Status {
-    Ok                   = 0,
-    InvalidArgument      = 1,
-    Io                   = 2,
-    Parse                = 3,
-    Runtime              = 4,
-    Unsupported          = 5,
-    Internal             = 6,
-}
+/// `CrucibleStatus` as returned over the ABI. Kept as a raw `i32` so an
+/// unexpected value from the library can never be UB.
+type RawStatus = i32;
+const STATUS_OK: RawStatus = 0;
 
-#[cfg(test)]
-fn _dummy_instantiate_status() {
-    let _ = [
-        Status::Ok,
-        Status::InvalidArgument,
-        Status::Io,
-        Status::Parse,
-        Status::Runtime,
-        Status::Unsupported,
-        Status::Internal,
-    ];
-}
-
-/// Mirrors `CrucibleModelInfo`. Populated by `model_info`.
+/// Mirrors `CrucibleModelInfo`. Populated by `crucible_model_info`; the name
+/// arrays are owned by the model and valid until it is freed.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ModelInfo {
@@ -75,31 +45,23 @@ pub struct ModelInfo {
 /// Mirrors `CrucibleTensorDesc`.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct TensorDesc {
-    pub shape: *mut i64,
-    pub rank:  i32,
-    pub size:  i64,
-    pub data:  *const f32,
+struct TensorDesc {
+    shape: *mut i64,
+    rank:  i32,
+    size:  i64,
+    data:  *const f32,
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct CrucibleModelOpaque {
+struct CrucibleModelOpaque {
     _private: [u8; 0],
 }
-pub type CrucibleModelHandle = *mut CrucibleModelOpaque;
+type CrucibleModelHandle = *mut CrucibleModelOpaque;
 
-// Extern "C" — declared verbatim from c_api.h. The names must match
-// exactly because Rust uses the C linker on the platforms we ship to
-// (Linux, macOS, Windows). If you rename a function on the C side,
-// update this block and the public wrapper below it.
 extern "C" {
     fn crucible_load(path: *const c_char) -> CrucibleModelHandle;
     fn crucible_free(model: CrucibleModelHandle);
-    fn crucible_model_info(
-        model: CrucibleModelHandle,
-        out:   *mut ModelInfo,
-    ) -> Status;
+    fn crucible_model_info(model: CrucibleModelHandle, out: *mut ModelInfo) -> RawStatus;
     fn crucible_run(
         model:        CrucibleModelHandle,
         input_descs:  *const TensorDesc,
@@ -107,9 +69,9 @@ extern "C" {
         outputs:      *mut *mut f32,
         output_descs: *mut TensorDesc,
         num_outputs:  i32,
-    ) -> Status;
+    ) -> RawStatus;
     fn crucible_last_error() -> *const c_char;
-    fn crucible_free_array(ptr: *mut std::ffi::c_void);
+    fn crucible_free_array(ptr: *mut c_void);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,32 +92,135 @@ pub enum CrucibleError {
     Unsupported(String),
     #[error("internal error: {0}")]
     Internal(String),
-    #[error("library not loaded: {0}")]
-    LibraryUnavailable(String),
     #[error("IO error: {0}")]
     Fs(#[from] std::io::Error),
 }
 
+/// Text of `crucible_last_error()` for this thread, if any.
+fn last_error() -> Option<String> {
+    // SAFETY: the engine returns NULL or a NUL-terminated string valid until
+    // the next fallible call on this thread; we copy it immediately.
+    unsafe {
+        let p = crucible_last_error();
+        (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+    }
+}
+
 impl CrucibleError {
-    fn from_status(s: Status) -> Self {
-        // Combine the enum-level tag with the thread-local message.
-        // Without the message the error is too generic to be useful
-        // (a user hitting CRUCIBLE_ERR_PARSE wants to know WHICH
-        // field was malformed).
-        let detail = unsafe {
-            let p = crucible_last_error();
-            if p.is_null() { "(no detail available from engine)".to_string() } else {
-                CStr::from_ptr(p).to_string_lossy().into_owned()
-            }
-        };
+    /// Build an error from a status code plus the engine's last error text.
+    fn from_status(s: RawStatus) -> Self {
+        let detail = last_error().unwrap_or_else(|| format!("engine returned status {s} without a message"));
         match s {
-            Status::Ok               => CrucibleError::Internal("OK returned as error".into()),
-            Status::InvalidArgument  => CrucibleError::InvalidArgument(detail),
-            Status::Io               => CrucibleError::Io(detail),
-            Status::Parse            => CrucibleError::Parse(detail),
-            Status::Runtime          => CrucibleError::Runtime(detail),
-            Status::Unsupported      => CrucibleError::Unsupported(detail),
-            Status::Internal         => CrucibleError::Internal(detail),
+            1 => CrucibleError::InvalidArgument(detail),
+            2 => CrucibleError::Io(detail),
+            3 => CrucibleError::Parse(detail),
+            4 => CrucibleError::Runtime(detail),
+            5 => CrucibleError::Unsupported(detail),
+            _ => CrucibleError::Internal(detail),
+        }
+    }
+
+    /// `crucible_load` returns NULL rather than a status; recover the status
+    /// from the `"<CRUCIBLE_ERR_*>: ..."` prefix of the stored message.
+    fn from_load_failure() -> Self {
+        let Some(detail) = last_error() else {
+            return CrucibleError::Internal("crucible_load returned NULL without an error message".into());
+        };
+        let status = [
+            ("CRUCIBLE_ERR_INVALID_ARGUMENT", 1),
+            ("CRUCIBLE_ERR_IO", 2),
+            ("CRUCIBLE_ERR_PARSE", 3),
+            ("CRUCIBLE_ERR_RUNTIME", 4),
+            ("CRUCIBLE_ERR_UNSUPPORTED", 5),
+        ]
+        .iter()
+        .find(|(prefix, _)| detail.strip_prefix(prefix).is_some_and(|rest| rest.starts_with(':')))
+        .map_or(6, |&(_, s)| s);
+        match status {
+            1 => CrucibleError::InvalidArgument(detail),
+            2 => CrucibleError::Io(detail),
+            3 => CrucibleError::Parse(detail),
+            4 => CrucibleError::Runtime(detail),
+            5 => CrucibleError::Unsupported(detail),
+            _ => CrucibleError::Internal(detail),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output buffer ownership
+// ---------------------------------------------------------------------------
+
+/// Output slots handed to `crucible_run`. Every non-null shape/data pointer
+/// is engine-malloc'd and released exactly once in `Drop`.
+struct OutputBuffers {
+    data:  Vec<*mut f32>,
+    descs: Vec<TensorDesc>,
+}
+
+impl OutputBuffers {
+    fn new(n: usize) -> Self {
+        OutputBuffers {
+            data:  vec![std::ptr::null_mut(); n],
+            descs: vec![
+                TensorDesc { shape: std::ptr::null_mut(), rank: 0, size: 0, data: std::ptr::null() };
+                n
+            ],
+        }
+    }
+
+    /// Copy output `i` into an owned tensor, validating the descriptor.
+    fn to_tensor(&self, i: usize) -> Result<Tensor, CrucibleError> {
+        let d = self.descs[i];
+        let buf = self.data[i];
+        if d.rank < 0 || d.size < 0 {
+            return Err(CrucibleError::Internal(format!(
+                "engine returned output {i} with rank {} and size {}", d.rank, d.size)));
+        }
+        let (rank, size) = (d.rank as usize, d.size as usize);
+        if rank > 0 && d.shape.is_null() {
+            return Err(CrucibleError::Internal(format!(
+                "engine returned output {i} with rank {rank} but a null shape")));
+        }
+        if size > 0 && buf.is_null() {
+            return Err(CrucibleError::Internal(format!(
+                "engine returned output {i} with {size} elements but a null data buffer")));
+        }
+        let shape = if rank == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: non-null, engine wrote `rank` dims.
+            unsafe { std::slice::from_raw_parts(d.shape, rank) }.to_vec()
+        };
+        let data = if size == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: non-null, engine wrote `size` floats.
+            unsafe { std::slice::from_raw_parts(buf, size) }.to_vec()
+        };
+        let expected = shape.iter().try_fold(1usize, |acc, &x| usize::try_from(x).ok().and_then(|x| acc.checked_mul(x)));
+        if expected != Some(size) {
+            return Err(CrucibleError::Internal(format!(
+                "engine returned output {i} with shape {shape:?} but {size} elements")));
+        }
+        Ok(Tensor { shape, data })
+    }
+}
+
+impl Drop for OutputBuffers {
+    fn drop(&mut self) {
+        for (buf, desc) in self.data.iter().zip(&self.descs) {
+            // SAFETY: each pointer is either NULL (a no-op for free) or was
+            // malloc'd by the engine for this call and not yet freed. On
+            // failure the engine leaves slots NULL or frees+NULLs them itself.
+            unsafe {
+                if !buf.is_null() {
+                    crucible_free_array(*buf as *mut c_void);
+                }
+                if !desc.shape.is_null() {
+                    crucible_free_array(desc.shape as *mut c_void);
+                }
+            }
         }
     }
 }
@@ -164,71 +229,53 @@ impl CrucibleError {
 // Public model handle
 // ---------------------------------------------------------------------------
 
-/// Owning handle to a loaded Crucible model. Drop releases the
-/// underlying C++ resources via `crucible_free`.
+/// Owning handle to a loaded Crucible model. Drop releases it via `crucible_free`.
 pub struct Model {
     handle: CrucibleModelHandle,
 }
 
 impl Model {
-    /// Load a .onnx file. Returns the parsed model or an error.
-    ///
-    /// Library load failure (DLL/.so not on the loader's path) is
-    /// surfaced as `LibraryUnavailable`. Library load is deferred
-    /// until the first `load` call so the rest of the CLI can still
-    /// print --help without the engine present.
+    /// Load and parse a .onnx file through `crucible_load`.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CrucibleError> {
         let path_str = path.as_ref().to_str().ok_or_else(|| {
             CrucibleError::InvalidArgument("path is not UTF-8".into())
         })?;
-        let cpath = std::ffi::CString::new(path_str)
+        let cpath = CString::new(path_str)
             .map_err(|_| CrucibleError::InvalidArgument("path contains NUL".into()))?;
-        // SAFETY: cpath is a valid C string and is consumed before
-        // this call returns. The library is loaded lazily — if it
-        // isn't on the search path, the symbol lookup below fails.
+        // SAFETY: cpath is a valid C string for the duration of the call.
         let handle = unsafe { crucible_load(cpath.as_ptr()) };
         if handle.is_null() {
-            // Distinguish library-not-found from engine-reported
-            // failure by checking if there's a stored C error message.
-            let detail = unsafe {
-                let p = crucible_last_error();
-                if p.is_null() { String::new() } else {
-                    CStr::from_ptr(p).to_string_lossy().into_owned()
-                }
-            };
-            if !detail.is_empty() {
-                return Err(CrucibleError::Parse(detail));
-            }
-            return Err(CrucibleError::LibraryUnavailable(
-                load_library_diagnostics(path_str),
-            ));
+            return Err(CrucibleError::from_load_failure());
         }
         Ok(Model { handle })
     }
 
-    /// Populate a `ModelInfo` snapshot.
+    /// Static metadata snapshot (`crucible_model_info`).
     pub fn info(&self) -> Result<ModelInfo, CrucibleError> {
         let mut info = std::mem::MaybeUninit::<ModelInfo>::uninit();
-        // SAFETY: `info` is a valid out-pointer; we initialise it
-        // before reading.
+        // SAFETY: `info` is a valid out-pointer; read only on success.
         let s = unsafe { crucible_model_info(self.handle, info.as_mut_ptr()) };
-        if s == Status::Ok {
-            // SAFETY: status is OK so the out-param was written.
+        if s == STATUS_OK {
+            // SAFETY: status OK means every field was written.
             Ok(unsafe { info.assume_init() })
         } else {
             Err(CrucibleError::from_status(s))
         }
     }
 
-    /// Run a single inference. `inputs` must match the model's
-    /// declared inputs in number; each must be rank-matching.
+    /// Run one inference; returns all declared outputs (the engine currently
+    /// materialises only the first; the rest come back empty).
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, CrucibleError> {
-        // Build the C-side input descriptor array. We do NOT take
-        // ownership of the input data; the model only reads it
-        // during the call.
-        let mut in_descs: Vec<TensorDesc> = inputs
+        self.run_timed(inputs).map(|(outs, _)| outs)
+    }
+
+    /// Like `run`, also returning the wall-clock time of the `crucible_run`
+    /// FFI call alone (excludes descriptor setup and copying outputs out).
+    pub fn run_timed(&self, inputs: &[Tensor]) -> Result<(Vec<Tensor>, Duration), CrucibleError> {
+        let in_descs: Vec<TensorDesc> = inputs
             .iter()
             .map(|t| TensorDesc {
+                // The engine only reads through this pointer.
                 shape: t.shape.as_ptr() as *mut i64,
                 rank:  t.shape.len() as i32,
                 size:  t.data.len() as i64,
@@ -236,103 +283,37 @@ impl Model {
             })
             .collect();
 
-        // Query the model for output count so we can size the
-        // output buffers up front. We re-query each call to keep
-        // the public API simple — info is cheap.
-        let info = self.info()?;
-        let n_out = info.num_outputs;
-        if n_out < 0 {
-            return Err(CrucibleError::Internal(format!(
-                "C library returned negative num_outputs: {n_out}")));
-        }
-        let n_out = n_out as usize;
-        if n_out == 0 {
-            return Ok(Vec::new());
-        }
+        let n_out = usize::try_from(self.info()?.num_outputs).map_err(|_| {
+            CrucibleError::Internal("engine reported a negative output count".into())
+        })?;
+        let mut outs = OutputBuffers::new(n_out);
 
-        // The C ABI writes the shape array pointer and the float
-        // buffer pointer into caller-owned slots.
-        let mut out_buf:  Vec<*mut f32>     = vec![std::ptr::null_mut(); n_out];
-        let mut out_desc: Vec<TensorDesc>  = (0..n_out)
-            .map(|_| TensorDesc {
-                shape: std::ptr::null_mut(),
-                rank:  0,
-                size:  0,
-                data:  std::ptr::null(),
-            })
-            .collect();
-
-        // SAFETY: all out-pointers are valid; the slices point to
-        // caller-owned buffers of the right length. After the call,
-        // each non-null out_desc[i].shape and out_buf[i] must be
-        // freed with crucible_free_array to match the C allocator.
+        let t0 = Instant::now();
+        // SAFETY: input descriptors borrow `inputs`, which outlives the call;
+        // output arrays have exactly `n_out` slots as the ABI requires.
         let s = unsafe {
             crucible_run(
                 self.handle,
                 in_descs.as_ptr(),
                 in_descs.len() as i32,
-                out_buf.as_mut_ptr(),
-                out_desc.as_mut_ptr(),
+                outs.data.as_mut_ptr(),
+                outs.descs.as_mut_ptr(),
                 n_out as i32,
             )
         };
-        if s != Status::Ok {
+        let elapsed = t0.elapsed();
+        if s != STATUS_OK {
             return Err(CrucibleError::from_status(s));
         }
-
-        // Wrap each output into a Rust Tensor and copy the data so
-        // the caller doesn't need to think about libc ownership.
-        let mut result = Vec::with_capacity(n_out);
-        for i in 0..n_out {
-            let od = out_desc[i];
-            if od.size == 0 || out_buf[i].is_null() {
-                result.push(Tensor::empty());
-                continue;
-            }
-            // Copy shape out of the malloc'd array BEFORE freeing it.
-            let rank = od.rank;
-            if rank < 0 {
-                unsafe {
-                    crucible_free_array(od.shape as *mut std::ffi::c_void);
-                    crucible_free_array(out_buf[i] as *mut std::ffi::c_void);
-                }
-                return Err(CrucibleError::Internal(format!(
-                    "C library returned negative rank: {rank}")));
-            }
-            let rank = rank as usize;
-            let mut shape = Vec::<i64>::with_capacity(rank);
-            // SAFETY: od.shape is malloc'd and `rank` matches the
-            // number of elements the C side wrote.
-            unsafe {
-                std::ptr::copy_nonoverlapping(od.shape, shape.as_mut_ptr(), rank);
-                shape.set_len(rank);
-                crucible_free_array(od.shape as *mut std::ffi::c_void);
-            }
-            // Same dance for the float buffer.
-            let size = od.size as usize;
-            let mut data = Vec::<f32>::with_capacity(size);
-            // SAFETY: out_buf[i] is malloc'd and `size` matches the
-            // number of elements the C side wrote.
-            unsafe {
-                std::ptr::copy_nonoverlapping(out_buf[i], data.as_mut_ptr(), size);
-                data.set_len(size);
-                crucible_free_array(out_buf[i] as *mut std::ffi::c_void);
-            }
-            // Tell the borrow checker that `in_descs` is unused
-            // beyond this point so the input data lifetime is over.
-            let _ = &mut in_descs;
-            result.push(Tensor { shape, data });
-        }
-        Ok(result)
+        let tensors = (0..n_out).map(|i| outs.to_tensor(i)).collect::<Result<Vec<_>, _>>()?;
+        Ok((tensors, elapsed))
     }
 }
 
 impl Drop for Model {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            // SAFETY: handle came from a successful crucible_load.
-            unsafe { crucible_free(self.handle); }
-        }
+        // SAFETY: handle came from a successful crucible_load and is freed once.
+        unsafe { crucible_free(self.handle) }
     }
 }
 
@@ -340,9 +321,7 @@ impl Drop for Model {
 // Public Tensor
 // ---------------------------------------------------------------------------
 
-/// Owned multi-dimensional float32 tensor with row-major storage.
-/// The same shape/dtype model used inside the C++ engine; only the
-/// buffer ownership is Rust-friendly.
+/// Owned float32 tensor with row-major storage.
 #[derive(Debug, Clone)]
 pub struct Tensor {
     pub shape: Vec<i64>,
@@ -350,13 +329,12 @@ pub struct Tensor {
 }
 
 impl Tensor {
-    /// All-zero tensor with no elements (empty placeholder).
+    /// Tensor with no shape and no elements (absent output).
     pub fn empty() -> Self {
         Tensor { shape: Vec::new(), data: Vec::new() }
     }
 
-    /// Read a JSON tensor file. Expected shape:
-    ///   { "shape": [N, C, H, W], "data": [..] }
+    /// Read a JSON tensor file: `{ "shape": [N, C, H, W], "data": [..] }`.
     pub fn from_json_file(path: &Path) -> Result<Self, CrucibleError> {
         let s = std::fs::read_to_string(path)?;
         let v: serde_json::Value =
@@ -385,12 +363,10 @@ impl Tensor {
             data.push(x.as_f64().ok_or_else(|| CrucibleError::InvalidArgument(
                 "input JSON data entries must be number".into()))? as f32);
         }
-        // Cross-check: declared size must match data length.
-        let expected: i64 = shape.iter().try_fold(1i64, |acc, &d| {
-            acc.checked_mul(d).ok_or(CrucibleError::Parse(
-                format!("shape dimensions overflow i64: {shape:?}")))
-        })?;
-        if expected as usize != data.len() {
+        let expected = shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
+            .ok_or_else(|| CrucibleError::InvalidArgument(
+                format!("shape dimensions overflow: {shape:?}")))?;
+        if expected != data.len() {
             return Err(CrucibleError::InvalidArgument(format!(
                 "input shape product {expected} != data length {}",
                 data.len())));
@@ -400,63 +376,17 @@ impl Tensor {
 }
 
 // ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-/// Run the engine's parse-only path on a file and return the
-/// populated info block if successful. We don't expose a separate
-/// `crucible_validate` entry point; the existing `crucible_load` +
-/// `crucible_free` is enough to validate the file (the C++ side
-/// parses on load and would have raised on any malformed field).
-pub fn validate_model(path: &Path) -> Result<ModelInfo, CrucibleError> {
-    let m = Model::load(path)?;
-    let info = m.info()?;
-    Ok(info)
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Top-k indices by descending value. Used by `run --top` to print
-/// ImageNet predictions.
+/// Top-k (index, value) pairs by descending value; NaNs are skipped.
 pub fn top_k_indices(values: &[f32], k: usize) -> Vec<(usize, f32)> {
     let mut indexed: Vec<(usize, f32)> = values.iter()
         .copied()
         .enumerate()
         .filter(|(_, val)| !val.is_nan())
         .collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
     indexed.truncate(k);
     indexed
-}
-
-// ---------------------------------------------------------------------------
-// Library load diagnostics
-// ---------------------------------------------------------------------------
-
-/// Best-effort: search the standard Crucible library names on the
-/// loader's path so the user knows WHERE to put libcrucible.{so,dylib,dll}.
-/// We try the names in the order most-likely-to-succeed; if none
-/// load, we report the canonical "searched these" list.
-fn load_library_diagnostics(model_path: &str) -> String {
-    #[cfg(target_os = "windows")]
-    const CANDIDATES: &[&str] = &["crucible.dll"];
-    #[cfg(target_os = "macos")]
-    const CANDIDATES: &[&str] = &["libcrucible.dylib", "libcrucible.so"];
-    #[cfg(all(unix, not(target_os = "macos")))]
-    const CANDIDATES: &[&str] = &["libcrucible.so"];
-
-    let model_dir = std::path::Path::new(model_path)
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| ".".to_string());
-
-    format!(
-        "could not load the Crucible native library when loading model at '{}'. \
-         Tried library names: {:?}. Build the engine (cmake --build build/release) and either copy \
-         the resulting shared object to '{}' or add its directory to \
-         LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH.",
-        model_path, CANDIDATES, model_dir,
-    )
 }

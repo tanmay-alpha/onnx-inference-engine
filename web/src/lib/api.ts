@@ -1,282 +1,33 @@
-import fs from "fs";
-import path from "path";
+// =====================================================================
+// Crucible server API client.
+//
+// Every protected request authenticates with `Authorization: Bearer <JWT>`
+// (the token returned by POST /auth/login). Network failures surface as
+// BackendOfflineError so pages can show an explicit "backend offline" state
+// instead of breaking. Nothing here fabricates data: when the server cannot
+// answer, callers get an error, not a fallback.
+// =====================================================================
 
-export interface BenchmarkStats {
-  runs: number;
-  mean_ms: number;
-  median_ms: number;
-  p95_ms: number;
-  p99_ms: number;
-  min_ms: number;
-  max_ms: number;
-  throughput_inf_per_sec: number;
-}
+export const API_BASE: string = (
+  (import.meta.env.VITE_API_URL as string | undefined) || "http://localhost:8000"
+).replace(/\/+$/, "");
 
-export interface BenchmarkResultItem {
-  engine: string;
-  backend: string;
-  model: string;
-  input_shape: number[];
-  stats: BenchmarkStats;
-}
-
-export interface BenchmarkData {
-  meta: {
-    generated_at_unix: number;
-    wall_clock_seconds: number;
-    runs: number;
-    warmup: number;
-    seed: number;
-  };
-  results: BenchmarkResultItem[];
-  summary: {
-    engines: string[];
-    fastest_mean: string;
-    fastest_p95: string;
-    crucible_vs_ort: number | null;
-    crucible_vs_pytorch: number | null;
-    ac_within_3x: boolean | null;
-    ac_ratio_limit: number;
-    note?: string;
-  };
-}
-
-export interface ChartDataPoint {
-  size: string;
-  crucible: number;
-  onnxruntime: number;
-  pytorch: number;
-}
-
-export interface SupportedOp {
-  name: string;
-  opType: string;
-  category: string;
-  description: string;
-  backend: string;
-  wasmSupported: boolean;
-}
-
-export function getBenchmarkResults(): BenchmarkData {
-  if (typeof window === "undefined") {
-    try {
-      const filePath = path.join(process.cwd(), "../benchmarks/results/benchmark_results.json");
-      if (fs.existsSync(filePath)) {
-        const content = fs.readFileSync(filePath, "utf-8");
-        const data = JSON.parse(content) as BenchmarkData;
-        const hasRealCppData = data.results.some(
-          (r) => r.engine === "crucible" && r.stats.mean_ms > 0.1,
-        );
-        if (hasRealCppData) {
-          return data;
-        }
-      }
-    } catch (e) {
-      console.warn(
-        "Failed to read benchmark_results.json from file system, using static fallback:",
-        e,
-      );
-    }
+export class BackendOfflineError extends Error {
+  constructor() {
+    super(`Backend offline: could not reach the Crucible API at ${API_BASE}.`);
+    this.name = "BackendOfflineError";
   }
-
-  return {
-    meta: {
-      generated_at_unix: 1782330514,
-      wall_clock_seconds: 3.73,
-      runs: 100,
-      warmup: 10,
-      seed: 0,
-    },
-    results: [
-      {
-        engine: "crucible",
-        backend: "C++17 Core (Eigen)",
-        model: "mobilenet_v2.onnx",
-        input_shape: [1, 3, 224, 224],
-        stats: {
-          runs: 100,
-          mean_ms: 14.3,
-          median_ms: 13.9,
-          p95_ms: 18.2,
-          p99_ms: 22.1,
-          min_ms: 12.8,
-          max_ms: 31.4,
-          throughput_inf_per_sec: 69.9,
-        },
-      },
-      {
-        engine: "onnxruntime",
-        backend: "ORT CPU (MLAS)",
-        model: "mobilenet_v2.onnx",
-        input_shape: [1, 3, 224, 224],
-        stats: {
-          runs: 100,
-          mean_ms: 11.5,
-          median_ms: 10.8,
-          p95_ms: 14.5,
-          p99_ms: 18.1,
-          min_ms: 9.8,
-          max_ms: 24.3,
-          throughput_inf_per_sec: 86.9,
-        },
-      },
-      {
-        engine: "pytorch",
-        backend: "Torch CPU (ATen)",
-        model: "mobilenet_v2.onnx",
-        input_shape: [1, 3, 224, 224],
-        stats: {
-          runs: 100,
-          mean_ms: 18.4,
-          median_ms: 17.5,
-          p95_ms: 22.4,
-          p99_ms: 28.5,
-          min_ms: 15.6,
-          max_ms: 39.2,
-          throughput_inf_per_sec: 54.3,
-        },
-      },
-    ],
-    summary: {
-      engines: ["crucible", "onnxruntime", "pytorch"],
-      fastest_mean: "onnxruntime",
-      fastest_p95: "onnxruntime",
-      crucible_vs_ort: 1.24,
-      crucible_vs_pytorch: 0.78,
-      ac_within_3x: true,
-      ac_ratio_limit: 3.0,
-      note: "Crucible is running with C++ core Eigen integration. Performance is within 1.24x of ONNX Runtime CPU and beats PyTorch CPU by 22%.",
-    },
-  };
 }
 
-export function getChartData(): ChartDataPoint[] {
-  return [
-    { size: "Tiny (1M)", crucible: 1.2, onnxruntime: 0.8, pytorch: 1.5 },
-    { size: "Small (5M)", crucible: 5.4, onnxruntime: 3.8, pytorch: 6.2 },
-    { size: "Medium (11M)", crucible: 14.3, onnxruntime: 11.5, pytorch: 18.4 },
-    { size: "Large (25M)", crucible: 32.1, onnxruntime: 25.4, pytorch: 39.2 },
-    { size: "Huge (50M)", crucible: 68.4, onnxruntime: 54.2, pytorch: 82.5 },
-  ];
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
 }
-
-export function getSupportedOps(): SupportedOp[] {
-  return [
-    {
-      name: "Linear Matrix Multiply",
-      opType: "MatMul",
-      category: "Linear Algebra",
-      description: "Performs matrix multiplication of 2D inputs.",
-      backend: "Eigen::Map row-major product matrix",
-      wasmSupported: true,
-    },
-    {
-      name: "General Matrix Multiply",
-      opType: "Gemm",
-      category: "Linear Algebra",
-      description: "General matrix multiplication mapping: Y = alpha * A * B + beta * C.",
-      backend: "Eigen::Map product + broadcast addition",
-      wasmSupported: false,
-    },
-    {
-      name: "2D Convolution",
-      opType: "Conv",
-      category: "Convolution",
-      description: "2D spatial convolution supporting padding, stride, channels, and groups=1.",
-      backend: "im2col mapping + Eigen GEMM multiplication",
-      wasmSupported: false,
-    },
-    {
-      name: "Rectified Linear Unit",
-      opType: "Relu",
-      category: "Activation",
-      description: "Applies element-wise thresholding: max(0, x).",
-      backend: "Eigen element-wise cwiseMax(0.0f)",
-      wasmSupported: true,
-    },
-    {
-      name: "Sigmoid Activation",
-      opType: "Sigmoid",
-      category: "Activation",
-      description: "Applies element-wise sigmoid mapping: 1 / (1 + e^-x).",
-      backend: "Eigen unary expression (exponential)",
-      wasmSupported: true,
-    },
-    {
-      name: "Softmax Normalization",
-      opType: "Softmax",
-      category: "Activation",
-      description: "Exponent-normalizes elements along the specified axis (defaults to -1).",
-      backend: "Eigen 2D slice reduction (numerical stable max shift)",
-      wasmSupported: true,
-    },
-    {
-      name: "GELU Activation",
-      opType: "Gelu",
-      category: "Activation",
-      description:
-        "Gaussian Error Linear Unit using tanh approximation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).",
-      backend: "Eigen unary expression (approximation coefficients)",
-      wasmSupported: false,
-    },
-    {
-      name: "Max Pooling",
-      opType: "MaxPool",
-      category: "Pooling",
-      description: "Applies max pooling in a 2D sliding window.",
-      backend: "Sliding window spatial block scan",
-      wasmSupported: false,
-    },
-    {
-      name: "Average Pooling",
-      opType: "AveragePool",
-      category: "Pooling",
-      description: "Applies average pooling in a 2D sliding window.",
-      backend: "Sliding window spatial block sum / area size",
-      wasmSupported: false,
-    },
-    {
-      name: "Global Average Pooling",
-      opType: "GlobalAveragePool",
-      category: "Pooling",
-      description: "Collapses 2D spatial dimensions to their channel-wise mean.",
-      backend: "Eigen channel-wise block average reduction",
-      wasmSupported: false,
-    },
-    {
-      name: "Batch Normalization",
-      opType: "BatchNormalization",
-      category: "Normalization",
-      description: "Normalizes activation channels in inference mode.",
-      backend: "Eigen broadcast scaling: (X - mean) * scale / sqrt(var + eps) + B",
-      wasmSupported: false,
-    },
-    {
-      name: "Flatten Tensor",
-      opType: "Flatten",
-      category: "Tensor Manipulation",
-      description: "Collapses input shape dimensions into a 2D layout based on split axis.",
-      backend: "Vector shape transformation",
-      wasmSupported: false,
-    },
-    {
-      name: "Reshape Tensor",
-      opType: "Reshape",
-      category: "Tensor Manipulation",
-      description: "Changes the dimensions of the shape array while preserving total size.",
-      backend: "Vector shape transformation",
-      wasmSupported: false,
-    },
-  ];
-}
-
-// =====================================================================
-// Server & Database API Helpers
-// =====================================================================
-const API_BASE =
-  typeof window !== "undefined"
-    ? (import.meta.env.VITE_API_URL as string) || "http://localhost:8000"
-    : "http://localhost:8000";
 
 // ---- Token storage helpers ----
 export function getToken(): string | null {
@@ -302,12 +53,12 @@ export function setUserEmail(email: string | null): void {
   }
 }
 
-export function getAuthHeaders(): Record<string, string> {
+/** Auth headers for protected endpoints (JWT as a Bearer token). */
+export function getAuthHeaders(json = true): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (json) headers["Content-Type"] = "application/json";
   const token = getToken();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) {
-    headers["X-API-Key"] = token;
-  }
+  if (token) headers.Authorization = `Bearer ${token}`;
   return headers;
 }
 
@@ -316,37 +67,118 @@ export function logout(): void {
   setUserEmail(null);
 }
 
+function errorDetail(body: unknown, fallback: string): string {
+  if (body && typeof body === "object" && "detail" in body) {
+    const d = (body as { detail: unknown }).detail;
+    if (typeof d === "string") return d;
+    if (Array.isArray(d)) {
+      return d
+        .map((e) =>
+          e && typeof e === "object" && "msg" in e
+            ? String((e as { msg: unknown }).msg)
+            : String(e),
+        )
+        .join("; ");
+    }
+  }
+  return fallback;
+}
+
+/** fetch() against the API. Throws BackendOfflineError / ApiError; returns parsed JSON. */
+async function apiFetch<T>(path: string, init: RequestInit, fallbackError: string): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, init);
+  } catch {
+    throw new BackendOfflineError();
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    if (res.status === 401) {
+      throw new ApiError(errorDetail(body, "Not authenticated — please log in."), 401);
+    }
+    throw new ApiError(`${errorDetail(body, fallbackError)} (HTTP ${res.status})`, res.status);
+  }
+  return (await res.json()) as T;
+}
+
+// ---- Types (mirror the server contract) ----
+
+export interface TensorInfo {
+  name: string;
+  /** -1 marks a symbolic dimension; null when the model declares no shape. */
+  shape: number[] | null;
+  dtype: string;
+}
+
 export interface RegisteredModel {
   id: string;
   name: string;
-  file_size_bytes: number;
-  input_shape: number[];
-  operators: string[];
-  all_supported: boolean;
+  size_bytes: number;
   created_at: string;
-  usage_count?: number;
-  inference_count?: number;
-  avg_latency_ms?: number;
-  last_used?: string | null;
+  opset: number | null;
+  operators_used: string[];
+  all_supported: boolean;
+  unsupported_reasons: string[];
+  inputs: TensorInfo[];
+  outputs: TensorInfo[];
+}
+
+export interface ConvertResult {
+  onnx_model_id: string;
+  name: string;
+  size_bytes: number;
+  opset: number | null;
+  operators_used: string[];
+  all_supported: boolean;
+  unsupported_ops: string[];
+  unsupported_reasons: string[];
+  inputs: TensorInfo[];
+  outputs: TensorInfo[];
+}
+
+export interface InferResult {
+  model_id: string;
+  output: number[];
+  output_shape: number[];
+  /** Server-side engine time only (perf_counter around crucible_py.run). */
+  inference_time_ms: number;
+  backend: string;
+  engine: string;
+}
+
+export interface HealthInfo {
+  status: string;
+  engine: string;
+  native_available: boolean;
+  version: string;
 }
 
 export interface ApiKeyInfo {
   id: string;
   name: string;
-  prefix: string;
+  key_prefix: string;
+  is_active: boolean;
+  rate_limit: number;
+  last_used: string | null;
   created_at: string;
   expires_at: string | null;
-  is_active: boolean;
-  last_used: string | null;
 }
 
-export interface ApiKeyCreated {
+export interface ApiKeyCreated extends ApiKeyInfo {
+  /** The full key; returned only once, at creation. */
+  full_key: string;
+}
+
+export interface InferenceLog {
   id: string;
-  key: string;
-  name: string;
-  prefix: string;
+  model_id: string;
+  latency_ms: number;
+  backend: string;
+  input_shape: number[];
+  output_shape: number[];
+  status: string;
   created_at: string;
-  expires_at: string | null;
 }
 
 export interface AuthUser {
@@ -378,229 +210,162 @@ export interface FraudHistoryRecord {
   created_at: string;
 }
 
-export interface BenchmarkRecord {
-  id: string;
-  model_name: string;
-  engine: string;
-  latency_ms: number;
-  memory_mb: number;
-  created_at: string;
-}
-
-export interface AnalyticsData {
-  inference: {
-    period_days: number;
-    data: {
-      date: string;
-      count: number;
-      avg_latency_ms: number;
-      min_latency_ms: number;
-      max_latency_ms: number;
-    }[];
-  };
-  fraud: {
-    period_days: number;
-    data: {
-      date: string;
-      total: number;
-      fraud_count: number;
-      avg_probability: number;
-    }[];
-  };
-  models: {
-    id: string;
-    name: string;
-    usage_count: number;
-    inference_count: number;
+export interface InferenceAnalytics {
+  period_days: number;
+  data: {
+    date: string;
+    count: number;
     avg_latency_ms: number;
-    last_used: string | null;
+    min_latency_ms: number;
+    max_latency_ms: number;
   }[];
 }
 
-// ---- Auth functions ----
+export interface FraudAnalytics {
+  period_days: number;
+  data: {
+    date: string;
+    total: number;
+    fraud_count: number;
+    avg_probability: number;
+  }[];
+}
+
+export interface ModelUsage {
+  id: string;
+  name: string;
+  usage_count: number;
+  inference_count: number;
+  avg_latency_ms: number;
+  last_used: string | null;
+}
+
+// ---- Health ----
+
+/** GET /health. Throws BackendOfflineError when the API is unreachable. */
+export async function getHealth(): Promise<HealthInfo> {
+  return apiFetch<HealthInfo>("/health", {}, "Health check failed");
+}
+
+// ---- Auth ----
 
 export async function register(
   email: string,
   password: string,
   fullName: string,
 ): Promise<AuthUser> {
-  const res = await fetch(`${API_BASE}/auth/register`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, full_name: fullName }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Registration failed" }));
-    throw new Error(err.detail || "Registration failed");
-  }
-  const data = await res.json();
-  return data;
+  return apiFetch<AuthUser>(
+    "/auth/register",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, full_name: fullName }),
+    },
+    "Registration failed",
+  );
 }
 
 export async function login(email: string, password: string): Promise<AuthToken> {
-  const res = await fetch(`${API_BASE}/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Login failed" }));
-    throw new Error(err.detail || "Invalid email or password");
-  }
-  const data = await res.json();
-  const token = data.access_token;
-  setToken(token);
-  // Fetch user info after login so the UI has the email
+  const data = await apiFetch<{ access_token: string; token_type: string }>(
+    "/auth/login",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    },
+    "Invalid email or password",
+  );
+  setToken(data.access_token);
   let user: AuthUser | null = null;
   try {
-    const meRes = await fetch(`${API_BASE}/auth/me`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (meRes.ok) user = await meRes.json();
+    user = await apiFetch<AuthUser>("/auth/me", { headers: getAuthHeaders(false) }, "");
   } catch {
-    /* non-fatal */
+    /* non-fatal: the UI falls back to the typed email */
   }
-  if (user) setUserEmail(user.email);
+  setUserEmail(user?.email ?? email);
   return {
-    access_token: token,
+    access_token: data.access_token,
     token_type: data.token_type,
     user: user || { id: "", email, full_name: null, is_active: true, created_at: "" },
   };
 }
 
 export async function getCurrentUser(): Promise<AuthUser | null> {
-  const token = getToken();
-  if (!token) return null;
+  if (!getToken()) return null;
   try {
-    const res = await fetch(`${API_BASE}/auth/me`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) {
-      logout();
-      return null;
-    }
-    return await res.json();
-  } catch {
+    return await apiFetch<AuthUser>("/auth/me", { headers: getAuthHeaders(false) }, "");
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) logout();
     return null;
   }
 }
 
-// ---- API Key functions ----
+// ---- API keys ----
 
 export async function createApiKey(name: string, expiresInDays?: number): Promise<ApiKeyCreated> {
-  const token = getToken();
-  if (!token) throw new Error("Not authenticated");
-
-  const res = await fetch(`${API_BASE}/auth/api-key`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-Key": token,
+  return apiFetch<ApiKeyCreated>(
+    "/auth/api-key",
+    {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ name, expires_in_days: expiresInDays ?? null }),
     },
-    body: JSON.stringify({
-      name,
-      expires_in_days: expiresInDays ?? null,
-    }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Failed to create API key" }));
-    throw new Error(err.detail || "Failed to create API key");
-  }
-  return await res.json();
+    "Failed to create API key",
+  );
 }
 
 export async function listApiKeys(): Promise<ApiKeyInfo[]> {
-  const token = getToken();
-  if (!token) throw new Error("Not authenticated");
-
-  const res = await fetch(`${API_BASE}/auth/api-keys`, {
-    headers: {
-      "X-API-Key": token,
-    },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Failed to list API keys" }));
-    throw new Error(err.detail || "Failed to list API keys");
-  }
-  const data = await res.json();
-  return data.api_keys || [];
+  return apiFetch<ApiKeyInfo[]>(
+    "/auth/api-keys",
+    { headers: getAuthHeaders(false) },
+    "Failed to list API keys",
+  );
 }
 
-export async function revokeApiKey(keyId: string): Promise<boolean> {
-  const token = getToken();
-  if (!token) throw new Error("Not authenticated");
-
-  const res = await fetch(`${API_BASE}/auth/api-key/${encodeURIComponent(keyId)}`, {
-    method: "DELETE",
-    headers: {
-      "X-API-Key": token,
-    },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Failed to revoke API key" }));
-    throw new Error(err.detail || "Failed to revoke API key");
-  }
-  return true;
+export async function revokeApiKey(keyId: string): Promise<void> {
+  await apiFetch<unknown>(
+    `/auth/api-key/${encodeURIComponent(keyId)}`,
+    { method: "DELETE", headers: getAuthHeaders(false) },
+    "Failed to revoke API key",
+  );
 }
 
-// ---- Model functions ----
+// ---- Models ----
 
 export async function fetchModels(): Promise<RegisteredModel[]> {
-  try {
-    const res = await fetch(`${API_BASE}/models`);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.models || [];
-  } catch (err) {
-    console.warn("Could not fetch models from server database:", err);
-    return [];
-  }
+  const data = await apiFetch<{ models: RegisteredModel[] }>(
+    "/models",
+    { headers: getAuthHeaders(false) },
+    "Failed to list models",
+  );
+  return data.models;
 }
 
-export async function uploadModel(file: File, inputShape: number[]): Promise<RegisteredModel> {
-  const token = getToken();
-  const apiKey = token ? token : "";
+export async function getModel(modelId: string): Promise<RegisteredModel> {
+  return apiFetch<RegisteredModel>(
+    `/models/${encodeURIComponent(modelId)}`,
+    { headers: getAuthHeaders(false) },
+    "Failed to load model",
+  );
+}
+
+/** POST /convert — stores the model (even if unsupported) and returns its static analysis. */
+export async function uploadModel(file: File | Blob, fileName: string): Promise<ConvertResult> {
   const form = new FormData();
-  form.append("model_file", file);
-  form.append("input_shape", JSON.stringify(inputShape));
-
-  const res = await fetch(`${API_BASE}/convert`, {
-    method: "POST",
-    headers: {
-      "X-API-Key": apiKey,
-    },
-    body: form,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Model upload failed" }));
-    throw new Error(err.detail || "Model upload failed");
-  }
-  const data = await res.json();
-  return {
-    id: data.onnx_model_id,
-    name: file.name,
-    file_size_bytes: file.size,
-    input_shape: inputShape,
-    operators: data.operators_used || [],
-    all_supported: data.all_supported ?? false,
-    created_at: new Date().toISOString(),
-  };
+  form.append("model_file", file, fileName);
+  return apiFetch<ConvertResult>(
+    "/convert",
+    { method: "POST", headers: getAuthHeaders(false), body: form },
+    "Model upload failed",
+  );
 }
 
-export async function deleteModel(modelId: string): Promise<boolean> {
-  const token = getToken();
-  const apiKey = token ? token : "";
-  const res = await fetch(`${API_BASE}/models/${encodeURIComponent(modelId)}`, {
-    method: "DELETE",
-    headers: {
-      "X-API-Key": apiKey,
-    },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Delete failed" }));
-    throw new Error(err.detail || "Delete failed");
-  }
-  return true;
+export async function deleteModel(modelId: string): Promise<void> {
+  await apiFetch<unknown>(
+    `/models/${encodeURIComponent(modelId)}`,
+    { method: "DELETE", headers: getAuthHeaders(false) },
+    "Delete failed",
+  );
 }
 
 // ---- Inference ----
@@ -609,32 +374,29 @@ export async function runInference(
   modelId: string,
   inputData: number[],
   inputShape: number[],
-): Promise<{ output: number[]; shape: number[]; latency_ms: number }> {
-  const token = getToken();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (token) {
-    headers["X-API-Key"] = token;
-  }
-
-  const res = await fetch(`${API_BASE}/infer`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model_id: modelId,
-      input: inputData,
-      input_shape: inputShape,
-    }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Inference failed" }));
-    throw new Error(err.detail || "Inference failed");
-  }
-  return await res.json();
+): Promise<InferResult> {
+  return apiFetch<InferResult>(
+    "/infer",
+    {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ model_id: modelId, input: inputData, input_shape: inputShape }),
+    },
+    "Inference failed",
+  );
 }
 
-// ---- Fraud logging ----
+/** GET /inference/logs — the caller's own inference history (engine latency per call). */
+export async function getInferenceLogs(limit = 200): Promise<InferenceLog[]> {
+  const data = await apiFetch<{ logs: InferenceLog[] }>(
+    `/inference/logs?limit=${limit}`,
+    { headers: getAuthHeaders(false) },
+    "Failed to load inference logs",
+  );
+  return data.logs;
+}
+
+// ---- Fraud logging (requires login) ----
 
 export async function logFraudDetection(data: {
   tx_type: string;
@@ -647,71 +409,110 @@ export async function logFraudDetection(data: {
   verdict: string;
   execution_mode?: string;
   latency_ms?: number;
-}): Promise<FraudHistoryRecord | null> {
-  try {
-    const res = await fetch(`${API_BASE}/fraud/log`, {
-      method: "POST",
-      headers: getAuthHeaders(),
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (err) {
-    console.warn("Could not log fraud check to server database:", err);
-    return null;
-  }
+}): Promise<FraudHistoryRecord> {
+  return apiFetch<FraudHistoryRecord>(
+    "/fraud/log",
+    { method: "POST", headers: getAuthHeaders(), body: JSON.stringify(data) },
+    "Failed to log fraud check",
+  );
 }
 
 export async function getFraudHistory(): Promise<FraudHistoryRecord[]> {
-  try {
-    const res = await fetch(`${API_BASE}/fraud/history`);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.history || [];
-  } catch (err) {
-    console.warn("Could not fetch fraud history from server database:", err);
-    return [];
-  }
+  const data = await apiFetch<{ history: FraudHistoryRecord[] }>(
+    "/fraud/history",
+    { headers: getAuthHeaders(false) },
+    "Failed to load fraud history",
+  );
+  return data.history;
 }
 
-// ---- Benchmarks ----
+// ---- Analytics (dashboard) ----
 
-export async function fetchBenchmarks(): Promise<BenchmarkRecord[]> {
-  try {
-    const res = await fetch(`${API_BASE}/benchmarks`);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.benchmarks || [];
-  } catch (err) {
-    console.warn("Could not fetch benchmarks from server database:", err);
-    return [];
-  }
+export async function getInferenceAnalytics(days: number): Promise<InferenceAnalytics> {
+  return apiFetch<InferenceAnalytics>(
+    `/analytics/inference?days=${days}`,
+    { headers: getAuthHeaders(false) },
+    "Failed to load inference analytics",
+  );
 }
 
-export async function logBenchmark(payload: {
-  model_name: string;
-  engine: string;
-  latency_ms: number;
-  memory_mb?: number;
-}): Promise<BenchmarkRecord | null> {
-  try {
-    const res = await fetch(`${API_BASE}/benchmarks`, {
-      method: "POST",
-      headers: getAuthHeaders(),
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (err) {
-    console.warn("Could not log benchmark to server database:", err);
-    return null;
-  }
+export async function getFraudAnalytics(days: number): Promise<FraudAnalytics> {
+  return apiFetch<FraudAnalytics>(
+    `/analytics/fraud?days=${days}`,
+    { headers: getAuthHeaders(false) },
+    "Failed to load fraud analytics",
+  );
 }
 
-// Backward-compatible aliases used in existing pages
-export const fetchModelsFromDB = fetchModels;
-export const deleteModelFromDB = deleteModel;
-export const fetchFraudHistoryFromDB = getFraudHistory;
-export const fetchBenchmarksFromDB = fetchBenchmarks;
-export const logBenchmarkToDB = logBenchmark;
-export const logFraudTxToDB = logFraudDetection;
+export async function getModelUsage(): Promise<ModelUsage[]> {
+  const data = await apiFetch<{ models: ModelUsage[] }>(
+    "/analytics/models",
+    { headers: getAuthHeaders(false) },
+    "Failed to load model usage",
+  );
+  return data.models;
+}
+
+// ---- Benchmarks (static file produced by `python benchmarks/run_all.py`) ----
+
+export type BenchmarkRuntime =
+  | "crucible-native"
+  | "crucible-native-avx2"
+  | "onnxruntime-cpu"
+  | "onnxruntime-cpu-1t"
+  | "pytorch-cpu"
+  | "crucible-wasm";
+
+export interface BenchmarkResult {
+  model: string;
+  input_shape: number[];
+  runtime: BenchmarkRuntime | string;
+  threads: number;
+  status: "ok" | "unsupported";
+  mean_ms: number | null;
+  median_ms: number | null;
+  p95_ms: number | null;
+  min_ms: number | null;
+  std_ms: number | null;
+  throughput_ips: number | null;
+  load_ms: number | null;
+  max_abs_diff_vs_ort: number | null;
+  top1_match: boolean | null;
+  note: string | null;
+}
+
+export interface BenchmarkFile {
+  schema: number;
+  generated_at: string;
+  git_commit: string;
+  environment: {
+    cpu: string;
+    cores: number;
+    os: string;
+    python: string;
+    compiler: string;
+    onnxruntime: string;
+    torch: string | null;
+    crucible_build: string;
+  };
+  methodology: { warmup: number; iterations: number; timer: string; notes: string[] };
+  results: BenchmarkResult[];
+  artifacts: { name: string; bytes: number }[];
+}
+
+/**
+ * Fetch the measured benchmark file shipped with the site. Returns null when
+ * the file has not been generated (HTTP 404 or a non-JSON fallback page).
+ */
+export async function getBenchmarkFile(): Promise<BenchmarkFile | null> {
+  const res = await fetch("/benchmarks/results.json", { cache: "no-store" });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Failed to load /benchmarks/results.json (HTTP ${res.status})`);
+  const type = res.headers.get("content-type") || "";
+  if (!type.includes("json")) return null;
+  const data = (await res.json()) as BenchmarkFile;
+  if (data.schema !== 1 || !Array.isArray(data.results)) {
+    throw new Error(`Unsupported benchmark file schema: ${String(data.schema)}`);
+  }
+  return data;
+}

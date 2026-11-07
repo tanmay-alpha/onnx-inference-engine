@@ -1,4 +1,9 @@
-.PHONY: help install install-server install-web install-engine test test-server test-web test-engine lint format clean db-upgrade db-migrate docker-up docker-down build-all
+.PHONY: help install install-server install-web install-engine submodules test test-server test-web test-engine lint format clean db-upgrade db-migrate docker-up docker-down build-all
+
+# Engine build directory (Release, tests + Python bindings + shared lib).
+ENGINE_BUILD ?= build/release
+PYTHON ?= python
+ENGINE_PY_DIR = $(ENGINE_BUILD)/python
 
 # Default target
 help:
@@ -10,7 +15,7 @@ help:
 	@echo "  make install          Install all dependencies"
 	@echo "  make install-server   Install Python server deps"
 	@echo "  make install-web      Install web frontend deps"
-	@echo "  make install-engine   Build C++ engine (requires CMake)"
+	@echo "  make install-engine   Build C++ engine, bindings, shared lib (CMake)"
 	@echo ""
 	@echo "Development:"
 	@echo "  make dev-server       Run FastAPI dev server (port 8000)"
@@ -19,9 +24,9 @@ help:
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test             Run all tests"
-	@echo "  make test-server      Run Python server tests"
-	@echo "  make test-web         Run web tests"
-	@echo "  make test-engine      Run C++ engine tests"
+	@echo "  make test-server      Run server tests against the native engine"
+	@echo "  make test-web         Type-check + lint the web app"
+	@echo "  make test-engine      Run C++ ctest + Python parity tests vs ORT"
 	@echo ""
 	@echo "Code Quality:"
 	@echo "  make lint             Run all linters"
@@ -42,6 +47,12 @@ help:
 	@echo "  make prepare-data     Prepare fraud detection dataset"
 	@echo "  make train-model      Train fraud detection model"
 	@echo ""
+	@echo "WASM & CLI:"
+	@echo "  make wasm             Build the browser WASM runtime (wasm-pack) into web/public/wasm + wasm/pkg"
+	@echo "  make wasm-fixtures    Regenerate WASM ORT parity fixtures (needs onnx + onnxruntime)"
+	@echo "  make wasm-test        cargo test + clippy (native and wasm32) for wasm/"
+	@echo "  make cli              Build the Rust CLI against the engine shared library"
+	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean            Remove build artifacts"
 
@@ -58,9 +69,15 @@ install-web:
 	cd web && npm install
 	@echo "✓ Web dependencies installed"
 
-install-engine:
-	cd engine && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build . -j$(shell nproc 2>/dev/null || echo 4)
-	@echo "✓ C++ engine built"
+submodules:
+	git submodule update --init --depth 1 engine/third_party/eigen engine/third_party/googletest engine/third_party/pybind11
+
+install-engine: submodules
+	cmake -S engine -B $(ENGINE_BUILD) -DCMAKE_BUILD_TYPE=Release \
+		-DCRUCIBLE_ENABLE_TESTS=ON -DCRUCIBLE_ENABLE_PYTHON_BINDINGS=ON -DCRUCIBLE_BUILD_SHARED=ON \
+		-DPython_EXECUTABLE="$$(command -v $(PYTHON))"
+	cmake --build $(ENGINE_BUILD) --config Release --parallel
+	@echo "✓ C++ engine built in $(ENGINE_BUILD)"
 
 # ─── Development Servers ─────────────────────────────────────────────────────
 
@@ -79,14 +96,15 @@ dev-all:
 test: test-server test-engine
 	@echo "✓ All tests passed"
 
-test-server:
-	cd server && pytest tests/ -v --tb=short
+test-server: install-engine
+	CRUCIBLE_REQUIRE_NATIVE=1 PYTHONPATH="$(ENGINE_PY_DIR):." $(PYTHON) -m pytest server -q
 
 test-web:
 	cd web && npm run type-check && npm run lint
 
-test-engine:
-	cd engine && mkdir -p build && cd build && cmake .. && ctest --output-on-failure
+test-engine: install-engine
+	ctest --test-dir $(ENGINE_BUILD) -C Release --output-on-failure
+	CRUCIBLE_PY_DIR="$(ENGINE_PY_DIR)" $(PYTHON) -m pytest engine/tests/python/test_parity.py -q
 
 test-all:
 	@echo "Running full test suite..."
@@ -150,10 +168,35 @@ build-all: install-engine
 	cd web && npm run build
 	@echo "✓ All builds complete"
 
+# ─── WASM & CLI ──────────────────────────────────────────────────────────────
+
+.PHONY: wasm wasm-fixtures wasm-test cli cli-test
+
+wasm:
+	bash scripts/build-wasm.sh
+
+wasm-fixtures:
+	$(PYTHON) wasm/tests/gen_fixtures.py
+
+wasm-test:
+	cd wasm && cargo test --release
+	cd wasm && cargo clippy --all-targets -- -D warnings
+	cd wasm && cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
+
+# The CLI links libcrucible from $(ENGINE_BUILD) (see cli/build.rs); run it with
+# LD_LIBRARY_PATH=$(ENGINE_BUILD), e.g.
+#   LD_LIBRARY_PATH=build/release cli/target/release/crucible info --model models/resnet18.onnx
+cli: install-engine
+	CRUCIBLE_LIB_DIR=$(abspath $(ENGINE_BUILD)) cargo build --release --manifest-path cli/Cargo.toml
+
+cli-test: install-engine
+	CRUCIBLE_LIB_DIR=$(abspath $(ENGINE_BUILD)) LD_LIBRARY_PATH=$(abspath $(ENGINE_BUILD)) \
+		cargo test --release --manifest-path cli/Cargo.toml
+
 # ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 clean:
-	cd engine && rm -rf build/
+	rm -rf $(ENGINE_BUILD) engine/build/
 	cd server && rm -rf __pycache__ .pytest_cache .mypy_cache alembic/versions/__pycache__/
 	cd web && rm -rf dist .next node_modules/.cache
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

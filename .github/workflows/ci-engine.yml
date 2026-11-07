@@ -1,82 +1,173 @@
-# ci-engine.yml — CMake build + ctest for the C++17 inference engine (Issue #19)
-#
-# Triggers: every push or PR targeting main. The engine CI is the most expensive
-# job because it builds protobuf from source as a submodule. We cache the CMake
-# build directory to keep incremental CI fast.
-#
-# Key decisions:
-#  - ubuntu-latest (24.04): GCC 13 ships with full C++17 support.
-#  - Submodules: checked out recursively so Eigen, protobuf, googletest are present.
-#  - Tests enabled with -DCRUCIBLE_ENABLE_TESTS=ON; benchmarks kept OFF.
-#  - Protobuf is built from the bundled submodule (protobuf_BUILD_TESTS=OFF to
-#    prevent its own 700+ tests from running inside our CI).
+# Engine CI: builds the C++17 engine from source, runs the GoogleTest suite,
+# runs the Python-binding parity tests against onnxruntime, and (Linux only)
+# runs the FastAPI server tests against the real native extension and smokes
+# the Rust CLI over the shared library. Nothing here is skipped when the
+# native build is missing: a missing artifact is a failure.
 
-name: CI — C++ Engine
+name: Engine (native C++ + Python bindings)
 
 on:
   push:
-    branches: [main, 'feature/**']
+    branches: [main]
     paths:
       - 'engine/**'
+      - 'server/**'
+      - 'models/**'
+      - 'cli/**'
+      - '.gitmodules'
       - '.github/workflows/ci-engine.yml'
   pull_request:
-    branches: [main, 'feature/**']
     paths:
       - 'engine/**'
+      - 'server/**'
+      - 'models/**'
+      - 'cli/**'
+      - '.gitmodules'
       - '.github/workflows/ci-engine.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Build and CTest (ubuntu-latest / GCC)
-    runs-on: ubuntu-latest
+  engine:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (GCC, Ninja)
+            os: ubuntu-latest
+            # Single-config generator; -Werror; shared lib for the CLI.
+            cmake_args: >-
+              -G Ninja
+              -DCRUCIBLE_WARNINGS_AS_ERRORS=ON
+              -DCRUCIBLE_BUILD_SHARED=ON
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          - name: Windows (MSVC)
+            os: windows-latest
+            # Default Visual Studio generator (multi-config): artifacts land
+            # in per-config subdirectories, e.g. <build>/python/Release.
+            cmake_args: ''
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_DIR: build/ci
 
     steps:
-      # ── 1. Checkout with all submodules ──────────────────────────────────────
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Checkout
+        uses: actions/checkout@v7
 
-      # ── 2. Install system dependencies ───────────────────────────────────────
-      - name: Install build tools
+      # Only the submodules the build needs. google-benchmark is only used by
+      # CRUCIBLE_ENABLE_BENCHMARKS (off here).
+      - name: Init submodules (eigen, googletest, pybind11)
+        run: |
+          git submodule update --init --depth 1 \
+            engine/third_party/eigen \
+            engine/third_party/googletest \
+            engine/third_party/pybind11
+
+      - name: Set up Python
+        id: py
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            server/requirements.txt
+            server/requirements-dev.txt
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cmake \
-            ninja-build \
-            g++ \
-            pkg-config
+          sudo apt-get install -y --no-install-recommends ninja-build ccache
 
-      # ── 3. Cache the CMake build directory ───────────────────────────────────
-      # Cache key includes CMakeLists.txt hash so a CMake change invalidates it.
-      - name: Cache CMake build
-        uses: actions/cache@v4
+      - name: Cache ccache (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v6
         with:
-          path: engine/build/debug
-          key: cmake-debug-${{ runner.os }}-${{ hashFiles('engine/CMakeLists.txt', 'engine/src/**', 'engine/include/**', 'engine/CMakePresets.json') }}
-          restore-keys: cmake-debug-${{ runner.os }}-
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('engine/**/*.cpp', 'engine/**/*.h', 'engine/**/*.hpp', 'engine/**/CMakeLists.txt') }}
+          restore-keys: ccache-${{ runner.os }}-
 
-      # ── 4. Configure ─────────────────────────────────────────────────────────
-      - name: Configure (Debug + tests)
+      - name: Configure
         run: |
-          cmake \
-            -S engine \
-            -B engine/build/debug \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
+          cmake -S engine -B "$BUILD_DIR" ${{ matrix.cmake_args }} \
+            -DCMAKE_BUILD_TYPE=Release \
             -DCRUCIBLE_ENABLE_TESTS=ON \
+            -DCRUCIBLE_ENABLE_PYTHON_BINDINGS=ON \
             -DCRUCIBLE_ENABLE_BENCHMARKS=OFF \
-            -DCRUCIBLE_ENABLE_PYTHON_BINDINGS=OFF \
-            -Dprotobuf_BUILD_TESTS=OFF \
-            -DBUILD_TESTING=OFF
+            -DPython_EXECUTABLE="${{ steps.py.outputs.python-path }}"
 
-      # ── 5. Build ──────────────────────────────────────────────────────────────
       - name: Build
-        run: cmake --build engine/build/debug --parallel $(nproc)
+        run: cmake --build "$BUILD_DIR" --config Release --parallel 4
 
-      # ── 6. Test ───────────────────────────────────────────────────────────────
-      # Run ctest from the repo root so that relative fixture paths in tests
-      # (e.g. "engine/tests/fixtures/...") resolve correctly. The build
-      # directory is specified via --test-dir.
       - name: CTest
-        run: ctest --test-dir engine/build/debug --output-on-failure --parallel $(nproc)
+        run: ctest --test-dir "$BUILD_DIR" -C Release --output-on-failure --parallel 4
+
+      # Single-config generators put the module in <build>/python, multi-config
+      # (MSVC) in <build>/python/<Config>. Locate it rather than guessing.
+      - name: Locate crucible_py
+        run: |
+          mod=$(find "$BUILD_DIR/python" -maxdepth 2 \( -name 'crucible_py*.so' -o -name 'crucible_py*.pyd' \) | head -n 1)
+          if [ -z "$mod" ]; then
+            echo "::error::crucible_py extension not found under $BUILD_DIR/python"
+            exit 1
+          fi
+          pydir=$(cd "$(dirname "$mod")" && pwd)
+          echo "Found $mod"
+          echo "CRUCIBLE_PY_DIR=$pydir" >> "$GITHUB_ENV"
+
+      - name: Install Python test dependencies
+        run: python -m pip install numpy onnx onnxruntime pytest
+
+      - name: Parity tests vs onnxruntime
+        run: python -m pytest engine/tests/python/test_parity.py -q
+
+      - name: Install server dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: python -m pip install -r server/requirements.txt -r server/requirements-dev.txt
+
+      - name: Server tests against the native engine (Linux)
+        if: runner.os == 'Linux'
+        env:
+          CRUCIBLE_REQUIRE_NATIVE: '1'
+        run: PYTHONPATH="$CRUCIBLE_PY_DIR:." python -m pytest server -q
+
+      - name: Set up Rust (Linux)
+        if: runner.os == 'Linux'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cli/target
+          key: cargo-cli-${{ runner.os }}-${{ hashFiles('cli/Cargo.toml', 'cli/Cargo.lock', 'cli/build.rs') }}
+          restore-keys: cargo-cli-${{ runner.os }}-
+
+      - name: Build CLI against libcrucible (Linux)
+        if: runner.os == 'Linux'
+        run: CRUCIBLE_LIB_DIR="$PWD/$BUILD_DIR" cargo build --release --manifest-path cli/Cargo.toml
+
+      - name: CLI smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: LD_LIBRARY_PATH="$PWD/$BUILD_DIR" ./cli/target/release/crucible info --model models/resnet18.onnx
+
+      - name: CLI tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          CRUCIBLE_LIB_DIR="$PWD/$BUILD_DIR" LD_LIBRARY_PATH="$PWD/$BUILD_DIR" \
+            cargo test --release --manifest-path cli/Cargo.toml

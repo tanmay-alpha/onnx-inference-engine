@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -10,6 +10,8 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../components/ui/card";
 import { CrucibleLayout } from "../components/crucible/Layout";
+import { BackendOfflineNotice } from "../components/crucible/BackendStatus";
+import { useBackendHealth } from "../lib/use-backend-health";
 
 const loginSchema = z.object({
   email: z.string().min(1, "Email is required").email("Please enter a valid email"),
@@ -20,6 +22,7 @@ type LoginForm = z.infer<typeof loginSchema>;
 
 function LoginPage() {
   const navigate = useNavigate();
+  const health = useBackendHealth();
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -48,6 +51,9 @@ function LoginPage() {
   return (
     <CrucibleLayout>
       <div className="c-auth-page">
+        <div style={{ width: "100%", maxWidth: 560 }}>
+          <BackendOfflineNotice health={health} onRetry={health.recheck} />
+        </div>
         <Card className="c-auth-card">
           <CardHeader className="c-auth-header">
             <div className="c-auth-icon">
@@ -133,6 +139,7 @@ function LoginPage() {
       <style>{`
         .c-auth-page {
           display: flex;
+          flex-direction: column;
           align-items: center;
           justify-content: center;
           min-height: 60vh;
@@ -254,6 +261,7 @@ function LoginPage() {
   );
 }
 
-export const Route = {
+export const Route = createFileRoute("/login")({
+  head: () => ({ meta: [{ title: "Sign in · Crucible" }] }),
   component: LoginPage,
-};
+});

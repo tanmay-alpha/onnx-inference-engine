@@ -1,0 +1,564 @@
+{
+  "schema": 1,
+  "generated_at": "2026-11-07T19:14:51+00:00",
+  "git_commit": "e6d815e",
+  "environment": {
+    "cpu": "Intel(R) Core(TM) i7-14650HX",
+    "cores": 24,
+    "os": "Debian GNU/Linux 12 (bookworm) (kernel 6.18.33.2-microsoft-standard-WSL2)",
+    "python": "3.11.18",
+    "compiler": "c++ (Debian 12.2.0-14+deb12u1) 12.2.0",
+    "onnxruntime": "1.31.1",
+    "torch": "2.14.1+cpu",
+    "crucible_build": "Release '-O3 -DNDEBUG' CRUCIBLE_MARCH_NATIVE=OFF (/build/portable/python); crucible-native-avx2: Release '-O3 -DNDEBUG' CRUCIBLE_MARCH_NATIVE=ON (/build/native/python)"
+  },
+  "methodology": {
+    "warmup": 20,
+    "iterations": 200,
+    "timer": "time.perf_counter per call (Python workers); process.hrtime.bigint per call (Node WASM worker)",
+    "notes": [
+      "Inputs: float32 uniform[0,1) from numpy.random.default_rng(0); identical bytes for every runtime.",
+      "Each runtime runs in its own subprocess, sequentially; nothing else is benchmarked concurrently.",
+      "Timed region is one inference call from the host language, including input/output copies across the binding boundary.",
+      "throughput_ips = batch / median latency.",
+      "cores = logical CPUs visible to the process; 12 physical cores detected (used as ORT default and torch thread count).",
+      "max_abs_diff_vs_ort / top1_match compare the last timed output with onnxruntime-cpu on the same input; top1_match is null for single-column outputs.",
+      "crucible-native is single-threaded; compare it with onnxruntime-cpu-1t for a like-for-like number.",
+      "load_ms: crucible_py.load_model / ORT InferenceSession construction (incl. graph optimisation) / onnx2torch conversion / WASM compile+instantiate.",
+      "Node: v18.20.4.",
+      "Host: Docker Desktop (WSL2 backend) container on a Windows 11 laptop; numbers are host-specific."
+    ]
+  },
+  "results": [
+    {
+      "model": "resnet18",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "onnxruntime-cpu",
+      "threads": 12,
+      "status": "ok",
+      "mean_ms": 7.261849,
+      "median_ms": 7.313981,
+      "p95_ms": 8.056908,
+      "min_ms": 5.850346,
+      "std_ms": 0.544826,
+      "throughput_ips": 136.724446,
+      "load_ms": 573.315,
+      "max_abs_diff_vs_ort": null,
+      "top1_match": null,
+      "note": "parity reference; ORT default SessionOptions (intra_op_num_threads=0 -> one thread per physical core)"
+    },
+    {
+      "model": "resnet18",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "onnxruntime-cpu-1t",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 30.435906,
+      "median_ms": 30.12769,
+      "p95_ms": 33.517795,
+      "min_ms": 28.017192,
+      "std_ms": 1.602952,
+      "throughput_ips": 33.192057,
+      "load_ms": 348.705,
+      "max_abs_diff_vs_ort": 0.0,
+      "top1_match": true,
+      "note": "intra_op=inter_op=1, ORT_SEQUENTIAL"
+    },
+    {
+      "model": "resnet18",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "crucible-native",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 114.333598,
+      "median_ms": 113.393127,
+      "p95_ms": 122.249182,
+      "min_ms": 105.073345,
+      "std_ms": 4.05034,
+      "throughput_ips": 8.818877,
+      "load_ms": 353.651,
+      "max_abs_diff_vs_ort": 7.152557373046875e-06,
+      "top1_match": true,
+      "note": null
+    },
+    {
+      "model": "resnet18",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "crucible-native-avx2",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 47.238224,
+      "median_ms": 46.394337,
+      "p95_ms": 52.012007,
+      "min_ms": 44.006635,
+      "std_ms": 2.317469,
+      "throughput_ips": 21.554355,
+      "load_ms": 336.321,
+      "max_abs_diff_vs_ort": 6.67572021484375e-06,
+      "top1_match": true,
+      "note": null
+    },
+    {
+      "model": "resnet18",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "pytorch-cpu",
+      "threads": 12,
+      "status": "ok",
+      "mean_ms": 15.16872,
+      "median_ms": 15.105591,
+      "p95_ms": 18.966388,
+      "min_ms": 11.598761,
+      "std_ms": 2.112416,
+      "throughput_ips": 66.200654,
+      "load_ms": 928.4,
+      "max_abs_diff_vs_ort": 4.0531158447265625e-06,
+      "top1_match": true,
+      "note": "ONNX opset 7 upgraded to 13 with onnx.version_converter (same weights), then converted with onnx2torch; torch.set_num_threads(12)"
+    },
+    {
+      "model": "resnet18",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "crucible-wasm",
+      "threads": 1,
+      "status": "unsupported",
+      "mean_ms": null,
+      "median_ms": null,
+      "p95_ms": null,
+      "min_ms": null,
+      "std_ms": null,
+      "throughput_ips": null,
+      "load_ms": null,
+      "max_abs_diff_vs_ort": null,
+      "top1_match": null,
+      "note": "runInference threw: Unsupported operator 'BatchNormalization' (WASM runtime supports: Add, MatMul, Relu, Sigmoid, Softmax)"
+    },
+    {
+      "model": "mobilenet_v2",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "onnxruntime-cpu",
+      "threads": 12,
+      "status": "ok",
+      "mean_ms": 2.372723,
+      "median_ms": 2.374593,
+      "p95_ms": 2.821485,
+      "min_ms": 1.851494,
+      "std_ms": 0.270076,
+      "throughput_ips": 421.124799,
+      "load_ms": 157.025,
+      "max_abs_diff_vs_ort": null,
+      "top1_match": null,
+      "note": "parity reference; ORT default SessionOptions (intra_op_num_threads=0 -> one thread per physical core)"
+    },
+    {
+      "model": "mobilenet_v2",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "onnxruntime-cpu-1t",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 8.443688,
+      "median_ms": 8.253594,
+      "p95_ms": 9.887018,
+      "min_ms": 7.501419,
+      "std_ms": 0.767142,
+      "throughput_ips": 121.159332,
+      "load_ms": 113.51,
+      "max_abs_diff_vs_ort": 0.0,
+      "top1_match": true,
+      "note": "intra_op=inter_op=1, ORT_SEQUENTIAL"
+    },
+    {
+      "model": "mobilenet_v2",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "crucible-native",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 56.110327,
+      "median_ms": 55.608837,
+      "p95_ms": 62.275007,
+      "min_ms": 51.034482,
+      "std_ms": 2.997578,
+      "throughput_ips": 17.982753,
+      "load_ms": 95.561,
+      "max_abs_diff_vs_ort": 1.4066696166992188e-05,
+      "top1_match": true,
+      "note": null
+    },
+    {
+      "model": "mobilenet_v2",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "crucible-native-avx2",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 38.742306,
+      "median_ms": 38.103948,
+      "p95_ms": 43.057531,
+      "min_ms": 34.371757,
+      "std_ms": 2.411715,
+      "throughput_ips": 26.244,
+      "load_ms": 103.178,
+      "max_abs_diff_vs_ort": 1.3887882232666016e-05,
+      "top1_match": true,
+      "note": null
+    },
+    {
+      "model": "mobilenet_v2",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "pytorch-cpu",
+      "threads": 12,
+      "status": "ok",
+      "mean_ms": 14.667409,
+      "median_ms": 14.123519,
+      "p95_ms": 18.738195,
+      "min_ms": 10.889738,
+      "std_ms": 2.554292,
+      "throughput_ips": 70.803881,
+      "load_ms": 259.173,
+      "max_abs_diff_vs_ort": 1.2174248695373535e-05,
+      "top1_match": true,
+      "note": "ONNX opset 7 upgraded to 13 with onnx.version_converter (same weights), then converted with onnx2torch; torch.set_num_threads(12)"
+    },
+    {
+      "model": "mobilenet_v2",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "runtime": "crucible-wasm",
+      "threads": 1,
+      "status": "unsupported",
+      "mean_ms": null,
+      "median_ms": null,
+      "p95_ms": null,
+      "min_ms": null,
+      "std_ms": null,
+      "throughput_ips": null,
+      "load_ms": null,
+      "max_abs_diff_vs_ort": null,
+      "top1_match": null,
+      "note": "runInference threw: Unsupported operator 'Conv' (WASM runtime supports: Add, MatMul, Relu, Sigmoid, Softmax)"
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        1,
+        7
+      ],
+      "runtime": "onnxruntime-cpu",
+      "threads": 12,
+      "status": "ok",
+      "mean_ms": 0.01269,
+      "median_ms": 0.011869,
+      "p95_ms": 0.014875,
+      "min_ms": 0.011243,
+      "std_ms": 0.003698,
+      "throughput_ips": 84253.094752,
+      "load_ms": 7.844,
+      "max_abs_diff_vs_ort": null,
+      "top1_match": null,
+      "note": "parity reference; ORT default SessionOptions (intra_op_num_threads=0 -> one thread per physical core)"
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        1,
+        7
+      ],
+      "runtime": "onnxruntime-cpu-1t",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 0.00383,
+      "median_ms": 0.003774,
+      "p95_ms": 0.004356,
+      "min_ms": 0.00325,
+      "std_ms": 0.000485,
+      "throughput_ips": 264970.84575,
+      "load_ms": 5.122,
+      "max_abs_diff_vs_ort": 0.0,
+      "top1_match": null,
+      "note": "intra_op=inter_op=1, ORT_SEQUENTIAL"
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        1,
+        7
+      ],
+      "runtime": "crucible-native",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 0.00212,
+      "median_ms": 0.002012,
+      "p95_ms": 0.002175,
+      "min_ms": 0.001779,
+      "std_ms": 0.001351,
+      "throughput_ips": 497017.869073,
+      "load_ms": 2.474,
+      "max_abs_diff_vs_ort": 9.313225746154785e-09,
+      "top1_match": null,
+      "note": null
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        1,
+        7
+      ],
+      "runtime": "crucible-native-avx2",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 0.002097,
+      "median_ms": 0.001864,
+      "p95_ms": 0.002352,
+      "min_ms": 0.001777,
+      "std_ms": 0.001876,
+      "throughput_ips": 536480.666847,
+      "load_ms": 2.349,
+      "max_abs_diff_vs_ort": 9.313225746154785e-09,
+      "top1_match": null,
+      "note": null
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        1,
+        7
+      ],
+      "runtime": "pytorch-cpu",
+      "threads": 12,
+      "status": "ok",
+      "mean_ms": 0.013067,
+      "median_ms": 0.012815,
+      "p95_ms": 0.016119,
+      "min_ms": 0.011147,
+      "std_ms": 0.001885,
+      "throughput_ips": 78033.554484,
+      "load_ms": 14.272,
+      "max_abs_diff_vs_ort": 9.313225746154785e-09,
+      "top1_match": null,
+      "note": "ONNX converted with onnx2torch; torch.set_num_threads(12)"
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        1,
+        7
+      ],
+      "runtime": "crucible-wasm",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 0.016013,
+      "median_ms": 0.013018,
+      "p95_ms": 0.022683,
+      "min_ms": 0.011422,
+      "std_ms": 0.011927,
+      "throughput_ips": 76816.715317,
+      "load_ms": 2.527,
+      "max_abs_diff_vs_ort": 9.313225746154785e-09,
+      "top1_match": null,
+      "note": "Node v18.20.4; runInference re-parses the model bytes on every call"
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        64,
+        7
+      ],
+      "runtime": "onnxruntime-cpu",
+      "threads": 12,
+      "status": "ok",
+      "mean_ms": 0.006136,
+      "median_ms": 0.006487,
+      "p95_ms": 0.008727,
+      "min_ms": 0.003951,
+      "std_ms": 0.002237,
+      "throughput_ips": 9865125.496977,
+      "load_ms": 7.401,
+      "max_abs_diff_vs_ort": null,
+      "top1_match": null,
+      "note": "parity reference; ORT default SessionOptions (intra_op_num_threads=0 -> one thread per physical core)"
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        64,
+        7
+      ],
+      "runtime": "onnxruntime-cpu-1t",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 0.004445,
+      "median_ms": 0.004173,
+      "p95_ms": 0.006234,
+      "min_ms": 0.003601,
+      "std_ms": 0.001737,
+      "throughput_ips": 15334850.939933,
+      "load_ms": 5.979,
+      "max_abs_diff_vs_ort": 0.0,
+      "top1_match": null,
+      "note": "intra_op=inter_op=1, ORT_SEQUENTIAL"
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        64,
+        7
+      ],
+      "runtime": "crucible-native",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 0.002679,
+      "median_ms": 0.002398,
+      "p95_ms": 0.002893,
+      "min_ms": 0.002252,
+      "std_ms": 0.001965,
+      "throughput_ips": 26688906.242655,
+      "load_ms": 2.799,
+      "max_abs_diff_vs_ort": 5.587935447692871e-08,
+      "top1_match": null,
+      "note": null
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        64,
+        7
+      ],
+      "runtime": "crucible-native-avx2",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 0.0028,
+      "median_ms": 0.002608,
+      "p95_ms": 0.003318,
+      "min_ms": 0.00251,
+      "std_ms": 0.001217,
+      "throughput_ips": 24535174.164724,
+      "load_ms": 2.576,
+      "max_abs_diff_vs_ort": 5.587935447692871e-08,
+      "top1_match": null,
+      "note": null
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        64,
+        7
+      ],
+      "runtime": "pytorch-cpu",
+      "threads": 12,
+      "status": "ok",
+      "mean_ms": 0.013572,
+      "median_ms": 0.013303,
+      "p95_ms": 0.015047,
+      "min_ms": 0.011394,
+      "std_ms": 0.001905,
+      "throughput_ips": 4810944.960267,
+      "load_ms": 13.915,
+      "max_abs_diff_vs_ort": 5.960464477539063e-08,
+      "top1_match": null,
+      "note": "ONNX converted with onnx2torch; torch.set_num_threads(12)"
+    },
+    {
+      "model": "fraud_detector",
+      "input_shape": [
+        64,
+        7
+      ],
+      "runtime": "crucible-wasm",
+      "threads": 1,
+      "status": "ok",
+      "mean_ms": 0.024065,
+      "median_ms": 0.018993,
+      "p95_ms": 0.033788,
+      "min_ms": 0.015938,
+      "std_ms": 0.019241,
+      "throughput_ips": 3369751.217586,
+      "load_ms": 3.165,
+      "max_abs_diff_vs_ort": 5.587935447692871e-08,
+      "top1_match": null,
+      "note": "Node v18.20.4; runInference re-parses the model bytes on every call"
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "crucible_py (portable): crucible_py.cpython-311-x86_64-linux-gnu.so",
+      "bytes": 508400
+    },
+    {
+      "name": "crucible_py (march=native): crucible_py.cpython-311-x86_64-linux-gnu.so",
+      "bytes": 533008
+    },
+    {
+      "name": "crucible C ABI shared library: libcrucible.so",
+      "bytes": 400800
+    },
+    {
+      "name": "crucible-wasm: crucible_wasm_bg.wasm",
+      "bytes": 92155
+    },
+    {
+      "name": "onnxruntime native: onnxruntime_pybind11_state.cpython-311-x86_64-linux-gnu.so",
+      "bytes": 30893160
+    },
+    {
+      "name": "pytorch native: libtorch_cpu.so",
+      "bytes": 438232064
+    }
+  ]
+}

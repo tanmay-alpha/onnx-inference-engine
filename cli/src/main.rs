@@ -1,4 +1,4 @@
-//! Crucible CLI — Issue #15.
+//! Crucible CLI.
 //!
 //! Four subcommands backed by the C ABI in `engine/include/crucible/c_api.h`:
 //!
@@ -7,9 +7,9 @@
 //!   crucible validate   --model mobilenet_v2.onnx
 //!   crucible info       --model mobilenet_v2.onnx
 //!
-//! The first three are the AC-required surface for the plan; `info`
-//! is a small but useful command for sanity-checking a model file
-//! without writing it through inference.
+//! `validate` and `info` only parse the model; `run` and `benchmark` execute
+//! it in the native C++ engine through the shared library (linked at build
+//! time via `CRUCIBLE_LIB_DIR`, see build.rs).
 //!
 //! Exit codes follow the conventional CLI layout:
 //!   0 — success
@@ -24,7 +24,6 @@ mod formatter;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueHint};
 
@@ -59,7 +58,7 @@ enum Command {
               value_parser = parse_positive_usize)]
         top: usize,
 
-        /// Path to a JSON file with class labels (one per line, in
+        /// Path to a text file with class labels (one per line, in
         /// the same order as the output tensor's class axis).
         #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
         labels: Option<PathBuf>,
@@ -74,7 +73,8 @@ enum Command {
         json: bool,
     },
 
-    /// Run a model N times and report latency statistics.
+    /// Time `crucible_run` calls in the native C++ engine (via the C ABI)
+    /// after untimed warmup runs, and report latency statistics.
     Benchmark {
         /// Path to the .onnx model file.
         #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
@@ -127,15 +127,11 @@ fn main() -> ExitCode {
             // "error:" prefix so log scrapers can find them.
             eprintln!("error: {e}");
             // Map our error categories to conventional exit codes.
-            // CrucibleError::LibraryUnavailable is a user error
-            // (build the engine); CrucibleError::Runtime and
-            // CrucibleError::Internal are engine errors.
             match e {
                 runner::CrucibleError::InvalidArgument(_)
                 | runner::CrucibleError::Io(_)
                 | runner::CrucibleError::Parse(_)
-                | runner::CrucibleError::Fs(_)
-                | runner::CrucibleError::LibraryUnavailable(_) => ExitCode::from(1),
+                | runner::CrucibleError::Fs(_)               => ExitCode::from(1),
                 runner::CrucibleError::Runtime(_)
                 | runner::CrucibleError::Unsupported(_)
                 | runner::CrucibleError::Internal(_)         => ExitCode::from(2),
@@ -246,51 +242,52 @@ fn cmd_bench(
 ) -> Result<(), runner::CrucibleError> {
     let model = runner::Model::load(model_path)?;
     let input = runner::Tensor::from_json_file(input_path)?;
+    let inputs = std::slice::from_ref(&input);
 
-    // Warmup.
+    // Untimed warmup.
     for _ in 0..warmup {
-        let _ = model.run(std::slice::from_ref(&input))?;
+        model.run(inputs)?;
     }
-    // Timed.
+    // Timed: only the crucible_run FFI call is inside the timer.
     let mut samples_ms: Vec<f64> = Vec::with_capacity(runs);
     for _ in 0..runs {
-        let t0 = Instant::now();
-        let _ = model.run(std::slice::from_ref(&input))?;
-        let dt = t0.elapsed();
+        let (_, dt) = model.run_timed(inputs)?;
         samples_ms.push(dt.as_secs_f64() * 1000.0);
     }
-    let (mean, median, p95, p99, mn, mx) = compute_stats(&samples_ms);
+    let report = formatter::BenchReport {
+        model: model_path,
+        input_shape: &input.shape,
+        warmup,
+        runs,
+        stats: compute_stats(&samples_ms),
+    };
     if json {
-        let v = formatter::format_bench_json(runs, mean, median, p95, p99, mn, mx);
-        let json_str = serde_json::to_string_pretty(&v)
-            .map_err(|e| runner::CrucibleError::Parse(format!("JSON serialization failed: {e}")))?;
+        let json_str = serde_json::to_string_pretty(&formatter::format_bench_json(&report))
+            .map_err(|e| runner::CrucibleError::Internal(format!("JSON serialization failed: {e}")))?;
         println!("{json_str}");
     } else {
-        print!("{}", formatter::format_bench_text(runs, mean, median, p95, p99, mn, mx));
+        print!("{}", formatter::format_bench_text(&report));
         formatter::flush();
     }
     Ok(())
 }
 
-fn compute_stats(samples: &[f64]) -> (f64, f64, f64, f64, f64, f64) {
-    if samples.is_empty() { return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0); }
+fn compute_stats(samples: &[f64]) -> formatter::BenchStats {
     let mut s: Vec<f64> = samples.iter().filter(|v| !v.is_nan()).copied().collect();
     if s.is_empty() {
-        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        return formatter::BenchStats::default();
     }
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    s.sort_by(f64::total_cmp);
     let n = s.len();
-    let mean   = s.iter().sum::<f64>() / n as f64;
-    let median = if n.is_multiple_of(2) {
-        (s[n / 2 - 1] + s[n / 2]) / 2.0
-    } else {
-        s[n / 2]
-    };
-    let p95    = s[((n as f64 * 0.95).floor() as usize).min(n - 1)];
-    let p99    = s[((n as f64 * 0.99).floor() as usize).min(n - 1)];
-    let mn     = s[0];
-    let mx     = s[n - 1];
-    (mean, median, p95, p99, mn, mx)
+    let pct = |p: f64| s[((n as f64 * p).floor() as usize).min(n - 1)];
+    formatter::BenchStats {
+        mean_ms:   s.iter().sum::<f64>() / n as f64,
+        median_ms: if n.is_multiple_of(2) { (s[n / 2 - 1] + s[n / 2]) / 2.0 } else { s[n / 2] },
+        p95_ms:    pct(0.95),
+        p99_ms:    pct(0.99),
+        min_ms:    s[0],
+        max_ms:    s[n - 1],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +295,8 @@ fn compute_stats(samples: &[f64]) -> (f64, f64, f64, f64, f64, f64) {
 // ---------------------------------------------------------------------------
 
 fn cmd_validate(model_path: &Path) -> Result<(), runner::CrucibleError> {
-    let info = runner::validate_model(model_path)?;
+    let model = runner::Model::load(model_path)?;
+    let info = model.info()?;
     print!("{}", formatter::format_validate_text(model_path, &info));
     formatter::flush();
     Ok(())

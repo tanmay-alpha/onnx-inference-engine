@@ -48,9 +48,10 @@ function ArchitecturePage() {
             How Crucible runs a model.
           </h1>
           <p className="c-muted">
-            Two implementations of the same engine — native C++17 for benchmarks and embedded
-            targets, and a Rust reimplementation compiled to WebAssembly for the browser. Same
-            graph, same operator semantics, same numeric output on the fixed test set.
+            Two separate runtimes. The native C++17 engine (20 ONNX operators, Eigen) runs CNNs such
+            as ResNet18 and MobileNetV2 behind the FastAPI server and is checked against ONNX
+            Runtime. A much smaller Rust interpreter (5 operators) is compiled to WebAssembly so the
+            fraud model can be scored in the browser. They share the approach, not the code.
           </p>
         </div>
 
@@ -66,10 +67,10 @@ function ArchitecturePage() {
             aria-label="Request pipeline"
           >
             {[
-              { x: 20, label: "React page", sub: "src/app/fraud" },
+              { x: 20, label: "React page", sub: "routes/fraud.tsx" },
               { x: 200, label: "crucible-wasm.ts", sub: "TS wrapper" },
               { x: 400, label: "WASM bindings", sub: "wasm-bindgen" },
-              { x: 620, label: "Rust engine", sub: "kernels + scheduler" },
+              { x: 620, label: "Rust runtime", sub: "parse + 5 kernels" },
               { x: 810, label: "Score", sub: "f32 out" },
             ].map((s, i, arr) => (
               <g key={s.label}>
@@ -225,34 +226,39 @@ while ready not empty:
 
         {/* ---------- Two builds ---------- */}
         <div className="c-rule left">
-          <span className="num">03</span> · Two builds, one engine
+          <span className="num">03</span> · Two runtimes
         </div>
         <div className="c-spec">
           <div className="c-spec-row">
             <div className="k">native core</div>
-            <div className="v">C++17 · Eigen for GEMM · im2col conv · pthreads optional</div>
-          </div>
-          <div className="c-spec-row">
-            <div className="k">wasm build</div>
             <div className="v">
-              Rust reimplementation · wasm-simd128 · no Eigen · wasm-bindgen glue
+              C++17 · Eigen GEMM · im2col conv · 20 ONNX ops · Python, C ABI and HTTP interfaces
             </div>
           </div>
           <div className="c-spec-row">
-            <div className="k">shared</div>
+            <div className="k">wasm runtime</div>
             <div className="v">
-              Same ONNX decoder shape · same operator set · same fixed-seed golden tests
+              Separate pure-Rust interpreter · MatMul, Add, Relu, Sigmoid, Softmax · one float32
+              input · wasm-bindgen glue
             </div>
           </div>
           <div className="c-spec-row">
-            <div className="k">parity</div>
+            <div className="k">in common</div>
             <div className="v">
-              Kernels compared bit-for-bit on the fraud model's calibration inputs
+              Hand-written protobuf decoding · Kahn topological ordering · explicit rejection of
+              unsupported ops
             </div>
           </div>
           <div className="c-spec-row">
-            <div className="k">binary size</div>
-            <div className="v">Native ≈ 1.4 MB · WASM ≈ 3.1 MB after wasm-opt --O3</div>
+            <div className="k">verification</div>
+            <div className="v">
+              Native: 70 parity cases against ONNX Runtime (incl. ResNet18, MobileNetV2). WASM: Rust
+              unit tests; no automated native↔WASM parity check yet
+            </div>
+          </div>
+          <div className="c-spec-row">
+            <div className="k">wasm binary</div>
+            <div className="v">under 100 KB (crucible_wasm_bg.wasm, wasm-pack release build)</div>
           </div>
         </div>
 
@@ -261,7 +267,7 @@ while ready not empty:
             Inspect the graph <ArrowRight size={14} />
           </Link>
           <Link to="/benchmark" className="c-btn c-btn-secondary">
-            See both builds benchmarked
+            See measured benchmarks
           </Link>
         </div>
       </section>

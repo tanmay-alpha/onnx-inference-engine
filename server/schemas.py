@@ -1,272 +1,174 @@
-"""Pydantic v2 request/response models for the Crucible FastAPI server.
-
-Why Pydantic v2 (not v1)?
-    The plan calls for v2 explicitly ("FastAPI with Pydantic v2 only
-    (no v1 compat)"). v2 is roughly 5-50x faster than v1 on most
-    workloads because validation runs in a Rust core. The migration
-    from v1 idioms that would normally bite us (Config class ->
-    ConfigDict, validator decorators -> @field_validator) is small
-    enough that the perf win is worth it.
-
-Why we keep the model classes tiny?
-    Pydantic v2 errors include a `loc` tuple that pinpoints the
-    exact field that failed. The smaller each model is, the more
-    useful that pointer is to the API consumer.
-"""
+"""Pydantic v2 request/response models for the Crucible server API."""
 from __future__ import annotations
 
-import math
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-# ---------------------------------------------------------------------------
-# /convert — multipart upload, so the request isn't a Pydantic model.
-# We still expose the response model for OpenAPI docs.
-# ---------------------------------------------------------------------------
 class _Base(BaseModel):
-    """Common Pydantic v2 base.
-
-    Why protected_namespaces=()?
-        Pydantic v2 reserves the `model_` prefix to prevent collisions
-        with its own private attrs (`model_dump`, `model_copy`, etc.).
-        The Crucible API has `model_id`, `model_file`, `model_path`
-        as public fields, which trips the warning. The empty tuple
-        disables the reservation; the names are unambiguous because
-        Crucible's own code never calls `.model_dump` on a request
-        model.
-    """
+    # Fields such as model_id / model_file would otherwise trip Pydantic's
+    # reserved "model_" namespace warning.
     model_config = ConfigDict(protected_namespaces=())
 
 
-class ConvertResponse(_Base):
-    """Response from POST /convert.
+class TensorSpec(_Base):
+    name: str
+    shape: Optional[List[int]] = Field(..., description="Dims; -1 = dynamic; null = unknown rank")
+    dtype: str = Field(..., description="e.g. float32, int64")
 
-    The server saves the converted ONNX under /tmp/models/<uuid>.onnx
-    and returns its id. Clients use that id in subsequent /infer and
-    /validate calls.
 
-    Note: the filesystem path is intentionally omitted from the response
-    for security — the server may store models outside the web root.
-    """
-    onnx_model_id: str = Field(
-        ..., description="UUID identifying the saved ONNX model"
+class ModelAnalysisFields(_Base):
+    opset: Optional[int] = Field(..., description="Default-domain opset, if declared")
+    operators_used: List[str] = Field(..., description="Distinct op_types, first-appearance order")
+    all_supported: bool = Field(..., description="True iff the engine reports no blocking issue")
+    unsupported_ops: List[str] = Field(default_factory=list)
+    unsupported_reasons: List[str] = Field(
+        default_factory=list, description="Human-readable reasons the model cannot run on Crucible"
     )
-    operators_used: List[str] = Field(
-        ..., description="Distinct op_type strings in the graph, "
-                          "in first-appearance order"
-    )
-    all_supported: bool = Field(
-        ..., description="True iff every op in operators_used is in the "
-                         "Crucible executor's dispatch table"
-    )
-    unsupported_ops: List[str] = Field(
-        default_factory=list,
-        description="ops_used \\ supported set. Empty iff all_supported."
-    )
+    inputs: List[TensorSpec]
+    outputs: List[TensorSpec]
 
 
 # ---------------------------------------------------------------------------
-# /infer — pure JSON body.
+# /convert, /validate, /models
+# ---------------------------------------------------------------------------
+class ConvertResponse(ModelAnalysisFields):
+    onnx_model_id: str = Field(..., description="Id of the stored model (owned by the caller)")
+    name: str
+    size_bytes: int
+
+
+class ValidateResponse(_Base):
+    valid: bool = Field(..., description="Same as all_supported")
+    operators: List[str]
+    unsupported: List[str] = Field(default_factory=list)
+    unsupported_reasons: List[str] = Field(default_factory=list)
+    opset: Optional[int] = None
+    inputs: List[TensorSpec] = Field(default_factory=list)
+    outputs: List[TensorSpec] = Field(default_factory=list)
+
+
+class ModelItem(ModelAnalysisFields):
+    id: str
+    name: str
+    size_bytes: int
+    created_at: str
+
+
+class ModelListResponse(_Base):
+    models: List[ModelItem]
+    count: int
+
+
+# ---------------------------------------------------------------------------
+# /infer
 # ---------------------------------------------------------------------------
 class InferRequest(_Base):
-    """Request body for POST /infer.
-
-    `input` is a flat list of floats; the client is expected to send
-    the model in row-major order matching `input_shape`. We accept a
-    flat list (not a nested list) so the wire format is stable across
-    model dims and JSON encoders — the cost is one reshape on the
-    server.
-    """
-    model_id: str = Field(..., description="UUID returned by /convert")
-    input: List[float] = Field(
-        ..., description="Flattened float32 input array, row-major. "
-                          "NaN and +/-Infinity are rejected."
-    )
-    input_shape: List[int] = Field(
-        ..., description="Reshape target, e.g. [1, 3, 224, 224]"
-    )
-
-    @field_validator("input")
-    @classmethod
-    def _validate_input_finite(cls, v: List[float]) -> List[float]:
-        """Reject NaN/Inf — they would propagate through the C++ engine
-        and produce undefined numerical results."""
-        for i, x in enumerate(v):
-            if math.isnan(x) or math.isinf(x):
-                raise ValueError(
-                    f"input[{i}] is not a finite number (NaN/Inf rejected)")
-        return v
+    model_id: str = Field(..., description="Id returned by /convert")
+    input: List[float] = Field(..., description="Flattened float32 input, row-major. NaN/Inf rejected.")
+    input_shape: List[int] = Field(..., description="Shape of `input`, e.g. [1, 3, 224, 224]")
 
     @field_validator("input_shape")
     @classmethod
     def _validate_input_shape(cls, v: List[int]) -> List[int]:
         if not v:
             raise ValueError("input_shape must be non-empty")
+        if len(v) > 8:
+            raise ValueError("input_shape rank must be <= 8")
         if any(d <= 0 for d in v):
             raise ValueError("input_shape dims must be positive")
-        # numpy crashes on huge axis sizes; cap at 2**31 to keep the
-        # server from OOMing on a hostile 4-gigabyte-axis request.
         if any(d >= 2**31 for d in v):
             raise ValueError("input_shape dims must be < 2^31")
         return v
 
 
 class InferResponse(_Base):
-    """Response from POST /infer.
-
-    `output` is a flat list, reshapable via `output_shape`.
-    `inference_time_ms` is wall-clock for the C++ run_inference call
-    only — JSON encode/decode is excluded.
-    """
-    output: List[float] = Field(
-        ..., description="Flattened float values serialized as JSON numbers (double precision)"
-    )
-    output_shape: List[int] = Field(
-        ..., description="Reshape target for `output`"
-    )
-    inference_time_ms: float = Field(
-        ..., description="Wall-clock time spent in run_inference, ms"
-    )
-    engine: str = Field(
-        default="crucible-cpp", description="Engine identifier string"
-    )
+    model_id: str
+    output: List[float] = Field(..., description="First model output, flattened")
+    output_shape: List[int]
+    inference_time_ms: float = Field(..., description="Time inside crucible_py.run only (perf_counter)")
+    backend: Literal["crucible-native"] = "crucible-native"
+    engine: Literal["crucible-native"] = "crucible-native"
 
 
-# ---------------------------------------------------------------------------
-# /validate — multipart upload (optional) OR body with model_id.
-# The plan shows /validate as taking no request body, but the natural
-# usage is to validate a model the client already uploaded, so we
-# accept both shapes: pass a file directly, or pass model_id to
-# re-validate a previously uploaded one.
-# ---------------------------------------------------------------------------
-class ValidateResponse(_Base):
-    """Response from POST /validate."""
-    valid: bool = Field(
-        ..., description="True iff every op is in the dispatch table"
-    )
-    operators: List[str] = Field(
-        ..., description="Distinct op_type strings in the graph"
-    )
-    unsupported: List[str] = Field(
-        default_factory=list,
-        description="ops in `operators` but not in the dispatch table"
-    )
+class BatchItemResult(_Base):
+    model_id: str
+    status: Literal["success", "error"]
+    output: Optional[List[float]] = None
+    output_shape: Optional[List[int]] = None
+    inference_time_ms: Optional[float] = None
+    backend: Literal["crucible-native"] = "crucible-native"
+    error: Optional[str] = None
+    status_code: Optional[int] = Field(default=None, description="HTTP status the item would have produced")
+
+
+class BatchResponse(_Base):
+    batch_size: int
+    success_count: int
+    error_count: int
+    results: List[BatchItemResult]
 
 
 # ---------------------------------------------------------------------------
-# /operators — read-only catalogue.
+# /inference/logs
 # ---------------------------------------------------------------------------
-class OperatorsResponse(_Base):
-    """Response from GET /operators.
-
-    `count` is the length of `supported` and is included so clients
-    that paginate the list can verify they got the full set without
-    having to len() it themselves.
-    """
-    supported: List[str] = Field(
-        ..., description="op_type strings Crucible can dispatch"
-    )
-    count: int = Field(
-        ..., description="Length of `supported` (== len(supported))"
-    )
-
-
-# ---------------------------------------------------------------------------
-# /health — tiny liveness probe.
-# ---------------------------------------------------------------------------
-class HealthResponse(_Base):
-    """Response from GET /health."""
-    status: str = Field(default="ok", description="Always 'ok' if responding")
-    engine: str = Field(
-        default="crucible-cpp", description="Engine identifier"
-    )
-    version: str = Field(..., description="Server version string")
-
-
-# ---------------------------------------------------------------------------
-# Error envelope.
-# ---------------------------------------------------------------------------
-# FastAPI's default error response is `{"detail": "..."}` with a
-# HTTPException. We expose a typed model so OpenAPI consumers get
-# a real schema to import, not a free-form string.
-class ErrorResponse(_Base):
-    """Standard error envelope used for 4xx/5xx responses."""
-    detail: str = Field(..., description="Human-readable error message")
-    error_code: Optional[str] = Field(
-        default=None, description="Machine-readable code, e.g. 'MODEL_NOT_FOUND'"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Database Resource Models
-# ---------------------------------------------------------------------------
-class ModelItem(_Base):
-    id: str = Field(..., description="UUID identifying the saved ONNX model")
-    name: str = Field(..., description="Original or display name of the model")
-    file_size_bytes: int = Field(..., description="Model file size in bytes")
-    input_shape: List[int] = Field(..., description="Declared input tensor shape")
-    operators: List[str] = Field(..., description="Operators used in model")
-    all_supported: bool = Field(..., description="Whether all ops are supported")
-    created_at: str = Field(..., description="ISO timestamp when registered")
-
-
-class ModelListResponse(_Base):
-    models: List[ModelItem] = Field(..., description="List of registered models")
-    count: int = Field(..., description="Number of registered models")
-
-
 class InferenceLogItem(_Base):
-    id: str = Field(..., description="Log UUID")
-    model_id: str = Field(..., description="Associated model UUID")
-    input_shape: List[int] = Field(..., description="Input shape used")
-    output_shape: List[int] = Field(..., description="Output shape produced")
-    inference_time_ms: float = Field(..., description="Execution time in ms")
-    engine: str = Field(..., description="Engine used")
-    created_at: str = Field(..., description="ISO timestamp")
+    id: str
+    model_id: str
+    latency_ms: float
+    backend: str
+    input_shape: List[int]
+    output_shape: List[int]
+    status: str
+    created_at: str
 
 
 class InferenceLogListResponse(_Base):
-    logs: List[InferenceLogItem] = Field(..., description="Recent inference logs")
-    count: int = Field(..., description="Log count")
+    logs: List[InferenceLogItem]
+    count: int
 
 
+# ---------------------------------------------------------------------------
+# Public
+# ---------------------------------------------------------------------------
+class OperatorsResponse(_Base):
+    supported: List[str]
+    count: int
+
+
+class HealthResponse(_Base):
+    status: str = "ok"
+    engine: Literal["crucible-native", "unavailable"]
+    native_available: bool
+    version: str
+
+
+class ReadyResponse(HealthResponse):
+    database: bool
+
+
+# ---------------------------------------------------------------------------
+# Fraud check history (scores are computed client-side, e.g. in WASM)
+# ---------------------------------------------------------------------------
 class FraudTxRequest(_Base):
-    tx_type: str = Field(default="", description="Transaction type, e.g. TRANSFER, CASH_OUT")
-    amount: float = Field(default=0.0, description="Transaction amount")
-    orig_before: float = Field(default=0.0, description="Origin balance before transaction")
-    orig_after: float = Field(default=0.0, description="Origin balance after transaction")
-    dest_before: float = Field(default=0.0, description="Destination balance before transaction")
-    dest_after: float = Field(default=0.0, description="Destination balance after transaction")
-    probability: float = Field(default=0.0, description="Predicted fraud probability (0 to 1)")
-    verdict: str = Field(default="", description="Risk verdict, e.g. Low risk, Elevated risk, High risk")
-    execution_mode: str = Field(default="wasm", description="Execution mode, e.g. wasm, server")
-    latency_ms: float = Field(default=0.0, description="Inference latency in ms")
+    tx_type: str = Field(default="", max_length=64)
+    amount: float = 0.0
+    orig_before: float = 0.0
+    orig_after: float = 0.0
+    dest_before: float = 0.0
+    dest_after: float = 0.0
+    probability: float = Field(default=0.0, ge=0.0, le=1.0)
+    verdict: str = Field(default="", max_length=64)
+    execution_mode: str = Field(default="wasm", max_length=32)
+    latency_ms: float = Field(default=0.0, ge=0.0)
 
 
 class FraudTxItem(FraudTxRequest):
-    id: str = Field(..., description="Transaction log UUID")
-    created_at: str = Field(..., description="ISO timestamp")
+    id: str
+    created_at: str
 
 
 class FraudHistoryResponse(_Base):
-    history: List[FraudTxItem] = Field(..., description="Fraud transaction history")
-    count: int = Field(..., description="Count of transaction records")
-
-
-class BenchmarkRequest(_Base):
-    model_name: str = Field(..., description="Model name evaluated")
-    engine: str = Field(..., description="Engine evaluated (e.g. crucible-wasm, onnxruntime)")
-    latency_ms: float = Field(..., description="Mean latency in ms")
-    memory_mb: float = Field(default=0.0, description="Peak memory in MB")
-
-
-class BenchmarkItem(BenchmarkRequest):
-    id: str = Field(..., description="Benchmark record UUID")
-    created_at: str = Field(..., description="ISO timestamp")
-
-
-class BenchmarkListResponse(_Base):
-    benchmarks: List[BenchmarkItem] = Field(..., description="List of benchmark records")
-    count: int = Field(..., description="Benchmark count")
+    history: List[FraudTxItem]
+    count: int

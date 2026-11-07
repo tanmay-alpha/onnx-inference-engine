@@ -37,12 +37,10 @@
 //   (Tensor -> numpy) is the honest cost.
 //
 // The GIL:
-//   Crucible's run_inference is single-threaded and CPU-bound; we do
-//   NOT release the GIL during the call because Python users expect
-//   one inference to be safe to run alongside other Python work
-//   (e.g., preprocessing the next batch). Releasing the GIL here
-//   would require us to also guard tensor_map against concurrent
-//   modification, which Issue #9 deliberately doesn't.
+//   run() copies its inputs into C++ tensors, then releases the GIL for
+//   the duration of run_inference. This is safe because run_inference
+//   never mutates the Model (all per-run state is local), so concurrent
+//   calls on one Model from several Python threads are allowed.
 // =============================================================================
 
 #include <pybind11/pybind11.h>
@@ -187,7 +185,15 @@ PYBIND11_MODULE(crucible_py, m) {
     m.def("run",
         [](const crucible::Model& model, const py::dict& inputs) {
             auto tensor_inputs = dict_to_inputs(inputs);
-            return tensor_to_ndarray(crucible::run_inference(model, tensor_inputs));
+            crucible::Tensor out;
+            {
+                // The Model is read-only during a run and every input has
+                // been copied out of Python memory, so other Python threads
+                // may proceed while the graph executes.
+                py::gil_scoped_release release;
+                out = crucible::run_inference(model, tensor_inputs);
+            }
+            return tensor_to_ndarray(out);
         },
         py::arg("model"), py::arg("inputs"),
         "Run inference with a dict of named numpy array inputs.\n"
@@ -204,11 +210,26 @@ PYBIND11_MODULE(crucible_py, m) {
             std::unordered_map<std::string, crucible::Tensor> inputs;
             inputs.reserve(1);
             inputs.emplace(model.input_names.front(), ndarray_to_tensor(arr));
-            return tensor_to_ndarray(crucible::run_inference(model, inputs));
+            crucible::Tensor out;
+            {
+                py::gil_scoped_release release;
+                out = crucible::run_inference(model, inputs);
+            }
+            return tensor_to_ndarray(out);
         },
         py::arg("model"), py::arg("inputs"),
         "Run inference with a single numpy array input.\n"
         "The array is bound to the model's first declared input.");
+
+    m.def("supported_ops",
+        []() { return crucible::supported_ops(); },
+        "Sorted list of ONNX op_types the native executor implements.");
+
+    m.def("check_model",
+        [](const crucible::Model& model) { return crucible::check_model(model); },
+        py::arg("model"),
+        "Static support check. Returns a list of human-readable reasons the\n"
+        "model cannot run on Crucible (empty list = supported).");
 
     m.def("get_model_info",
         [](const crucible::Model& model) {
@@ -219,15 +240,30 @@ PYBIND11_MODULE(crucible_py, m) {
             py::dict info;
             info["input_names"]      = model.input_names;
             info["output_names"]     = model.output_names;
+            info["opset"]            = model.graph.opset;
             info["num_nodes"]        = static_cast<int64_t>(model.graph.node.size());
             info["num_initializers"] =
                 static_cast<int64_t>(model.graph.weights.size());
             info["num_int_initializers"] =
                 static_cast<int64_t>(model.graph.int_initializers.size());
 
-            // ops_used: set of op_type strings in the order they
-            // first appear. Useful for tooling that wants to know
-            // which Crucible operators must be present.
+            // Declared IO types: shape uses -1 for symbolic/unknown dims;
+            // shape is None when the model declares no shape at all.
+            auto value_infos = [](const std::vector<crucible::ValueInfo>& vis) {
+                py::list out;
+                for (const auto& vi : vis) {
+                    py::dict d;
+                    d["name"] = vi.name;
+                    d["elem_type"] = vi.elem_type;
+                    d["shape"] = vi.has_shape ? py::cast(vi.shape) : py::none();
+                    out.append(d);
+                }
+                return out;
+            };
+            info["inputs"]  = value_infos(model.graph.inputs);
+            info["outputs"] = value_infos(model.graph.outputs);
+
+            // ops_used: op_type strings in first-appearance order.
             std::set<std::string> seen;
             std::vector<std::string> ops;
             ops.reserve(model.graph.node.size());
@@ -240,8 +276,7 @@ PYBIND11_MODULE(crucible_py, m) {
             return info;
         },
         py::arg("model"),
-        "Return a dict of model metadata:\n"
-        "  input_names, output_names, num_nodes, num_initializers,\n"
-        "  num_int_initializers, ops_used (list of op_type strings\n"
-        "  in first-appearance order).");
+        "Return a dict of model metadata: input_names, output_names, opset,\n"
+        "num_nodes, num_initializers, num_int_initializers, inputs/outputs\n"
+        "(list of {name, elem_type, shape}), ops_used (first-appearance order).");
 }

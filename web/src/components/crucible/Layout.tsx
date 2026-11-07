@@ -1,17 +1,17 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Github, Linkedin, Menu, X, LogOut, LogIn } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { logout, getToken } from "../../lib/api";
 
-const GITHUB_URL = "https://github.com/tanmay-alpha/Crucible";
+const GITHUB_URL = "https://github.com/tanmay-alpha/onnx-inference-engine";
 const LINKEDIN_URL = "https://www.linkedin.com/in/tanmaymangal/";
 
 const NAV_ITEMS: { to: string; label: string; auth?: boolean }[] = [
   { to: "/", label: "Home" },
   { to: "/fraud", label: "Fraud Demo" },
   { to: "/playground", label: "Playground" },
-  { to: "/models", label: "Models" },
+  { to: "/models", label: "Models", auth: true },
   { to: "/dashboard", label: "Dashboard", auth: true },
   { to: "/api-keys", label: "API Keys", auth: true },
   { to: "/benchmark", label: "Benchmark" },
@@ -37,9 +37,14 @@ function LogoMark() {
 export function CrucibleLayout({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [menuOpen, setMenuOpen] = useState(false);
-  const [isLoggedIn, setIsLoggedIn] = useState(() => !!localStorage.getItem("crucible_token"));
-  const [userEmail, setUserEmail] = useState(() => localStorage.getItem("crucible_user") || "");
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [userEmail, setUserEmail] = useState("");
 
+  // Read auth state after mount so server render and hydration agree.
+  useEffect(() => {
+    setIsLoggedIn(!!getToken());
+    setUserEmail(localStorage.getItem("crucible_user") || "");
+  }, []);
   const handleLogout = () => {
     logout();
     setIsLoggedIn(false);
@@ -161,8 +166,8 @@ export function CrucibleLayout({ children }: { children: ReactNode }) {
                 CRUCIBLE
               </Link>
               <p className="c-footer-desc">
-                A privacy-first ONNX inference runtime for the browser. A compact fraud model runs
-                locally with WebAssembly — transaction data stays in the tab.
+                A from-scratch ONNX inference engine: a native C++17 core served over HTTP, and a
+                small Rust runtime compiled to WebAssembly for in-browser scoring.
               </p>
             </div>
             <div className="c-footer-col">

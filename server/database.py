@@ -1,32 +1,26 @@
-"""SQLAlchemy async database layer for Crucible Server.
+"""SQLAlchemy database layer for the Crucible server.
 
-Supports both SQLite (development) and PostgreSQL (production) via
-the DATABASE_URL environment variable.
+URLs (``DATABASE_URL``):
+  * ``sqlite+aiosqlite:///./crucible.db`` (development default)
+  * ``postgresql://user:pass@host/db`` — async sessions use asyncpg, the sync
+    CRUD helpers use psycopg2 (both drivers are in requirements.txt).
 
-  Development:  DATABASE_URL=sqlite+aiosqlite:///./crucible.db
-  Production:   DATABASE_URL=postgresql+asyncpg://user:pass@host/dbname
+Auth endpoints use async sessions; the CRUD helpers below are synchronous and
+are called from FastAPI threadpool (``def``) endpoints.
 
-ORM Models (imported by alembic/env.py for migrations):
-  users, api_keys, models, inference_logs, fraud_cases, benchmarks
-
-CRUD functions (used by server/main.py and tests):
-  save_model, get_model, list_models, delete_model,
-  log_inference, get_inference_logs,
-  log_fraud_tx, get_fraud_history,
-  log_benchmark, get_benchmarks
+Ownership: models, inference logs and fraud cases carry the owning user id.
+Every read helper takes ``owner_id`` plus ``all_owners`` (True only for the
+operator key) and filters accordingly.
 """
 from __future__ import annotations
 
 import json
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 import uuid
-from datetime import datetime, timezone
-from typing import AsyncGenerator, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from dotenv import load_dotenv
 from sqlalchemy import (
     Boolean,
     Column,
@@ -37,22 +31,23 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    func,
+    case,
     create_engine as create_sync_engine,
+    func,
+    select,
+    text,
 )
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.orm import declarative_base, relationship
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Session, declarative_base, relationship
+
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 Base = declarative_base()
 
 
 # ---------------------------------------------------------------------------
-# ORM Models
+# ORM models
 # ---------------------------------------------------------------------------
 class User(Base):
     __tablename__ = "users"
@@ -68,7 +63,6 @@ class User(Base):
     last_login = Column(DateTime, nullable=True)
 
     api_keys = relationship("ApiKey", back_populates="user", cascade="all, delete-orphan")
-    fraud_cases = relationship("FraudCase", back_populates="reviewer")
 
 
 class ApiKey(Base):
@@ -77,6 +71,7 @@ class ApiKey(Base):
     id = Column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     key_hash = Column(String(64), unique=True, nullable=False, index=True)
+    key_prefix = Column(String(16), nullable=True)
     name = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     rate_limit = Column(Integer, default=100, nullable=False)
@@ -98,16 +93,16 @@ class ModelRecord(Base):
     file_path = Column(String, nullable=False)
     file_size = Column(Integer, nullable=False, default=0)
     version = Column(String(50), nullable=False, default="1.0.0")
-    input_schema = Column(Text, nullable=True)
-    output_schema = Column(Text, nullable=True)
-    metadata_json = Column(Text, nullable=True)
+    input_schema = Column(Text, nullable=True)   # JSON list of {name, shape, dtype}
+    output_schema = Column(Text, nullable=True)  # JSON list of {name, shape, dtype}
+    metadata_json = Column(Text, nullable=True)  # JSON analysis (opset, reasons, ...)
     is_active = Column(Boolean, default=True, nullable=False)
     created_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     last_used = Column(DateTime, nullable=True)
     usage_count = Column(Integer, default=0, nullable=False)
-    operators_supported = Column(Text, nullable=True)
+    operators_supported = Column(Text, nullable=True)  # comma-separated ops used
 
     inference_logs = relationship("InferenceLog", back_populates="model", cascade="all, delete-orphan")
 
@@ -139,65 +134,53 @@ class FraudCase(Base):
     __tablename__ = "fraud_cases"
 
     id = Column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     inference_log_id = Column(String(36), nullable=True)
     transaction_id = Column(String(100), unique=True, nullable=False, index=True)
     amount = Column(Float, nullable=False)
     fraud_probability = Column(Float, nullable=False)
     is_fraud = Column(Boolean, nullable=False, index=True)
     risk_level = Column(String(20), nullable=False, default="low", index=True)
-    features = Column(Text, nullable=True)
+    features = Column(Text, nullable=True)  # JSON of the submitted transaction fields
     reviewed = Column(Boolean, default=False, nullable=False)
     reviewed_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     review_notes = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
     reviewed_at = Column(DateTime, nullable=True)
 
-    reviewer = relationship("User", back_populates="fraud_cases")
-
-
-class Benchmark(Base):
-    __tablename__ = "benchmarks"
-
-    id = Column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
-    model_name = Column(String(255), nullable=False)
-    engine = Column(String(100), nullable=False, index=True)
-    latency_ms = Column(Float, nullable=False)
-    memory_mb = Column(Float, nullable=True)
-    device = Column(String(50), nullable=True)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
-
 
 # ---------------------------------------------------------------------------
-# Database URL
+# Engines
 # ---------------------------------------------------------------------------
 def _get_database_url() -> str:
-    """Resolve the database URL from environment settings.
-
-    Priority: CRUCIBLE_DB_PATH (test fixture) > DATABASE_URL > default.
-    """
+    """CRUCIBLE_DB_PATH (tests) > DATABASE_URL. Returns the async URL."""
     from server.config import get_settings
-    settings = get_settings()
 
     db_path = os.environ.get("CRUCIBLE_DB_PATH")
-    if db_path:
-        url = f"sqlite+aiosqlite:///{db_path}"
-    else:
-        url = settings.DATABASE_URL
-
-    # Allow plain "postgresql://" from tools that don't add the async driver
-    if url.startswith("postgresql://") and "+asyncpg" not in url:
-        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    url = f"sqlite+aiosqlite:///{db_path}" if db_path else get_settings().DATABASE_URL
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+    elif url.startswith("postgresql+psycopg2://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql+psycopg2://"):]
+    elif url.startswith("sqlite:///"):
+        url = "sqlite+aiosqlite:///" + url[len("sqlite:///"):]
     return url
 
 
-# ---------------------------------------------------------------------------
-# Engine + Session (async)
-# ---------------------------------------------------------------------------
+def _sync_url(async_url: str) -> str:
+    if async_url.startswith("postgresql+asyncpg://"):
+        return "postgresql+psycopg2://" + async_url[len("postgresql+asyncpg://"):]
+    return async_url.replace("+aiosqlite", "")
+
+
 _engine = None
 _async_session_factory = None
+_sync_engine = None
 
 
-def _prep_name_func():
+def _prep_name_func() -> str:
     return f"__asyncpg_stmt_{uuid.uuid4().hex}__"
 
 
@@ -206,43 +189,33 @@ def get_engine():
     global _engine
     if _engine is None:
         from server.config import get_settings
-        settings = get_settings()
+
         url = _get_database_url()
-        connect_args = {}
-        pool_kwargs = {}
-        if "postgresql" in url:
-            # Supabase / production PostgreSQL pool settings
-            pool_kwargs["pool_size"] = 5
-            pool_kwargs["max_overflow"] = 10
-            pool_kwargs["pool_timeout"] = 30
-            pool_kwargs["pool_recycle"] = 1800
+        connect_args: Dict[str, Any] = {}
+        pool_kwargs: Dict[str, Any] = {}
+        if url.startswith("postgresql"):
+            cache = get_settings().DB_STATEMENT_CACHE_SIZE
+            pool_kwargs.update(pool_size=5, max_overflow=10, pool_timeout=30, pool_recycle=1800)
             connect_args = {
-                "statement_cache_size": settings.DB_STATEMENT_CACHE_SIZE,
-                "prepared_statement_cache_size": settings.DB_STATEMENT_CACHE_SIZE,
+                "statement_cache_size": cache,
+                "prepared_statement_cache_size": cache,
                 "prepared_statement_name_func": _prep_name_func,
             }
-        _engine = create_async_engine(
-            url, echo=False, future=True, connect_args=connect_args, **pool_kwargs
-        )
+        _engine = create_async_engine(url, future=True, connect_args=connect_args, **pool_kwargs)
     return _engine
 
 
 def get_session_factory():
-    """Lazy-create the async session factory."""
     global _async_session_factory
     if _async_session_factory is None:
         _async_session_factory = async_sessionmaker(
-            bind=get_engine(),
-            class_=AsyncSession,
-            expire_on_commit=False,
+            bind=get_engine(), class_=AsyncSession, expire_on_commit=False
         )
     return _async_session_factory
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency: yield an async DB session."""
-    factory = get_session_factory()
-    async with factory() as session:
+    async with get_session_factory()() as session:
         try:
             yield session
             await session.commit()
@@ -251,468 +224,371 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-def init_db() -> None:
-    """Create all tables (development only — use Alembic in production)."""
-    from sqlalchemy import text
-    engine = _get_sync_engine()
-    Base.metadata.create_all(engine)
-    with engine.connect() as conn:
-        try:
-            conn.execute(text("ALTER TABLE inference_logs ADD COLUMN engine VARCHAR(100) DEFAULT 'unknown'"))
-            conn.commit()
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Sync helpers (used by tests and sync CRUD endpoints)
-# ---------------------------------------------------------------------------
-_sync_engine = None
-
-
 def _get_sync_engine():
-    """Lazy-create a synchronous engine for CRUD queries."""
     global _sync_engine
     if _sync_engine is None:
-        url = _get_database_url()
-        sync_url = url.replace("+aiosqlite", "").replace("+asyncpg", "").replace("+psycopg2", "")
-        _sync_engine = create_sync_engine(sync_url, echo=False, future=True)
+        url = _sync_url(_get_database_url())
+        kwargs: Dict[str, Any] = {"pool_pre_ping": True} if url.startswith("postgresql") else {}
+        _sync_engine = create_sync_engine(url, future=True, **kwargs)
     return _sync_engine
 
 
 def reset_engine() -> None:
-    """Reset engine state (used by test fixtures)."""
+    """Drop cached engines (test fixtures switch databases)."""
     global _engine, _sync_engine, _async_session_factory
     _engine = None
     _sync_engine = None
     _async_session_factory = None
 
 
+# Columns added after the initial schema; ALTERed into pre-existing
+# development databases (Alembic handles production).
+_LATE_COLUMNS = (
+    ("inference_logs", "engine", "VARCHAR(100) DEFAULT 'unknown'"),
+    ("api_keys", "key_prefix", "VARCHAR(16)"),
+    ("fraud_cases", "user_id", "VARCHAR(36)"),
+)
+
+
+def init_db() -> None:
+    """Create missing tables/columns (development convenience; use Alembic in production)."""
+    engine = _get_sync_engine()
+    Base.metadata.create_all(engine)
+    for table, column, ddl in _LATE_COLUMNS:
+        with engine.connect() as conn:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+                conn.commit()
+            except Exception:  # noqa: BLE001 - column already exists
+                conn.rollback()
+
+
+def ping() -> bool:
+    """True if the database answers ``SELECT 1``."""
+    try:
+        with _get_sync_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ---------------------------------------------------------------------------
-# CRUD — Models (sync, used by main.py sync endpoints)
+# Helpers
+# ---------------------------------------------------------------------------
+def _json_or(val: Optional[str], default: Any) -> Any:
+    if not val:
+        return default
+    try:
+        return json.loads(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    return dt.isoformat() if dt else None
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _scoped(query, column, owner_id: Optional[str], all_owners: bool):
+    return query if all_owners else query.where(column == owner_id)
+
+
+# ---------------------------------------------------------------------------
+# Models
 # ---------------------------------------------------------------------------
 def save_model(
+    *,
     model_id: str,
     name: str,
     file_path: str,
-    file_size_bytes: int = 0,
-    input_shape: Optional[List[int]] = None,
-    operators: Optional[List[str]] = None,
-    all_supported: bool = True,
+    size_bytes: int,
+    owner_id: Optional[str],
+    opset: Optional[int],
+    operators_used: List[str],
+    unsupported_ops: List[str],
+    unsupported_reasons: List[str],
+    all_supported: bool,
+    inputs: List[Dict[str, Any]],
+    outputs: List[Dict[str, Any]],
+    native_checked: bool,
 ) -> str:
-    """Persist a model record. Returns the model_id."""
-    from sqlalchemy.orm import Session
-
-    engine = _get_sync_engine()
-    with Session(engine) as session:
-        rec = ModelRecord(
+    meta = {
+        "opset": opset,
+        "operators_used": operators_used,
+        "unsupported_ops": unsupported_ops,
+        "unsupported_reasons": unsupported_reasons,
+        "all_supported": all_supported,
+        "native_checked": native_checked,
+    }
+    with Session(_get_sync_engine()) as session:
+        session.add(ModelRecord(
             id=model_id,
             name=name,
             file_path=file_path,
-            file_size=file_size_bytes,
-            input_schema=str(input_shape) if input_shape else None,
-            metadata_json=str({"operators": operators or [], "all_supported": all_supported}),
-            operators_supported=",".join(operators or []),
+            file_size=size_bytes,
+            input_schema=json.dumps(inputs),
+            output_schema=json.dumps(outputs),
+            metadata_json=json.dumps(meta),
+            operators_supported=",".join(operators_used),
+            created_by=owner_id,
             usage_count=0,
-        )
-        session.add(rec)
+        ))
         session.commit()
     return model_id
 
 
-def _parse_shape(val: Optional[str]) -> List[int]:
-    if not val:
-        return []
-    try:
-        parsed = json.loads(val)
-        if isinstance(parsed, dict):
-            return parsed.get("shape", [])
-        if isinstance(parsed, list):
-            return [int(x) for x in parsed]
-    except Exception:
-        pass
-    return []
+def _model_dict(rec: ModelRecord) -> Dict[str, Any]:
+    meta = _json_or(rec.metadata_json, {})
+    if not isinstance(meta, dict):
+        meta = {}
+    ops = meta.get("operators_used") or (rec.operators_supported.split(",") if rec.operators_supported else [])
+    return {
+        "id": rec.id,
+        "name": rec.name,
+        "size_bytes": rec.file_size,
+        "created_at": _iso(rec.created_at) or "",
+        "opset": meta.get("opset"),
+        "operators_used": ops,
+        "all_supported": bool(meta.get("all_supported", False)),
+        "unsupported_ops": meta.get("unsupported_ops", []),
+        "unsupported_reasons": meta.get("unsupported_reasons", []),
+        "native_checked": bool(meta.get("native_checked", False)),
+        "inputs": _json_or(rec.input_schema, []),
+        "outputs": _json_or(rec.output_schema, []),
+        "file_path": rec.file_path,
+        "created_by": rec.created_by,
+        "usage_count": rec.usage_count,
+        "last_used": _iso(rec.last_used),
+    }
 
 
-def get_model(model_id: str) -> Optional[dict]:
-    """Return a model record as a dict, or None."""
-    from sqlalchemy import select
-    from sqlalchemy.orm import Session
-
-    engine = _get_sync_engine()
-    with Session(engine) as session:
-        result = session.execute(select(ModelRecord).where(ModelRecord.id == model_id))
-        rec = result.scalar_one_or_none()
-        if rec is None:
-            return None
-        return {
-            "id": rec.id,
-            "name": rec.name,
-            "description": rec.description,
-            "model_type": rec.model_type,
-            "framework": rec.framework,
-            "file_path": rec.file_path,
-            "file_size_bytes": rec.file_size,
-            "version": rec.version,
-            "input_shape": _parse_shape(rec.input_schema),
-            "output_shape": _parse_shape(rec.output_schema),
-            "is_active": rec.is_active,
-            "created_by": rec.created_by,
-            "created_at": rec.created_at.isoformat() if rec.created_at else "",
-            "updated_at": rec.updated_at.isoformat() if rec.updated_at else "",
-            "last_used": rec.last_used.isoformat() if rec.last_used else None,
-            "usage_count": rec.usage_count,
-            "operators": rec.operators_supported.split(",") if rec.operators_supported else [],
-            "all_supported": len(rec.operators_supported.split(",")) > 0 if rec.operators_supported else False,
-        }
+def get_model(model_id: str, *, owner_id: Optional[str], all_owners: bool = False) -> Optional[Dict[str, Any]]:
+    """Return the model if it exists and is visible to the caller, else None."""
+    with Session(_get_sync_engine()) as session:
+        q = _scoped(select(ModelRecord).where(ModelRecord.id == model_id),
+                    ModelRecord.created_by, owner_id, all_owners)
+        rec = session.execute(q).scalar_one_or_none()
+        return _model_dict(rec) if rec else None
 
 
-def list_models() -> List[dict]:
-    """Return all model records as dicts."""
-    from sqlalchemy import select
-    from sqlalchemy.orm import Session
-
-    engine = _get_sync_engine()
-    with Session(engine) as session:
-        result = session.execute(
-            select(ModelRecord).order_by(ModelRecord.created_at.desc())
-        )
-        return [
-            {
-                "id": r.id,
-                "name": r.name,
-                "file_path": r.file_path,
-                "file_size_bytes": r.file_size,
-                "input_shape": _parse_shape(r.input_schema),
-                "output_shape": _parse_shape(r.output_schema),
-                "is_active": r.is_active,
-                "created_at": r.created_at.isoformat() if r.created_at else "",
-                "last_used": r.last_used.isoformat() if r.last_used else None,
-                "usage_count": r.usage_count,
-                "operators": r.operators_supported.split(",") if r.operators_supported else [],
-                "all_supported": len(r.operators_supported.split(",")) > 0 if r.operators_supported else False,
-            }
-            for r in result.scalars().all()
-        ]
+def list_models(*, owner_id: Optional[str], all_owners: bool = False) -> List[Dict[str, Any]]:
+    with Session(_get_sync_engine()) as session:
+        q = _scoped(select(ModelRecord), ModelRecord.created_by, owner_id, all_owners)
+        rows = session.execute(q.order_by(ModelRecord.created_at.desc())).scalars().all()
+        return [_model_dict(r) for r in rows]
 
 
 def delete_model(model_id: str) -> bool:
-    """Delete a model record. Returns True if deleted, False if not found."""
-    from sqlalchemy import select, delete as sa_delete
-    from sqlalchemy.orm import Session
-
-    engine = _get_sync_engine()
-    with Session(engine) as session:
-        result = session.execute(
-            select(ModelRecord).where(ModelRecord.id == model_id)
-        )
-        rec = result.scalar_one_or_none()
+    with Session(_get_sync_engine()) as session:
+        rec = session.get(ModelRecord, model_id)
         if rec is None:
             return False
-        session.execute(sa_delete(ModelRecord).where(ModelRecord.id == model_id))
+        session.delete(rec)
         session.commit()
     return True
 
 
 # ---------------------------------------------------------------------------
-# CRUD — Inference Logs
+# Inference logs
 # ---------------------------------------------------------------------------
-def log_inference(model_id: str, input_shape, output_shape,
-                  inference_time_ms: float, engine: str,
-                  status: str = "success", error_message: str = "") -> dict:
-    """Log an inference request. Returns the logged record."""
-    from sqlalchemy import insert
-    from sqlalchemy.orm import Session
-    import uuid as _uuid
-
-    log_id = _uuid.uuid4().hex
-    session = Session(_get_sync_engine())
-    try:
-        session.execute(insert(InferenceLog).values(
+def log_inference(
+    *,
+    model_id: str,
+    user_id: Optional[str],
+    api_key_id: Optional[str],
+    input_shape: List[int],
+    output_shape: Optional[List[int]],
+    latency_ms: float,
+    backend: str,
+    status: str = "success",
+    error_message: Optional[str] = None,
+) -> Dict[str, Any]:
+    log_id = uuid.uuid4().hex
+    with Session(_get_sync_engine()) as session:
+        session.add(InferenceLog(
             id=log_id,
             model_id=model_id,
-            input_shape=str(input_shape) if input_shape else None,
-            output_shape=str(output_shape) if output_shape else None,
-            latency_ms=inference_time_ms,
-            engine=engine,
+            user_id=user_id,
+            api_key_id=api_key_id,
+            input_shape=json.dumps(list(input_shape)),
+            output_shape=json.dumps(list(output_shape)) if output_shape is not None else None,
+            latency_ms=latency_ms,
+            engine=backend,
             status=status,
-            error_message=error_message or None,
+            error_message=error_message,
         ))
+        if status == "success":
+            rec = session.get(ModelRecord, model_id)
+            if rec is not None:
+                rec.usage_count = (rec.usage_count or 0) + 1
+                rec.last_used = _now()
         session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-    return {
-        "id": log_id,
-        "model_id": model_id,
-        "input_shape": list(input_shape) if input_shape else [],
-        "output_shape": list(output_shape) if output_shape else [],
-        "inference_time_ms": inference_time_ms,
-        "engine": engine,
-        "status": status,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
+    return {"id": log_id}
 
 
-def get_inference_logs(model_id: Optional[str] = None, limit: int = 50) -> List[dict]:
-    """Get recent inference logs (sync), optionally filtered by model_id."""
-    from sqlalchemy import select
-    from sqlalchemy.orm import Session
-
-    engine = _get_sync_engine()
-    with Session(engine) as session:
-        query = select(InferenceLog).order_by(InferenceLog.created_at.desc()).limit(limit)
-        if model_id:
-            query = query.where(InferenceLog.model_id == model_id)
-        result = session.execute(query)
-        rows = result.scalars().all()
+def get_inference_logs(*, owner_id: Optional[str], all_owners: bool = False,
+                       limit: int = 50) -> List[Dict[str, Any]]:
+    with Session(_get_sync_engine()) as session:
+        q = _scoped(select(InferenceLog), InferenceLog.user_id, owner_id, all_owners)
+        rows = session.execute(q.order_by(InferenceLog.created_at.desc()).limit(limit)).scalars().all()
         return [
             {
                 "id": r.id,
                 "model_id": r.model_id,
-                "input_shape": json.loads(r.input_shape) if r.input_shape else [],
-                "output_shape": json.loads(r.output_shape) if r.output_shape else [],
-                "inference_time_ms": r.latency_ms,
-                "engine": r.engine,
+                "latency_ms": r.latency_ms,
+                "backend": r.engine,
+                "input_shape": _json_or(r.input_shape, []),
+                "output_shape": _json_or(r.output_shape, []),
                 "status": r.status,
-                "error_message": r.error_message,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "created_at": _iso(r.created_at) or "",
             }
             for r in rows
         ]
 
 
 # ---------------------------------------------------------------------------
-# CRUD — Fraud Transactions
+# Fraud checks (results of client-side/WASM scoring submitted by the user)
 # ---------------------------------------------------------------------------
-def log_fraud_tx(
-    tx_type: str = "",
-    amount: float = 0.0,
-    orig_before: float = 0.0,
-    orig_after: float = 0.0,
-    dest_before: float = 0.0,
-    dest_after: float = 0.0,
-    probability: float = 0.0,
-    verdict: str = "",
-    execution_mode: str = "wasm",
-    latency_ms: float = 0.0,
-    transaction_id: str = "",
-    is_fraud: bool = False,
-    risk_level: str = "low",
-    inference_log_id: str = "",
-    features: str = "",
-) -> dict:
-    """Log a fraud detection result."""
-    from sqlalchemy import insert
-    from sqlalchemy.orm import Session
+_FRAUD_FIELDS = ("tx_type", "orig_before", "orig_after", "dest_before", "dest_after",
+                 "verdict", "execution_mode", "latency_ms")
 
+
+def _risk_level(verdict: str) -> str:
+    v = verdict.lower()
+    if "high" in v:
+        return "high"
+    if "elevated" in v or "medium" in v:
+        return "medium"
+    return "low"
+
+
+def log_fraud_tx(*, user_id: Optional[str], tx_type: str, amount: float, orig_before: float,
+                 orig_after: float, dest_before: float, dest_after: float, probability: float,
+                 verdict: str, execution_mode: str, latency_ms: float) -> Dict[str, Any]:
     case_id = uuid.uuid4().hex
-    tx_id = transaction_id or f"tx-{case_id}"
-    session = Session(_get_sync_engine())
-    try:
-        session.execute(insert(FraudCase).values(
+    fields = {
+        "tx_type": tx_type, "orig_before": orig_before, "orig_after": orig_after,
+        "dest_before": dest_before, "dest_after": dest_after, "verdict": verdict,
+        "execution_mode": execution_mode, "latency_ms": latency_ms,
+    }
+    risk = _risk_level(verdict)
+    with Session(_get_sync_engine()) as session:
+        rec = FraudCase(
             id=case_id,
-            transaction_id=tx_id,
-            inference_log_id=inference_log_id or None,
+            user_id=user_id,
+            transaction_id=f"tx-{case_id}",
             amount=amount,
             fraud_probability=probability,
-            is_fraud=is_fraud,
-            risk_level=risk_level,
-            features=features or None,
-        ))
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-    return {
-        "id": case_id,
-        "transaction_id": tx_id,
-        "amount": amount,
-        "fraud_probability": probability,
-        "probability": probability,
-        "is_fraud": is_fraud,
-        "risk_level": risk_level,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def get_fraud_history(limit: int = 50) -> List[dict]:
-    """Get fraud detection history (sync)."""
-    from sqlalchemy import select
-    from sqlalchemy.orm import Session
-
-    engine = _get_sync_engine()
-    with Session(engine) as session:
-        query = select(FraudCase).order_by(FraudCase.created_at.desc()).limit(limit)
-        result = session.execute(query)
-        rows = result.scalars().all()
-        return [
-            {
-                "id": r.id,
-                "transaction_id": r.transaction_id,
-                "amount": r.amount,
-                "fraud_probability": r.fraud_probability,
-                "is_fraud": r.is_fraud,
-                "risk_level": r.risk_level,
-                "reviewed": r.reviewed,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-            }
-            for r in rows
-        ]
-
-
-# ---------------------------------------------------------------------------
-# CRUD — Benchmarks
-# ---------------------------------------------------------------------------
-def log_benchmark(
-    model_name: str,
-    engine: str,
-    latency_ms: float,
-    memory_mb: float = 0.0,
-    device: str = "cpu",
-) -> dict:
-    """Record a benchmark result."""
-    from sqlalchemy import insert
-    from sqlalchemy.orm import Session
-
-    bench_id = uuid.uuid4().hex
-    session = Session(_get_sync_engine())
-    try:
-        session.execute(insert(Benchmark).values(
-            id=bench_id,
-            model_name=model_name,
-            engine=engine,
-            latency_ms=latency_ms,
-            memory_mb=memory_mb if memory_mb > 0 else None,
-            device=device,
-        ))
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-    return {
-        "id": bench_id,
-        "model_name": model_name,
-        "engine": engine,
-        "latency_ms": latency_ms,
-        "memory_mb": memory_mb,
-        "device": device,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def get_benchmarks(limit: int = 50) -> List[dict]:
-    """Get benchmark history (sync)."""
-    from sqlalchemy import select
-    from sqlalchemy.orm import Session
-
-    engine = _get_sync_engine()
-    with Session(engine) as session:
-        query = select(Benchmark).order_by(Benchmark.created_at.desc()).limit(limit)
-        result = session.execute(query)
-        rows = result.scalars().all()
-        return [
-            {
-                "id": r.id,
-                "model_name": r.model_name,
-                "engine": r.engine,
-                "latency_ms": r.latency_ms,
-                "memory_mb": r.memory_mb,
-                "device": r.device,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-            }
-            for r in rows
-        ]
-
-
-# ---------------------------------------------------------------------------
-# Supabase Client & Storage helpers
-# ---------------------------------------------------------------------------
-
-_supabase_client = None
-
-
-def get_supabase_client():
-    """Return a lazy-initialized Supabase client instance.
-
-    Uses SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY from settings.
-    The service-role key is used for server-side operations (bypasses RLS).
-    """
-    global _supabase_client
-    if _supabase_client is None:
-        from server.config import get_settings
-        settings = get_settings()
-        try:
-            from supabase import create_client
-        except ImportError:
-            raise ImportError(
-                "The 'supabase' package is required for Supabase integration. "
-                "Install it with: pip install supabase"
-            )
-        _supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
-    return _supabase_client
-
-
-def upload_model_to_storage(bucket: str, path: str, file_bytes: bytes) -> str:
-    """Upload a model file to Supabase Storage and return the public URL.
-
-    Args:
-        bucket:    Supabase Storage bucket name.
-        path:      Destination path within the bucket (e.g. "fraud_model.onnx").
-        file_bytes: Raw file content to upload.
-
-    Returns:
-        Public URL of the uploaded file.
-    """
-    client = get_supabase_client()
-    try:
-        response = client.storage.from_(bucket).upload(
-            path,
-            file_bytes,
-            file_options={"content-type": "application/octet-stream", "upsert": "true"},
+            is_fraud=risk == "high",
+            risk_level=risk,
+            features=json.dumps(fields),
         )
-    except Exception as exc:
-        raise RuntimeError(f"Failed to upload '{path}' to Supabase Storage bucket '{bucket}': {exc}") from exc
-
-    # Retrieve the public URL
-    try:
-        url_result = client.storage.from_(bucket).get_public_url(path)
-        public_url = url_result if isinstance(url_result, str) else url_result.get("publicUrl", "")
-    except Exception as exc:
-        raise RuntimeError(f"Failed to get public URL for '{path}': {exc}") from exc
-
-    if not public_url:
-        raise RuntimeError(f"Supabase returned an empty public URL for '{path}'")
-    return public_url
+        session.add(rec)
+        session.commit()
+        session.refresh(rec)
+        return _fraud_dict(rec)
 
 
-def get_model_from_storage(bucket: str, path: str) -> bytes:
-    """Download a model file from Supabase Storage.
+def _fraud_dict(r: FraudCase) -> Dict[str, Any]:
+    feats = _json_or(r.features, {})
+    if not isinstance(feats, dict):
+        feats = {}
+    out: Dict[str, Any] = {k: feats[k] for k in _FRAUD_FIELDS if k in feats}
+    out.update(id=r.id, amount=r.amount, probability=r.fraud_probability,
+               created_at=_iso(r.created_at) or "")
+    return out
 
-    Args:
-        bucket: Supabase Storage bucket name.
-        path:   Path to the file within the bucket.
 
-    Returns:
-        Raw file bytes.
-    """
-    client = get_supabase_client()
-    try:
-        response = client.storage.from_(bucket).download(path)
-        if isinstance(response, bytes):
-            return response
-        # Newer SDK versions return a StorageFileAPI object with .read()
-        if hasattr(response, "read"):
-            return response.read()
-        # Fallback: already bytes-like
-        return bytes(response)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Failed to download '{path}' from Supabase Storage bucket '{bucket}': {exc}"
-        ) from exc
+def get_fraud_history(*, owner_id: Optional[str], all_owners: bool = False,
+                      limit: int = 50) -> List[Dict[str, Any]]:
+    with Session(_get_sync_engine()) as session:
+        q = _scoped(select(FraudCase), FraudCase.user_id, owner_id, all_owners)
+        rows = session.execute(q.order_by(FraudCase.created_at.desc()).limit(limit)).scalars().all()
+        return [_fraud_dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Analytics (aggregates over the caller's own rows)
+# ---------------------------------------------------------------------------
+def _cutoff(days: int) -> datetime:
+    return _now() - timedelta(days=days)
+
+
+def inference_analytics(*, owner_id: Optional[str], all_owners: bool, days: int) -> List[Dict[str, Any]]:
+    day = func.date(InferenceLog.created_at)
+    q = select(
+        day.label("date"),
+        func.count(InferenceLog.id).label("count"),
+        func.avg(InferenceLog.latency_ms).label("avg_latency"),
+        func.min(InferenceLog.latency_ms).label("min_latency"),
+        func.max(InferenceLog.latency_ms).label("max_latency"),
+    ).where(InferenceLog.created_at >= _cutoff(days), InferenceLog.status == "success")
+    q = _scoped(q, InferenceLog.user_id, owner_id, all_owners).group_by(day).order_by(day)
+    with Session(_get_sync_engine()) as session:
+        rows = session.execute(q).all()
+    return [
+        {
+            "date": str(r.date),
+            "count": int(r.count),
+            "avg_latency_ms": round(float(r.avg_latency), 3) if r.avg_latency is not None else 0,
+            "min_latency_ms": round(float(r.min_latency), 3) if r.min_latency is not None else 0,
+            "max_latency_ms": round(float(r.max_latency), 3) if r.max_latency is not None else 0,
+        }
+        for r in rows
+    ]
+
+
+def fraud_analytics(*, owner_id: Optional[str], all_owners: bool, days: int) -> List[Dict[str, Any]]:
+    day = func.date(FraudCase.created_at)
+    q = select(
+        day.label("date"),
+        func.count(FraudCase.id).label("total"),
+        func.sum(case((FraudCase.is_fraud.is_(True), 1), else_=0)).label("fraud_count"),
+        func.avg(FraudCase.fraud_probability).label("avg_probability"),
+    ).where(FraudCase.created_at >= _cutoff(days))
+    q = _scoped(q, FraudCase.user_id, owner_id, all_owners).group_by(day).order_by(day)
+    with Session(_get_sync_engine()) as session:
+        rows = session.execute(q).all()
+    return [
+        {
+            "date": str(r.date),
+            "total": int(r.total),
+            "fraud_count": int(r.fraud_count or 0),
+            "avg_probability": round(float(r.avg_probability), 4) if r.avg_probability is not None else 0,
+        }
+        for r in rows
+    ]
+
+
+def model_analytics(*, owner_id: Optional[str], all_owners: bool) -> List[Dict[str, Any]]:
+    q = (
+        select(
+            ModelRecord.id,
+            ModelRecord.name,
+            ModelRecord.usage_count,
+            ModelRecord.last_used,
+            func.count(InferenceLog.id).label("inference_count"),
+            func.avg(InferenceLog.latency_ms).label("avg_latency"),
+        )
+        .outerjoin(InferenceLog, (InferenceLog.model_id == ModelRecord.id) & (InferenceLog.status == "success"))
+        .group_by(ModelRecord.id, ModelRecord.name, ModelRecord.usage_count, ModelRecord.last_used)
+        .order_by(ModelRecord.usage_count.desc())
+    )
+    q = _scoped(q, ModelRecord.created_by, owner_id, all_owners)
+    with Session(_get_sync_engine()) as session:
+        rows = session.execute(q).all()
+    return [
+        {
+            "id": r.id,
+            "name": r.name,
+            "usage_count": int(r.usage_count or 0),
+            "inference_count": int(r.inference_count or 0),
+            "avg_latency_ms": round(float(r.avg_latency), 3) if r.avg_latency is not None else 0,
+            "last_used": _iso(r.last_used),
+        }
+        for r in rows
+    ]

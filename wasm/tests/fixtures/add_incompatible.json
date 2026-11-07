@@ -1,0 +1,17 @@
+{
+ "name": "add_incompatible",
+ "model": "add_incompatible.onnx",
+ "input_shape": [
+  2,
+  3
+ ],
+ "input": [
+  0.40023842453956604,
+  0.6580476760864258,
+  0.33037158846855164,
+  -0.29861220717430115,
+  0.6769437193870544,
+  -2.1804862022399902
+ ],
+ "expect_error": "not broadcast-compatible"
+}

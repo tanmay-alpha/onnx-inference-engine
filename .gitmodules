@@ -2,10 +2,6 @@
 	path = engine/third_party/eigen
 	url = https://gitlab.com/libeigen/eigen.git
 	branch = 3.4.0
-[submodule "engine/third_party/protobuf"]
-	path = engine/third_party/protobuf
-	url = https://github.com/protocolbuffers/protobuf.git
-	branch = v21.12
 [submodule "engine/third_party/googletest"]
 	path = engine/third_party/googletest
 	url = https://github.com/google/googletest.git
