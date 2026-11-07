@@ -61,10 +61,27 @@ MaxPool, Relu, Reshape, Sigmoid, Softmax, Tanh. MatMul is rank-2 only.
 * Every inference response carries `backend`, and `inference_time_ms` is engine time measured around the native call (network time is excluded). The web UI measures the HTTP round trip separately.
 * The WASM runtime is a different implementation with a much smaller op set (MatMul, Add, Relu, Sigmoid, Softmax). It runs the fraud model, not the CNNs, and the UI labels it as "Crucible WASM (browser)".
 
+## Running untrusted models
+
+Uploaded `.onnx` files are attacker-controlled, and a 100-byte graph can
+describe terabytes of work. The engine therefore takes per-run limits
+(`RunOptions` / `crucible_py.run(..., max_tensor_elements=, max_total_elements=, timeout_ms=)`),
+which raise `ResourceLimitError` when exceeded:
+
+* **Per-tensor cap:** checked at every tensor allocation, im2col buffer and MatMul/Gemm output.
+* **Total cap:** the sum of all live intermediate tensors.
+* **Wall-clock deadline:** checked between nodes and in the Conv/pooling outer loops. A single large MatMul finishes before the next check.
+* **Bounded loops:** pooling windows are clamped to in-bounds rows and columns, so cost depends on the input size, not on `kernel_shape`.
+* **Parser memory:** the parser is bounds-checked, non-recursive, and reads sub-messages as views into the file buffer, so its peak memory is about 2× the file size.
+
+The API sets all three limits from configuration and adds its own checks:
+upload size, graph node count, per-user quotas, input/output element caps,
+concurrency slots, and login rate limiting.
+
 ## Verification
 
 * `engine/tests/*.cpp`: GoogleTest unit tests per operator, parser, executor.
-* `engine/tests/python/test_parity.py`: builds single-op graphs with `onnx.helper` and runs the real models (fraud MLP, ResNet18, MobileNetV2), comparing against ONNX Runtime CPU. Tolerances are rtol 1e-4 / atol 1e-5 for single ops and rtol 1e-3 / atol 1e-3 plus a top-1 match for full CNNs. The suite fails, rather than skipping, if the native module is missing.
+* `engine/tests/python/test_parity.py`: builds single-op graphs with `onnx.helper` and runs the real models (fraud logistic regression, ResNet18, MobileNetV2), comparing against ONNX Runtime CPU. Tolerances are rtol 1e-4 / atol 1e-5 for single ops and rtol 1e-3 / atol 1e-3 plus a top-1 match for full CNNs. It also covers rejected features and the resource limits. The suite fails, rather than skipping, if the native module is missing.
 * CI (`.github/workflows/ci-engine.yml`) builds the engine and bindings on Linux (GCC) and Windows (MSVC), runs both suites, and runs the server tests against the real native module.
 
 ## Known limitations
