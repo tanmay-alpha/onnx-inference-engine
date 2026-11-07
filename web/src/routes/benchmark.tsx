@@ -38,7 +38,7 @@ const METHODOLOGY_URL =
 
 const RUNTIME_LABEL: Record<string, string> = {
   "crucible-native": "Crucible native (C++)",
-  "crucible-native-avx2": "Crucible native (C++, AVX2)",
+  "crucible-native-avx2": "Crucible native (C++, -march=native)",
   "onnxruntime-cpu": "ONNX Runtime CPU",
   "onnxruntime-cpu-1t": "ONNX Runtime CPU (1 thread)",
   "pytorch-cpu": "PyTorch CPU",
@@ -83,11 +83,15 @@ function groupResults(results: BenchmarkResult[]) {
   return Array.from(groups, ([key, g]) => ({ key, ...g }));
 }
 
-/** Sentence comparing Crucible native with ONNX Runtime, built only from measured medians. */
-function comparison(rows: BenchmarkResult[]): string | null {
+/**
+ * Sentence comparing one Crucible runtime with ONNX Runtime, built only from measured medians.
+ * The headline uses the portable `crucible-native` build that the server and CI ship; the
+ * host-specific `-march=native` build gets its own labelled secondary line.
+ */
+function comparison(rows: BenchmarkResult[], runtime: string): string | null {
   const ok = (rt: string) =>
     rows.find((r) => r.runtime === rt && r.status === "ok" && r.median_ms !== null);
-  const crucible = ok("crucible-native-avx2") ?? ok("crucible-native");
+  const crucible = ok(runtime);
   const ort = ok("onnxruntime-cpu-1t") ?? ok("onnxruntime-cpu");
   if (!crucible || !ort) return null;
   const ratio = crucible.median_ms! / ort.median_ms!;
@@ -269,7 +273,8 @@ function BenchmarkPage() {
             )}
 
             {groups.map((g) => {
-              const summary = comparison(g.rows);
+              const summary = comparison(g.rows, "crucible-native");
+              const avx2 = comparison(g.rows, "crucible-native-avx2");
               return (
                 <div className="c-card" style={{ marginTop: 28 }} key={g.key}>
                   <h3 className="c-h3">
@@ -281,6 +286,12 @@ function BenchmarkPage() {
                   {summary && (
                     <p className="c-muted" style={{ marginTop: 6 }}>
                       {summary}
+                    </p>
+                  )}
+                  {avx2 && (
+                    <p className="c-muted" style={{ marginTop: 4, fontSize: 13 }}>
+                      Host-specific <span className="mono">-march=native</span> build (not shipped):{" "}
+                      {avx2}
                     </p>
                   )}
                   <div style={{ overflowX: "auto" }}>

@@ -1,85 +1,76 @@
-# Fraud Detection Model
+# Fraud model
 
-## Overview
+`fraud_detector.onnx` (195 bytes) is a logistic regression over 7 transaction
+features: three ONNX nodes, `MatMul → Add → Sigmoid`, opset 13. It exists to
+give Crucible a tiny real model to run in the browser demo (`/fraud`), the API
+and the parity tests. It is **not** a validated fraud detector.
 
-The fraud detection model classifies financial transactions as legitimate or fraudulent.
-It is trained on synthetic PaySim-style data and exported to ONNX format for deployment
-in the inference engine.
+## How it was trained
 
-## Features
+`train_fraud_model.py` with no arguments reproduces the committed
+`fraud_detector.onnx` byte for byte, and `model_config.json`:
 
-The model uses the following 30 features derived from each transaction:
-
-| Feature | Description |
-|---------|-------------|
-| `V1` - `V28` | Anonymized principal components from PCA transformation |
-| `Amount` | Transaction amount |
-| `Time` | Seconds elapsed between each transaction and the first transaction in the dataset |
-
-These correspond to the Kaggle CreditCard Fraud Detection dataset schema.
-
-## Model
-
-- **Algorithm**: Gradient Boosting (LightGBM preferred, XGBoost fallback)
-- **ONNX opset**: 13
-- **Threshold**: 0.5 (configurable in `model_config.json`)
-
-## Performance
-
-| Metric | Value |
-|--------|-------|
-| AUC-ROC | ~0.97 (synthetic data) |
-| Precision | ~0.85 |
-| Recall | ~0.75 |
-| F1 Score | ~0.80 |
-
-> Note: Performance metrics are recomputed on each training run and logged to
-> the experiments directory.
-
-## Retraining Schedule
-
-The model should be retrained:
-- Weekly with the latest labeled transaction data
-- Immediately after a significant distribution shift is detected (e.g., fraud pattern change)
-
-To retrain:
 ```bash
-python scripts/retrain_fraud.py --data-path data/processed/transactions.csv
+pip install numpy scikit-learn onnx
+python models/fraud/train_fraud_model.py --out-dir /tmp/fraud   # compare with models/fraud/
 ```
 
-The retraining script will:
-1. Load the latest data from the specified path (or Supabase if configured)
-2. Apply the feature engineering pipeline
-3. Train a new model with current hyperparameters
-4. Compare against the current production model
-5. Promote to registry if the new model outperforms the baseline
+* **Data:** 50,000 synthetic rows from `synthetic_data()` (seed 42, 1.3%
+  fraud). Fraud rows are large transfers that empty the origin account;
+  legitimate rows are small. These are not real transactions.
+* **Split:** first 80% of the shuffled rows train, last 20% test.
+* **Model:** scikit-learn `LogisticRegression(C=1.0, solver="lbfgs", max_iter=300)`.
+* **Export:** the weights are written into a hand-built `MatMul → Add → Sigmoid`
+  graph with `onnx.helper`, so Crucible runs it without the `ai.onnx.ml` operators.
 
-## Configuration
+The script reports a held-out AUC of 1.0. The synthetic classes are separable by
+construction, so that number only shows the script works. It is not an
+accuracy claim.
 
-Training hyperparameters are in `config.yaml`. Key settings:
+### Training on real PaySim data
 
-```yaml
-model_type: "gradient_boosting"
-n_estimators: 200
-max_depth: 5
-learning_rate: 0.1
-test_size: 0.2
-random_state: 42
+Download the PaySim CSV from Kaggle
+([`ealaxi/paysim1`](https://www.kaggle.com/datasets/ealaxi/paysim1)) into
+`models/data/`, then:
+
+```bash
+pip install pandas
+python models/fraud/train_fraud_model.py --paysim-csv models/data/PS_20174392719_1491204439457_log.csv --out-dir /tmp/fraud-paysim
 ```
 
-## Experiment Tracking
+The features, split, model and export are the same. The normalisation
+constants will be different. The WASM runtime hard-codes them, so before
+shipping such a model, copy the new `mean` and `std` into `FRAUD_MEAN` and
+`FRAUD_STD` in `wasm/src/lib.rs`. `--publish` also copies the ONNX file to
+`web/public/models/`. No PaySim-trained model or metric is committed.
 
-Training runs are tracked in `experiments/` via MLflow. Each run includes:
-- Git commit hash
-- Hyperparameters
-- Feature pipeline version
-- Model metrics
-- ONNX artifact
+## Input contract
 
-## Model Artifacts
+Input `input`: float32 `[batch, 7]`. Output `prob`: float32 `[batch, 1]`,
+the fraud probability. The UI treats ≥ 0.5 as fraud (`threshold` in `model_config.json`).
+
+| # | Feature | Browser demo field (`web/src/routes/fraud.tsx`) |
+|---|---------|------------------------------------------------|
+| 0 | `amount` | Amount |
+| 1 | `oldbalanceOrg` | Origin balance before |
+| 2 | `newbalanceOrig` | Origin balance after |
+| 3 | `oldbalanceDest` | Destination balance before |
+| 4 | `newbalanceDest` | Destination balance after |
+| 5 | `type_CASH_OUT` | 1.0 if type is `CASH_OUT`, else 0.0 |
+| 6 | `type_TRANSFER` | 1.0 if type is `TRANSFER`, else 0.0 (`OTHER` sets both to 0) |
+
+The graph takes **normalised** features: `(x - mean[i]) / std[i]`, using the
+training-split `mean`/`std` in `model_config.json`. In the browser,
+`runFraudDetection` (`web/src/lib/crucible-wasm.ts`) passes the raw values
+and one-hot flags to `runFraudModel` (`wasm/src/lib.rs`). That function
+normalises with the same constants (`FRAUD_MEAN`, `FRAUD_STD`) and then runs the
+graph on `[1, 7]`. Callers of the API or CLI pass the raw graph input, so they
+must normalise the features themselves.
+
+## Files
 
 | File | Description |
 |------|-------------|
-| `fraud_detector.onnx` | Current production ONNX model |
-| `model_config.json` | Feature names, scaler parameters, threshold |
-| `registry/fraud_detector-v{N}.onnx` | Versioned model snapshots |
+| `fraud_detector.onnx` | The model. `web/public/models/fraud_detector.onnx` is an identical copy |
+| `model_config.json` | Feature order, normalisation `mean`/`std`, threshold, data source, held-out AUC |
+| `train_fraud_model.py` | Reproduces both files (see above) |

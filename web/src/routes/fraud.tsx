@@ -15,10 +15,11 @@ export const Route = createFileRoute("/fraud")({
         content:
           "Run fraud inference on transactions entirely in-browser via Crucible's WASM ONNX runtime.",
       },
-      { property: "og:title", content: "Privacy-First Fraud Detection · Crucible" },
+      { property: "og:title", content: "In-browser fraud scoring demo · Crucible" },
       {
         property: "og:description",
-        content: "Zero network bytes. Zero data leaks. ML in the tab.",
+        content:
+          "A logistic-regression ONNX model scored in the browser by Crucible's WASM runtime.",
       },
     ],
   }),
@@ -173,7 +174,9 @@ function FraudPage() {
             A mock banking form scored by a small ONNX model (logistic regression: MatMul → Add →
             Sigmoid over 7 normalised features) running in Crucible's Rust WebAssembly runtime. The
             model file is fetched once; scoring happens in this tab and sends nothing over the
-            network.
+            network. The model was trained on synthetic transactions (see{" "}
+            <span className="mono">models/fraud/README.md</span>), so its scores illustrate the
+            runtime, not real fraud risk.
           </p>
         </div>
 

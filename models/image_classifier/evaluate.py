@@ -1,12 +1,12 @@
 """
 Evaluate an exported ONNX image classification model.
 
-Loads the ONNX file, runs a test inference, and verifies output shapes
-and value ranges against expected thresholds.
+Loads the ONNX file in ONNX Runtime, runs one random input, and checks output
+shapes and value ranges. It does not measure accuracy.
 
 Usage:
-    python models/image_classifier/evaluate.py --model mobilenet_v2
-    python models/image_classifier/evaluate.py --model resnet18 --input-size 1,3,224,224
+    python models/image_classifier/evaluate.py --model models/mobilenet_v2.onnx
+    python models/image_classifier/evaluate.py --model models/resnet18.onnx --input-size 1,3,224,224
 
 Or programmatically:
     from image_classifier.evaluate import ImageClassifierEvaluator
